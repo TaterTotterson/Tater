@@ -47,10 +47,8 @@ def _load_size_helpers() -> dict[str, Any]:
         "Any": Any,
         "List": List,
         "re": re,
-        "HYDRA_LLM_PROVIDER_HF_TRANSFORMERS": "hf_transformers",
         "HYDRA_LLM_PROVIDER_LLAMA_CPP": "llama_cpp",
         "HYDRA_LLM_PROVIDER_LLAMA_CPP_REMOTE": "llama_cpp_remote",
-        "HYDRA_LLM_PROVIDER_MLX_LM": "mlx_lm",
         "HYDRA_LLM_PROVIDER_OPENAI_COMPATIBLE": "openai_compatible",
         "HYDRA_LLM_PROVIDER_SPUD_LINK": "spud_link",
     }
@@ -133,14 +131,14 @@ class HuggingFaceModelBrowserLayoutTests(unittest.TestCase):
         self.assertNotIn('class="tm-form-card tm-downloads"', self.component)
         self.assertIn('class="tm-hf-activity"', self.component)
         self.assertIn('v-if="warmup.running && activeDownload" class="tm-hf-current-progress"', self.component)
-        self.assertIn(':value="Number(activeDownload.progress || 0)"', self.component)
+        self.assertIn(':value="downloadProgress(activeDownload)"', self.component)
 
     def test_tater_theme_and_clear_three_step_flow_are_present(self) -> None:
         self.assertIn(".tm-hf-guide::after", self.styles)
         self.assertIn('class="tm-hf-steps"', self.component)
-        self.assertIn("<strong>Runtime</strong>", self.component)
+        self.assertIn("<strong>Find</strong>", self.component)
         self.assertIn("<strong>Choose</strong>", self.component)
-        self.assertIn("<strong>Auto-download</strong>", self.component)
+        self.assertIn("<strong>Download</strong>", self.component)
 
     def test_library_controls_use_a_compact_isolated_toolbar(self) -> None:
         guide_rule = _css_rule(self.styles, ".tm-hf-guide")
@@ -201,6 +199,12 @@ class HuggingFaceModelBrowserLayoutTests(unittest.TestCase):
         self.assertIn('result["queued_count"] = len(targets)', self.app)
         self.assertIn("provider_token = _hf_browser_download_provider(", self.app)
         self.assertIn("provider: normalizeProvider(item.provider)", self.component)
+
+    def test_models_tab_only_offers_llama_cpp_downloads(self) -> None:
+        self.assertIn('{ value: "llama_cpp", label: "llama.cpp / GGUF"', self.component)
+        self.assertNotIn('value: "hf_transformers"', self.component)
+        self.assertNotIn('value: "mlx_lm"', self.component)
+        self.assertIn('reason="models-browser"', self.app)
 
 
 if __name__ == "__main__":

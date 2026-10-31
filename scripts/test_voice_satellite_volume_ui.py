@@ -134,6 +134,39 @@ class VoiceSatelliteVolumeUiTests(unittest.TestCase):
         self.assertIn("values: { volume_percent: value }", component)
         self.assertIn('@change="saveVolume(item)"', component)
 
+    def test_cards_preserve_live_wifi_and_ethernet_transport_state(self) -> None:
+        status = {
+            "clients": {
+                "native:ethernet": {
+                    "source": "tater_native",
+                    "name": "Wired Echo",
+                    "connected": True,
+                    "connection_transport": "ethernet",
+                    "connection_degraded": False,
+                    "connection_note": "Connected by Ethernet on eth0.",
+                    "metadata": {"native_selected": True, "board": "athena"},
+                },
+                "native:rescue": {
+                    "source": "tater_native",
+                    "name": "Rescued Echo",
+                    "connected": True,
+                    "connection_transport": "wifi",
+                    "connection_degraded": True,
+                    "connection_note": "Connected by Wi-Fi rescue; Ethernet path unreachable.",
+                    "metadata": {"native_selected": True, "board": "biscuit"},
+                },
+            }
+        }
+
+        with mock.patch.object(ui_helpers.esphome_runtime, "load_satellite_registry", return_value=[]):
+            items = {item["id"]: item for item in ui_helpers.satellite_item_forms(status)}
+
+        self.assertEqual("ethernet", items["native:ethernet"]["connection_transport"])
+        self.assertFalse(items["native:ethernet"]["connection_degraded"])
+        self.assertEqual("wifi", items["native:rescue"]["connection_transport"])
+        self.assertTrue(items["native:rescue"]["connection_degraded"])
+        self.assertIn("path unreachable", items["native:rescue"]["connection_note"])
+
 
 if __name__ == "__main__":
     unittest.main()

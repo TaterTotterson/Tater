@@ -5,6 +5,7 @@ import type { JsonRow, ModelsSettingsPayload, SettingsMountOptions } from "../ty
 import HuggingFaceModels from "./models/HuggingFaceModels.vue";
 import FaceModels from "./models/FaceModels.vue";
 import IdentityModels from "./models/IdentityModels.vue";
+import ListeningModels from "./models/ListeningModels.vue";
 import LlmModels from "./models/LlmModels.vue";
 import LocalModelApplyProgress from "./models/LocalModelApplyProgress.vue";
 import MediaModelCard from "./models/MediaModelCard.vue";
@@ -24,9 +25,10 @@ const emit = defineEmits<{
 }>();
 
 const tabs = [
-  { id: "huggingface", label: "Hugging Face", short: "Find, download, and remove local models." },
+  { id: "huggingface", label: "Models", short: "Download and remove llama.cpp GGUF models." },
   { id: "routing", label: "LLM", short: "Base servers, Tater Open WebUI, Terminal, Beast roles, and local runtime tuning." },
-  { id: "speech", label: "Speech", short: "Listening, reply voices, announcements, and playback." },
+  { id: "listening", label: "Listening", short: "Speech recognition, processing hardware, VAD, and listening runtime controls." },
+  { id: "speech", label: "Speech", short: "Reply voices, announcements, and playback." },
   { id: "wake", label: "Wake Word", short: "Live wake model, trainer, and STT verification settings." },
   { id: "vision", label: "Vision", short: "Still-image understanding and multimodal runtime." },
   { id: "audio-understanding", label: "Audio & Video", short: "Media understanding for clips and recordings." },
@@ -46,6 +48,7 @@ const wakePanel = ref<InstanceType<typeof WakeWordModels> | null>(null);
 const speakerPanel = ref<InstanceType<typeof IdentityModels> | null>(null);
 const emotionPanel = ref<InstanceType<typeof IdentityModels> | null>(null);
 const speakerSubtab = ref<"people" | "settings">("people");
+const listeningPanel = ref<InstanceType<typeof ListeningModels> | null>(null);
 const speechPanel = ref<InstanceType<typeof SpeechModels> | null>(null);
 const faceStatus = ref<JsonRow>({});
 const modelApplyOpen = ref(false);
@@ -59,7 +62,8 @@ const localModels = computed<JsonRow>(() => draft.local_llm_models && typeof dra
 const actionSpec = computed(() => {
   switch (activeTab.value) {
     case "routing": return { label: "Save & Apply LLM Settings", note: "Saves Base, Tater Open WebUI, Terminal, and Beast routes, then loads selected local models." };
-    case "speech": return { label: "Save Speech Settings", note: "Saves listening, reply, announcement, playback, and native voice-model settings." };
+    case "listening": return { label: "Save Listening Settings", note: "Saves speech recognition, processing hardware, VAD, and listening runtime settings." };
+    case "speech": return { label: "Save Speech Settings", note: "Saves reply voice, announcement, and playback settings." };
     case "wake": return { label: "Apply To All Satellites", note: "Applies the wake model and verification mode together to every connected satellite." };
     case "vision": return { label: "Save & Apply Vision Settings", note: "Saves image understanding and loads the selected local model when needed." };
     case "audio-understanding": return { label: "Save & Apply Audio and Video", note: "Saves both media configurations and loads selected local models." };
@@ -101,6 +105,7 @@ function sync(settings: ModelsSettingsPayload, preserveDirty = false) {
   const dirtySnapshot = { ...dirty };
   Object.keys(draft).forEach((key) => delete draft[key]);
   Object.assign(draft, clone(settings || {}));
+  draft.hydra_llama_cpp_slot_count = Number(draft.hydra_llama_cpp_slot_count || 1) >= 4 ? "4" : "1";
   if (!Object.prototype.hasOwnProperty.call(draft, "hydra_llm_thinking_enabled")) {
     draft.hydra_llm_thinking_enabled = false;
   }
@@ -139,7 +144,7 @@ function select(tab: string) {
 }
 
 function isLocalProvider(value: unknown) {
-  return ["hf_transformers", "llama_cpp", "mlx_lm"].includes(String(value || ""));
+  return String(value || "") === "llama_cpp";
 }
 
 function loadTarget(provider: unknown, model: unknown, extra: JsonRow = {}): JsonRow | null {
@@ -176,9 +181,7 @@ function llmPayload(): JsonRow {
   const primary = servers[0] || {};
   const keys = [
     "hydra_llm_thinking_enabled",
-    "hydra_hf_transformers_context_tokens", "hydra_hf_transformers_device", "hydra_hf_transformers_dtype", "hydra_hf_transformers_device_map", "hydra_hf_transformers_attn_implementation", "hydra_hf_transformers_trust_remote_code",
     "hydra_llama_cpp_context_tokens", "hydra_llama_cpp_mtp_enabled", "hydra_llama_cpp_speculative_method", "hydra_llama_cpp_mtp_draft_tokens", "hydra_llama_cpp_mtp_draft_model", "hydra_llama_cpp_n_batch", "hydra_llama_cpp_n_ubatch", "hydra_llama_cpp_flash_attn", "hydra_llama_cpp_offload_kqv", "hydra_llama_cpp_slot_count",
-    "hydra_mlx_lm_context_tokens", "hydra_mlx_lm_trust_remote_code", "hydra_mlx_lm_lazy_load", "hydra_mlx_engine_prefill_step_size", "hydra_mlx_engine_kv_bits", "hydra_mlx_engine_kv_group_size", "hydra_mlx_engine_quantized_kv_start",
     "spudex_llm_provider", "spudex_llm_host", "spudex_llm_model",
     "tater_open_webui_llm_provider", "tater_open_webui_llm_host", "tater_open_webui_llm_port", "tater_open_webui_llm_model", "tater_open_webui_llm_api_key", "tater_open_webui_llm_llama_cpp_slot",
     "hydra_beast_mode_enabled",
@@ -216,12 +219,20 @@ function validateLlm(): string {
   return "";
 }
 
+const listeningKeys = [
+  "speech_stt_backend", "speech_acceleration", "speech_wyoming_stt_host", "speech_wyoming_stt_port",
+] as const;
+
 const speechKeys = [
-  "speech_stt_backend", "speech_acceleration", "speech_wyoming_stt_host", "speech_wyoming_stt_port", "speech_tts_backend", "speech_tts_model", "speech_tts_voice", "speech_kokoro_output_gain", "speech_pocket_tts_output_gain", "speech_qwen_tts_clone_text", "speech_qwen_tts_language", "speech_qwen_tts_instruct", "speech_omnivoice_tts_clone_text", "speech_omnivoice_tts_language", "speech_omnivoice_tts_instruct", "speech_wyoming_tts_host", "speech_wyoming_tts_port", "speech_wyoming_tts_voice", "speech_openai_tts_base_url", "speech_openai_tts_api_key", "speech_chatterbox_tts_base_url", "speech_chatterbox_tts_voice_mode", "speech_chatterbox_tts_chunk_size", "speech_chatterbox_tts_temperature", "speech_chatterbox_tts_exaggeration", "speech_chatterbox_tts_cfg_weight", "speech_chatterbox_tts_seed", "speech_chatterbox_tts_speed_factor", "speech_chatterbox_tts_language", "speech_chatterbox_tts_streaming_enabled", "speech_announcement_tts_backend", "speech_announcement_tts_model", "speech_announcement_tts_voice", "speech_announcement_kokoro_output_gain", "speech_announcement_pocket_tts_output_gain", "speech_announcement_qwen_tts_clone_text", "speech_announcement_qwen_tts_language", "speech_announcement_qwen_tts_instruct", "speech_announcement_omnivoice_tts_clone_text", "speech_announcement_omnivoice_tts_language", "speech_announcement_omnivoice_tts_instruct", "speech_satellite_ducking_target_percent", "speech_satellite_ducking_attack_ms", "speech_satellite_ducking_release_ms", "speech_announcement_wyoming_tts_host", "speech_announcement_wyoming_tts_port", "speech_announcement_wyoming_tts_voice", "speech_announcement_openai_tts_base_url", "speech_announcement_openai_tts_api_key", "speech_announcement_chatterbox_tts_base_url", "speech_announcement_chatterbox_tts_voice_mode", "speech_announcement_chatterbox_tts_chunk_size", "speech_announcement_chatterbox_tts_temperature", "speech_announcement_chatterbox_tts_exaggeration", "speech_announcement_chatterbox_tts_cfg_weight", "speech_announcement_chatterbox_tts_seed", "speech_announcement_chatterbox_tts_speed_factor", "speech_announcement_chatterbox_tts_language",
-];
+  "speech_tts_backend", "speech_tts_model", "speech_tts_voice", "speech_pocket_tts_output_gain", "speech_tts_clone_text", "speech_qwen_tts_language", "speech_qwen_tts_instruct", "speech_omnivoice_tts_language", "speech_omnivoice_tts_instruct", "speech_wyoming_tts_host", "speech_wyoming_tts_port", "speech_wyoming_tts_voice", "speech_openai_tts_base_url", "speech_openai_tts_api_key", "speech_announcement_tts_backend", "speech_announcement_tts_model", "speech_announcement_tts_voice", "speech_announcement_pocket_tts_output_gain", "speech_announcement_tts_clone_text", "speech_announcement_qwen_tts_language", "speech_announcement_qwen_tts_instruct", "speech_announcement_omnivoice_tts_language", "speech_announcement_omnivoice_tts_instruct", "speech_satellite_ducking_target_percent", "speech_satellite_ducking_attack_ms", "speech_satellite_ducking_release_ms", "speech_announcement_wyoming_tts_host", "speech_announcement_wyoming_tts_port", "speech_announcement_wyoming_tts_voice", "speech_announcement_openai_tts_base_url", "speech_announcement_openai_tts_api_key",
+] as const;
+
+function listeningPayload(): JsonRow {
+  return { ...Object.fromEntries(listeningKeys.map((key) => [key, draft[key]])), esphome_settings: clone(draft.esphome_settings || {}) };
+}
 
 function speechPayload(): JsonRow {
-  return { ...Object.fromEntries(speechKeys.map((key) => [key, draft[key]])), esphome_settings: clone(draft.esphome_settings || {}) };
+  return Object.fromEntries(speechKeys.map((key) => [key, draft[key]]));
 }
 
 function mediaPayload(kinds: Array<"vision" | "audio" | "video">): JsonRow {
@@ -346,7 +357,10 @@ async function runPrimaryAction() {
       result = await saveStatic(llmPayload(), "LLM settings saved and selected local models queued.");
       acceptLocalModelWarmup(result);
     }
-    else if (activeTab.value === "speech") {
+    else if (activeTab.value === "listening") {
+      result = await saveStatic(listeningPayload(), "Listening settings saved.");
+      await listeningPanel.value?.refreshWarmup?.();
+    } else if (activeTab.value === "speech") {
       result = await saveStatic(speechPayload(), "Speech settings saved.");
       await speechPanel.value?.refreshWarmup?.();
     } else if (activeTab.value === "vision") {
@@ -412,22 +426,18 @@ onBeforeUnmount(() => {
 
 <template>
   <section class="tset-resource tmodels-resource tm-native-models">
-    <section class="tv-panel tmodels-hero">
-      <div><span class="tv-eyebrow">Model workspace</span><h2>Models, routing, and local runtimes</h2><p>Every Models area is reactive and has one clear save or apply action at its bottom. Downloads, tests, enrollment, and diagnostics remain beside the item they affect.</p></div>
-      <span class="tv-live-pill"><i />{{ activeSpec.label }}</span>
-    </section>
-
     <nav class="tv-tabs tmodels-tabs" aria-label="Model settings sections">
       <button v-for="tab in tabs" :key="tab.id" type="button" :class="{ active: activeTab === tab.id }" @click="select(tab.id)">{{ tab.label }}</button>
     </nav>
 
-    <div class="tmodels-context"><strong>{{ activeSpec.label }}</strong><span>{{ activeSpec.short }}</span></div>
+    <header class="tmodels-context"><strong>{{ activeSpec.label }}</strong><span>{{ activeSpec.short }}</span></header>
     <div v-if="error" class="tv-notice error" aria-live="polite">{{ error }}</div>
     <div v-if="notice" class="tv-notice" aria-live="polite">{{ notice }}</div>
 
     <HuggingFaceModels v-if="activeTab === 'huggingface'" :local-models="localModels" :endpoints="endpoints" @local-models="updateLocalModels" @notify="(message, tone) => emit('notify', message, tone)" />
     <LlmModels v-else-if="activeTab === 'routing'" :draft="draft" :local-models="localModels" :remote-models-endpoint="endpoints.modelsRemoteLlm" :context-estimate-endpoint="endpoints.modelsContextEstimate" @dirty="markDirty" />
-    <SpeechModels v-else-if="activeTab === 'speech'" ref="speechPanel" :draft="draft" :speech-ui="draft.speech_ui || {}" :announcement-ui="draft.announcement_speech_ui || {}" :voice-model-ui="draft.voice_model_ui || {}" :endpoints="endpoints" @dirty="markDirty" @notify="(message, tone) => emit('notify', message, tone)" />
+    <ListeningModels v-else-if="activeTab === 'listening'" ref="listeningPanel" :draft="draft" :speech-ui="draft.speech_ui || {}" :voice-model-ui="draft.voice_model_ui || {}" :warmup-endpoint="endpoints.modelsSpeechWarmup" @dirty="markDirty" />
+    <SpeechModels v-else-if="activeTab === 'speech'" ref="speechPanel" :draft="draft" :speech-ui="draft.speech_ui || {}" :announcement-ui="draft.announcement_speech_ui || {}" :endpoints="endpoints" @dirty="markDirty" @notify="(message, tone) => emit('notify', message, tone)" />
     <WakeWordModels v-else-if="activeTab === 'wake'" ref="wakePanel" :runtime-endpoint="endpoints.modelsVoiceRuntime" :action-endpoint="endpoints.modelsVoiceAction" @dirty="markDirty" @notify="(message, tone) => emit('notify', message, tone)" />
     <MediaModelCard v-else-if="activeTab === 'vision'" kind="vision" :draft="draft" :local-models="localModels" @dirty="markDirty" />
     <section v-else-if="activeTab === 'audio-understanding'" class="tm-stack"><MediaModelCard kind="audio" :draft="draft" :local-models="localModels" @dirty="markDirty" /><MediaModelCard kind="video" :draft="draft" :local-models="localModels" @dirty="markDirty" /></section>

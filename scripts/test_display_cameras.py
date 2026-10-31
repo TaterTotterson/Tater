@@ -161,6 +161,29 @@ class DisplayCamerasTests(unittest.TestCase):
         self.assertEqual(stream_format, "tater-native-mjpeg")
         self.assertEqual(resolved["integration_id"], "tater_native")
 
+    @patch.object(display_cameras, "get_integration_device_registry", return_value=REGISTRY)
+    @patch.object(
+        native_satellite,
+        "status_snapshot_sync",
+        return_value={
+            "clients": {
+                "native:show-kitchen": {
+                    "connected": True,
+                    "device_name": "Kitchen Show",
+                    "room": "Kitchen",
+                    "capabilities": {"camera_snapshot": True, "camera_stream": True},
+                }
+            }
+        },
+    )
+    def test_echo_screen_camera_directory_excludes_satellites(self, _status, _registry):
+        directory = native_satellite._screen_camera_payload()
+        self.assertEqual(
+            [row["name"] for row in directory["cameras"]],
+            ["Front Door", "Driveway"],
+        )
+        self.assertNotIn("Kitchen Show", [row["name"] for row in directory["cameras"]])
+
     @patch.object(display_cameras, "get_integration_device_registry", return_value={"devices": []})
     @patch.object(
         native_satellite,

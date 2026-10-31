@@ -78,10 +78,10 @@ class PocketTtsNativeRuntimeTests(unittest.TestCase):
                 mock.patch.object(backends, "_pocket_tts_output_gain", return_value=1.0),
             ):
                 first_audio, first_format = backends._synthesize_pocket_tts_sync(
-                    "First message", "default", "alba"
+                    "First message", "default", "/voices/reference.wav"
                 )
                 second_audio, second_format = backends._synthesize_pocket_tts_sync(
-                    "Second message", "default", "alba"
+                    "Second message", "default", "/voices/reference.wav"
                 )
 
         expected = backends._float_audio_to_pcm16_bytes(
@@ -120,7 +120,7 @@ class PocketTtsNativeRuntimeTests(unittest.TestCase):
     def test_cache_clear_removes_prepared_voice_states(self) -> None:
         with vp._pocket_tts_model_lock:
             vp._pocket_tts_model_cache["default"] = object()
-            vp._pocket_tts_voice_state_cache[("default", "alba")] = object()
+            vp._pocket_tts_voice_state_cache[("default", "/voices/reference.wav")] = object()
 
         cleared = backends.clear_tts_model_caches(include_piper=False)
 
@@ -148,10 +148,10 @@ class PocketTtsAnnouncementRuntimeTests(unittest.TestCase):
                 mock.patch.object(speech_tts, "_pocket_tts_output_gain", return_value=1.0),
             ):
                 first_audio, _first_format = speech_tts._synthesize_pocket_tts_sync(
-                    "First announcement", "default", "alba"
+                    "First announcement", "default", "/voices/reference.wav"
                 )
                 second_audio, _second_format = speech_tts._synthesize_pocket_tts_sync(
-                    "Second announcement", "default", "alba"
+                    "Second announcement", "default", "/voices/reference.wav"
                 )
 
         expected = speech_tts._float_audio_to_pcm16_bytes(

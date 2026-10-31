@@ -961,6 +961,72 @@ def _room_temperature_sensor_select_state(current_value: Any = "") -> Dict[str, 
     }
 
 
+def _thermostat_select_state(current_value: Any = "") -> Dict[str, Any]:
+    current = _text(current_value)
+    rows: List[Dict[str, Any]] = []
+    try:
+        from integration_registry import get_integration_device_registry
+
+        registry = get_integration_device_registry(redis_client)
+        for device in registry.get("devices") or []:
+            if not isinstance(device, dict):
+                continue
+            raw_categories = device.get("category_ids") or device.get("capabilities") or []
+            if not isinstance(raw_categories, (list, tuple, set)):
+                raw_categories = [raw_categories]
+            categories = {_lower(value) for value in raw_categories if _text(value)}
+            raw_actions = device.get("actions") or []
+            if not isinstance(raw_actions, (list, tuple, set)):
+                raw_actions = [raw_actions]
+            actions = {
+                _lower(value).replace("-", "_").replace(" ", "_")
+                for value in raw_actions
+                if _text(value)
+            }
+            if "climate" not in categories or not actions.intersection({"set_temperature", "set_hvac_mode"}):
+                continue
+            integration_id = _text(device.get("integration_id"))
+            device_id = _text(device.get("id") or device.get("ref"))
+            if not integration_id or not device_id:
+                continue
+            room = _text(device.get("room") or device.get("area")) or "Unassigned"
+            name = _text(device.get("name") or device.get("display_name") or device.get("friendly_name") or device_id)
+            rows.append(
+                {
+                    "source": integration_id,
+                    "source_label": _integration_source_label(integration_id),
+                    "room": room,
+                    "name": name,
+                    "value": f"{integration_id}::{device_id}",
+                    "label": f"{room} — {name}",
+                }
+            )
+    except Exception:
+        logger.debug("Could not load integrated thermostats", exc_info=True)
+
+    rows.sort(key=lambda row: (_lower(row.get("source_label")), _lower(row.get("room")), _lower(row.get("name"))))
+    known = {_text(row.get("value")) for row in rows}
+    options: List[Dict[str, Any]] = [
+        {"value": "", "label": "Automatic (recommended)"},
+        {"value": "__none__", "label": "None — disable Climate panel"},
+    ]
+    if current and current != "__none__" and current not in known:
+        options.append({"value": current, "label": f"{current} (unavailable)"})
+    grouped: Dict[str, List[Dict[str, str]]] = {}
+    labels: Dict[str, str] = {}
+    for row in rows:
+        source = _text(row.get("source"))
+        grouped.setdefault(source, []).append({"value": _text(row.get("value")), "label": _text(row.get("label"))})
+        labels[source] = _text(row.get("source_label"))
+    for source in sorted(grouped, key=lambda value: _lower(labels.get(value) or value)):
+        options.append({"label": labels.get(source) or _integration_source_label(source), "options": grouped[source]})
+    return {
+        "ready": bool(rows),
+        "options": options,
+        "message": "" if rows else "Connect a thermostat integration to choose a thermostat.",
+    }
+
+
 def _clean_terminal_text(value: Any) -> str:
     text_value = _text(value)
     if not text_value:
@@ -1968,6 +2034,7 @@ def _display_profile_save(selector: str, values: Dict[str, str]) -> None:
         "template": _text(values.get("display_profile_kind")) or "s3box_display",
         "screen_target": _lower(values.get("display_screen_target")),
         "selector": _text(selector),
+        "thermostat": _text(values.get("display_thermostat")),
         "updated_at": time.time(),
         "slots": slots,
     }
@@ -2189,6 +2256,43 @@ def _display_room_temperature_field_rows(
     ]
 
 
+def _display_thermostat_field(
+    current_value: Any,
+    thermostat_select: Dict[str, Any],
+) -> Dict[str, Any]:
+    current = _text(current_value)
+    ready = bool(thermostat_select.get("ready"))
+    message = _text(thermostat_select.get("message"))
+    options = copy.deepcopy(thermostat_select.get("options")) if isinstance(thermostat_select.get("options"), list) else []
+    known_values: Set[str] = set()
+    for option in options:
+        if not isinstance(option, dict):
+            continue
+        if isinstance(option.get("options"), list):
+            known_values.update(
+                _text(row.get("value"))
+                for row in option["options"]
+                if isinstance(row, dict)
+            )
+        elif "value" in option:
+            known_values.add(_text(option.get("value")))
+    if current and current not in known_values:
+        options.insert(2, {"value": current, "label": f"{current} (unavailable)"})
+    return {
+        "key": "thermostat",
+        "label": "Thermostat",
+        "type": "select",
+        "value": current,
+        "options": options,
+        "disabled": False,
+        "description": (
+            "Automatic prefers a thermostat assigned to this satellite's room, then uses the first available thermostat."
+            if ready
+            else message
+        ),
+    }
+
+
 def _display_sensor_slots_from_context(
     context: Dict[str, Any],
     saved_profile: Dict[str, Any],
@@ -2207,6 +2311,7 @@ def _display_sensor_profile_from_context(
     sensor_select: Dict[str, Any],
     room_temperature_select: Dict[str, Any],
     saved_profiles: Dict[str, Dict[str, Any]],
+    thermostat_select: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     profile_kind = _lower(context.get("template_key"))
     if profile_kind not in {"s3box_display", "native_screen"}:
@@ -2227,6 +2332,14 @@ def _display_sensor_profile_from_context(
         else ()
     )
     room_slots = {alias: _text(saved_slots.get(alias)) for alias in room_aliases}
+    thermostat_state = thermostat_select or {
+        "ready": False,
+        "options": [
+            {"value": "", "label": "Automatic (recommended)"},
+            {"value": "__none__", "label": "None — disable Climate panel"},
+        ],
+        "message": "Connect a thermostat integration to choose a thermostat.",
+    }
     target_label = _text(saved_profile.get("target_label"))
     if not target_label:
         target_label = _text(context.get("display_target_label"))
@@ -2252,7 +2365,11 @@ def _display_sensor_profile_from_context(
             ),
             *_display_sensor_field_rows(slots, sensor_select, aliases),
             *(
-                [{"key": "room_temperature_slots_section", "type": "section", "label": "Climate room temperatures", "description": "Choose up to three rooms on Rook or six rooms on Checkers and Crown."}]
+                [
+                    {"key": "thermostat_section", "type": "section", "label": "Climate thermostat", "description": "Choose the thermostat controlled from this satellite's screen."},
+                    _display_thermostat_field(saved_profile.get("thermostat"), thermostat_state),
+                    {"key": "room_temperature_slots_section", "type": "section", "label": "Climate room temperatures", "description": "Choose up to three rooms on Rook or six rooms on other Echo screens."},
+                ]
                 if room_aliases
                 else []
             ),
@@ -2264,6 +2381,7 @@ def _display_sensor_profile_from_context(
 def _display_sensor_profiles_payload(display_contexts: List[Dict[str, Any]]) -> Dict[str, Any]:
     sensor_select = _tater_sensor_select_state("")
     room_temperature_select = _room_temperature_sensor_select_state("")
+    thermostat_select = _thermostat_select_state("")
     saved_profiles = _display_profile_rows_from_store()
     profiles_by_target: Dict[str, Dict[str, Any]] = {}
     attached_saved_targets: Set[str] = set()
@@ -2277,6 +2395,7 @@ def _display_sensor_profiles_payload(display_contexts: List[Dict[str, Any]]) -> 
             sensor_select,
             room_temperature_select,
             saved_profiles,
+            thermostat_select,
         )
         if isinstance(profile, dict) and _text(profile.get("target")):
             saved_target = _text(profile.pop("_saved_target", ""))
@@ -2320,7 +2439,11 @@ def _display_sensor_profiles_payload(display_contexts: List[Dict[str, Any]]) -> 
                     aliases,
                 ),
                 *(
-                    [{"key": "room_temperature_slots_section", "type": "section", "label": "Climate room temperatures", "description": "Choose up to three rooms on Rook or six rooms on Checkers and Crown."}]
+                    [
+                        {"key": "thermostat_section", "type": "section", "label": "Climate thermostat", "description": "Choose the thermostat controlled from this satellite's screen."},
+                        _display_thermostat_field(saved_profile.get("thermostat"), thermostat_select),
+                        {"key": "room_temperature_slots_section", "type": "section", "label": "Climate room temperatures", "description": "Choose up to three rooms on Rook or six rooms on other Echo screens."},
+                    ]
                     if room_aliases
                     else []
                 ),
@@ -2344,8 +2467,8 @@ def _display_sensor_profiles_payload(display_contexts: List[Dict[str, Any]]) -> 
     if not active and profiles:
         active = _text(profiles[0].get("target"))
     return {
-        "ready": bool(sensor_select.get("ready")) or bool(room_temperature_select.get("ready")),
-        "message": _text(sensor_select.get("message") or room_temperature_select.get("message")),
+        "ready": bool(sensor_select.get("ready")) or bool(room_temperature_select.get("ready")) or bool(thermostat_select.get("ready")),
+        "message": _text(sensor_select.get("message") or room_temperature_select.get("message") or thermostat_select.get("message")),
         "profiles": profiles,
         "active_target": active,
     }
@@ -2500,6 +2623,12 @@ def _save_display_sensor_profile(payload: Dict[str, Any]) -> Dict[str, Any]:
     screen_target = _lower(body.get("screen_target"))
     if screen_target in _NATIVE_SCREEN_TARGETS:
         values["display_screen_target"] = screen_target
+    if "thermostat" in slot_source:
+        values["display_thermostat"] = _text(slot_source.get("thermostat"))
+    elif "thermostat" in body:
+        values["display_thermostat"] = _text(body.get("thermostat"))
+    else:
+        values["display_thermostat"] = ""
     for alias, profile_key in _S3BOX_DISPLAY_SLOT_KEYS.items():
         if alias in slot_source:
             values[profile_key] = _text(slot_source.get(alias))
@@ -2550,7 +2679,7 @@ def _save_display_sensor_profile(payload: Dict[str, Any]) -> Dict[str, Any]:
             )
 
     display_name = target_label or (raw_target if raw_target and raw_target != target else target)
-    message = f"Updated display sensors and room temperatures for {display_name}."
+    message = f"Updated display sensors and climate controls for {display_name}."
     if display_name and display_name != target:
         message = f"{message} Device target set to {target}."
     if bool(display_url_result.get("applied")):

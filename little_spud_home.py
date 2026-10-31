@@ -19,6 +19,8 @@ CONTROL_ACTIONS: Dict[str, Tuple[str, ...]] = {
     "climate": ("set_temperature", "set_hvac_mode"),
 }
 
+SATELLITE_THERMOSTAT_DISABLED = "__none__"
+
 _ON_STATES = {"on", "true", "active", "running", "playing", "home", "present", "detected", "motion", "wet"}
 _OFF_STATES = {"off", "false", "inactive", "idle", "paused", "away", "absent", "clear", "dry"}
 _OPEN_STATES = {"open", "opening"}
@@ -93,6 +95,46 @@ def _room_identity(device: Dict[str, Any]) -> Tuple[str, str]:
     name = _text(device.get("room") or device.get("area")) or "Unassigned"
     room_id = _token(device.get("room_id")) or _token(name) or "unassigned"
     return room_id, name
+
+
+def integration_device_ref(device: Dict[str, Any]) -> str:
+    """Return the stable integration/device reference used by satellite settings."""
+    integration_id = _text(device.get("integration_id"))
+    device_id = _text(device.get("id") or device.get("ref"))
+    return f"{integration_id}::{device_id}" if integration_id and device_id else ""
+
+
+def select_satellite_thermostat(
+    registry: Dict[str, Any],
+    *,
+    thermostat_ref: Any = "",
+    preferred_room: Any = "",
+) -> Dict[str, Any] | None:
+    """Select the configured thermostat, or apply Tater's room-aware automatic choice."""
+    selected_ref = _text(thermostat_ref)
+    if selected_ref == SATELLITE_THERMOSTAT_DISABLED:
+        return None
+    devices = [dict(row) for row in (registry.get("devices") or []) if isinstance(row, dict)]
+    thermostats = [
+        row
+        for row in devices
+        if "climate" in _category_ids(row)
+        and _actions(row).intersection(CONTROL_ACTIONS["climate"])
+    ]
+    if selected_ref:
+        return next(
+            (row for row in thermostats if integration_device_ref(row) == selected_ref),
+            None,
+        )
+    preferred = _token(preferred_room)
+    thermostats.sort(
+        key=lambda row: (
+            0 if preferred and preferred in {_room_identity(row)[0], _token(_room_identity(row)[1])} else 1,
+            _room_identity(row)[1].casefold(),
+            _text(row.get("name") or row.get("display_name") or row.get("id")).casefold(),
+        )
+    )
+    return thermostats[0] if thermostats else None
 
 
 def _walk_mappings(value: Any, depth: int = 0) -> Iterable[Dict[str, Any]]:
@@ -766,6 +808,7 @@ def build_satellite_climate_snapshot(
     registry: Dict[str, Any],
     *,
     room_sensor_refs: Iterable[Any] = (),
+    thermostat_ref: Any = "",
     preferred_room: Any = "",
     maximum_rooms: int = 6,
 ) -> Dict[str, Any]:
@@ -776,31 +819,20 @@ def build_satellite_climate_snapshot(
     rows are deliberately opt-in and retain the order chosen in Satellite Settings.
     """
     devices = [dict(row) for row in (registry.get("devices") or []) if isinstance(row, dict)]
-    preferred = _token(preferred_room)
-    thermostats = [
-        row
-        for row in devices
-        if "climate" in _category_ids(row)
-        and _actions(row).intersection(CONTROL_ACTIONS["climate"])
-    ]
-    thermostats.sort(
-        key=lambda row: (
-            0 if preferred and preferred in {_room_identity(row)[0], _token(_room_identity(row)[1])} else 1,
-            _room_identity(row)[1].casefold(),
-            _text(row.get("name") or row.get("display_name") or row.get("id")).casefold(),
-        )
+    thermostat = select_satellite_thermostat(
+        registry,
+        thermostat_ref=thermostat_ref,
+        preferred_room=preferred_room,
     )
-    thermostat = thermostats[0] if thermostats else None
     thermostat_unit = _temperature_unit(thermostat) if thermostat else "F"
     room_id, room_name = _room_identity(thermostat) if thermostat else ("", "")
     actions = _actions(thermostat) if thermostat else set()
 
-    def device_ref(device: Dict[str, Any]) -> str:
-        integration_id = _text(device.get("integration_id"))
-        device_id = _text(device.get("id") or device.get("ref"))
-        return f"{integration_id}::{device_id}" if integration_id and device_id else ""
-
-    devices_by_ref = {device_ref(row): row for row in devices if device_ref(row)}
+    devices_by_ref = {
+        integration_device_ref(row): row
+        for row in devices
+        if integration_device_ref(row)
+    }
     room_temperatures: List[Dict[str, Any]] = []
     seen_refs: set[str] = set()
     for raw_ref in room_sensor_refs:

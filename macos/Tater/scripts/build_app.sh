@@ -18,7 +18,6 @@ LLAMA_CPP_REPO="${TATER_LLAMA_CPP_REPO:-https://github.com/ggml-org/llama.cpp.gi
 LLAMA_CPP_REF="${TATER_LLAMA_CPP_REF:-master}"
 NATIVE_BUILD_DIR="${PROJECT_DIR}/build/native"
 LLAMA_CPP_DIR="${TATER_MACOS_LLAMA_CPP_DIR:-${NATIVE_BUILD_DIR}/llama.cpp}"
-MLX_ENGINE_DIR="${TATER_MACOS_MLX_ENGINE_DIR:-${NATIVE_BUILD_DIR}/mlx-engine}"
 MACOS_DEPLOYMENT_TARGET="${TATER_MACOS_DEPLOYMENT_TARGET:-15.0}"
 AIRPLAY_CLI_VERSION="0.4.12"
 AIRPLAY_CLI_MACOS_ARM64_SHA256="87cc9f230969d0c0047b909e4a16451d906864c0056581347031c23fa040f1a8"
@@ -245,32 +244,6 @@ prepare_bundled_llama_cpp_runtime() {
   DYLD_LIBRARY_PATH="${bundled_bin}${DYLD_LIBRARY_PATH:+:${DYLD_LIBRARY_PATH}}" "${bundled_bin}/llama-server" --version >/dev/null
 }
 
-prepare_bundled_mlx_engine_runtime() {
-  if [ "${TATER_BUNDLE_MLX_ENGINE:-1}" = "0" ]; then
-    return
-  fi
-  if [ "$(uname -s 2>/dev/null || printf unknown)" != "Darwin" ] || [ "$(uname -m 2>/dev/null || printf unknown)" != "arm64" ]; then
-    return
-  fi
-  command -v git >/dev/null 2>&1 || { printf 'git is required to prepare bundled MLX engine runtime.\n' >&2; exit 1; }
-
-  mkdir -p "${NATIVE_BUILD_DIR}"
-  if [ ! -d "${MLX_ENGINE_DIR}/.git" ]; then
-    clone_with_retries "${MLX_ENGINE_DIR}" git clone --depth 1 https://github.com/lmstudio-ai/mlx-engine.git
-  else
-    run_with_retries git -C "${MLX_ENGINE_DIR}" pull --ff-only
-  fi
-
-  bundled_engine="${NATIVE_RESOURCES_DIR}/mlx-engine"
-  rm -rf "${bundled_engine}"
-  rsync -a \
-    --exclude='/.git/' \
-    --exclude='__pycache__/' \
-    --exclude='*.pyc' \
-    "${MLX_ENGINE_DIR}/" "${bundled_engine}/"
-  test -d "${bundled_engine}/mlx_engine"
-}
-
 copy_macos_airplay_libraries() {
   airplay_root="$1"
   airplay_bin_dir="${airplay_root}/bin"
@@ -425,7 +398,6 @@ verify_macos_deployment_targets() {
 }
 
 prepare_bundled_llama_cpp_runtime
-prepare_bundled_mlx_engine_runtime
 prepare_bundled_airplay_runtime
 verify_macos_deployment_targets
 

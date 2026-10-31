@@ -71,7 +71,6 @@ import verba_registry
 from verba_settings import get_verba_enabled
 from hydra import run_hydra_turn, resolve_agent_limits
 from speech_settings import (
-    DEFAULT_CHATTERBOX_LOCAL_TTS_MODEL,
     DEFAULT_OMNIVOICE_TTS_MODEL,
     DEFAULT_QWEN_TTS_MODEL,
     get_speech_settings as get_shared_speech_settings,
@@ -94,8 +93,6 @@ from .conversation import (
 from .backends import (
     clear_stt_model_caches,
     clear_tts_model_caches,
-    _chatterbox_tts_request,
-    _iter_chatterbox_tts_stream_response,
     _iter_native_tts_stream_response,
     _iter_openai_compatible_tts_stream_response,
     _iter_wyoming_tts_stream_response,
@@ -107,7 +104,6 @@ from .backends import (
     _load_qwen3_asr_llama_cpp_server,
     _load_vosk_model,
     _native_local_partial_stt_task,
-    _open_chatterbox_tts_stream_response,
     _open_openai_compatible_tts_stream_response,
     _native_synthesize_text,
     _native_transcribe_local_audio_bytes,
@@ -129,8 +125,6 @@ from .backends import (
     _synthesize_pocket_tts_sync,
     _synthesize_spoken_response_audio,
     _transcribe_faster_whisper_sync,
-    _transcribe_mlx_whisper_sync,
-    _transcribe_mlx_whisper_wake_sync,
     _transcribe_parakeet_onnx_sync,
     _transcribe_qwen3_asr_llama_cpp_sync,
     _transcribe_vosk_sync,
@@ -216,13 +210,6 @@ try:
 except Exception as exc:  # pragma: no cover - runtime dependency guard
     WhisperModel = None
     FASTER_WHISPER_IMPORT_ERROR = str(exc)
-
-try:
-    import mlx_whisper as MLXWhisper
-    MLX_WHISPER_IMPORT_ERROR: Optional[str] = None
-except Exception as exc:  # pragma: no cover - runtime dependency guard
-    MLXWhisper = None
-    MLX_WHISPER_IMPORT_ERROR = str(exc)
 
 try:
     import onnx_asr as OnnxASR
@@ -329,7 +316,6 @@ DEFAULT_WYOMING_STT_QUEUE_DROP_LIMIT = 3
 DEFAULT_LOCAL_STT_TIMEOUT_SECONDS = 35.0
 DEFAULT_VOICE_TURN_PROCESS_TIMEOUT_S = 90.0
 DEFAULT_OPENAI_COMPATIBLE_TTS_TIMEOUT_SECONDS = 90.0
-DEFAULT_CHATTERBOX_TTS_TIMEOUT_SECONDS = 90.0
 DEFAULT_STT_BACKEND = "wyoming" if remote_only_enabled() else "faster_whisper"
 DEFAULT_TTS_BACKEND = "wyoming"
 DEFAULT_PIPER_SENTENCE_PAUSE_SECONDS = 0.24
@@ -355,7 +341,6 @@ DEFAULT_FASTER_WHISPER_INITIAL_PROMPT = (
     "music, pause, resume, stop, cancel, volume, kitchen, living room, office, bedroom, "
     "garage, Home Assistant, UniFi, Ecobee, Ecowitt, Sonos, Discord, and Kodi."
 )
-DEFAULT_MLX_WHISPER_MODEL = "mlx-community/whisper-base.en-mlx"
 DEFAULT_PARAKEET_ONNX_MODEL = "nemo-parakeet-tdt-0.6b-v3"
 DEFAULT_PARAKEET_ONNX_REPO = "istupakov/parakeet-tdt-0.6b-v3-onnx"
 DEFAULT_PARAKEET_ONNX_QUANTIZATION = "int8"
@@ -381,9 +366,6 @@ DEFAULT_OPENAI_COMPATIBLE_TTS_BASE_URL = ""
 DEFAULT_OPENAI_COMPATIBLE_TTS_API_KEY = ""
 DEFAULT_OPENAI_COMPATIBLE_TTS_MODEL = "tts-1"
 DEFAULT_OPENAI_COMPATIBLE_TTS_VOICE = "alloy"
-DEFAULT_CHATTERBOX_TTS_BASE_URL = ""
-DEFAULT_CHATTERBOX_TTS_VOICE_MODE = "predefined"
-DEFAULT_CHATTERBOX_TTS_CHUNK_SIZE = 120
 DEFAULT_POCKET_TTS_MODEL = "b6369a24"
 DEFAULT_POCKET_TTS_VOICE = "alba"
 DEFAULT_PIPER_MODEL = "en_US-lessac-medium"
@@ -417,7 +399,6 @@ DEFAULT_EXPERIMENTAL_PARTIAL_STT_ENABLED = False
 DEFAULT_EXPERIMENTAL_PARTIAL_STT_INTERVAL_S = 0.50
 DEFAULT_EXPERIMENTAL_PARTIAL_STT_MIN_AUDIO_S = 0.45
 DEFAULT_EXPERIMENTAL_PARTIAL_STT_MIN_NEW_AUDIO_S = 0.28
-DEFAULT_CHATTERBOX_TTS_STREAM_MAX_BYTES = 64 * 1024 * 1024
 DEFAULT_NATIVE_TTS_STREAM_MAX_BYTES = 64 * 1024 * 1024
 DEFAULT_WAKE_ARBITRATION_ENABLED = True
 DEFAULT_WAKE_ARBITRATION_WINDOW_MS = 900
@@ -823,11 +804,6 @@ def _experimental_partial_stt_enabled() -> bool:
         "VOICE_EXPERIMENTAL_PARTIAL_STT_ENABLED",
         DEFAULT_EXPERIMENTAL_PARTIAL_STT_ENABLED,
     )
-
-
-def _chatterbox_tts_streaming_enabled(selection: Optional[Dict[str, Any]] = None) -> bool:
-    row = selection if isinstance(selection, dict) else _tts_selection_from_values()
-    return _as_bool(row.get("chatterbox_streaming_enabled"), False)
 
 
 async def _streaming_voice_playback_supported(selector: str) -> bool:
@@ -2123,32 +2099,18 @@ def _shared_speech_voice_settings() -> Dict[str, Any]:
         "VOICE_TTS_BACKEND": shared.get("tts_backend"),
         "VOICE_TTS_MODEL": shared.get("tts_model"),
         "VOICE_TTS_VOICE": shared.get("tts_voice"),
-        "VOICE_KOKORO_OUTPUT_GAIN": shared.get("kokoro_output_gain"),
         "VOICE_POCKET_TTS_OUTPUT_GAIN": shared.get("pocket_tts_output_gain"),
-        "VOICE_QWEN_TTS_CLONE_AUDIO": shared.get("qwen_tts_clone_audio"),
-        "VOICE_QWEN_TTS_CLONE_TEXT": shared.get("qwen_tts_clone_text"),
+        "VOICE_TTS_CLONE_AUDIO": shared.get("tts_clone_audio"),
+        "VOICE_TTS_CLONE_TEXT": shared.get("tts_clone_text"),
         "VOICE_QWEN_TTS_LANGUAGE": shared.get("qwen_tts_language"),
         "VOICE_QWEN_TTS_INSTRUCT": shared.get("qwen_tts_instruct"),
-        "VOICE_OMNIVOICE_TTS_CLONE_AUDIO": shared.get("omnivoice_tts_clone_audio"),
-        "VOICE_OMNIVOICE_TTS_CLONE_TEXT": shared.get("omnivoice_tts_clone_text"),
         "VOICE_OMNIVOICE_TTS_LANGUAGE": shared.get("omnivoice_tts_language"),
         "VOICE_OMNIVOICE_TTS_INSTRUCT": shared.get("omnivoice_tts_instruct"),
-        "VOICE_CHATTERBOX_LOCAL_TTS_CLONE_AUDIO": shared.get("chatterbox_local_tts_clone_audio"),
         "VOICE_WYOMING_TTS_HOST": shared.get("wyoming_tts_host"),
         "VOICE_WYOMING_TTS_PORT": shared.get("wyoming_tts_port"),
         "VOICE_WYOMING_TTS_VOICE": shared.get("wyoming_tts_voice"),
         "VOICE_OPENAI_TTS_BASE_URL": shared.get("openai_tts_base_url"),
         "VOICE_OPENAI_TTS_API_KEY": shared.get("openai_tts_api_key"),
-        "VOICE_CHATTERBOX_TTS_BASE_URL": shared.get("chatterbox_tts_base_url"),
-        "VOICE_CHATTERBOX_TTS_VOICE_MODE": shared.get("chatterbox_tts_voice_mode"),
-        "VOICE_CHATTERBOX_TTS_CHUNK_SIZE": shared.get("chatterbox_tts_chunk_size"),
-        "VOICE_CHATTERBOX_TTS_TEMPERATURE": shared.get("chatterbox_tts_temperature"),
-        "VOICE_CHATTERBOX_TTS_EXAGGERATION": shared.get("chatterbox_tts_exaggeration"),
-        "VOICE_CHATTERBOX_TTS_CFG_WEIGHT": shared.get("chatterbox_tts_cfg_weight"),
-        "VOICE_CHATTERBOX_TTS_SEED": shared.get("chatterbox_tts_seed"),
-        "VOICE_CHATTERBOX_TTS_SPEED_FACTOR": shared.get("chatterbox_tts_speed_factor"),
-        "VOICE_CHATTERBOX_TTS_LANGUAGE": shared.get("chatterbox_tts_language"),
-        "VOICE_CHATTERBOX_TTS_STREAMING_ENABLED": shared.get("chatterbox_tts_streaming_enabled"),
     }
 
 
@@ -2321,10 +2283,6 @@ def _faster_whisper_device() -> str:
     return "cuda" if _effective_speech_acceleration() == "cuda" and _ctranslate2_cuda_available() else DEFAULT_FASTER_WHISPER_DEVICE
 
 
-def _mlx_whisper_model() -> str:
-    return _text(os.getenv("TATER_MLX_WHISPER_MODEL")) or DEFAULT_MLX_WHISPER_MODEL
-
-
 def _normalize_faster_whisper_compute_type(value: Any) -> str:
     token = _text(value).lower().replace("-", "_").replace(" ", "_")
     if token in {"", "default"}:
@@ -2458,8 +2416,6 @@ def _normalize_stt_backend(value: Any) -> str:
         return DEFAULT_STT_BACKEND
     if token in {"faster_whisper", "fasterwhisper", "whisper"}:
         return "faster_whisper"
-    if token in {"mlx_whisper", "mlxwhisper", "mlx"}:
-        return "mlx_whisper"
     if token in {"parakeet", "parakeet_onnx", "onnx_parakeet"}:
         return "parakeet_onnx"
     if token in {
@@ -2524,38 +2480,15 @@ def _normalize_tts_backend(value: Any) -> str:
         return "wyoming"
     if token in {"openai_compatible", "openai", "openai_api"}:
         return "openai_compatible"
-    if token in {"chatterbox", "chatterbox_tts"}:
-        return "chatterbox"
-    if token in {
-        "chatterbox_builtin",
-        "chatterbox_built_in",
-        "chatterbox_local",
-        "local_chatterbox",
-        "managed_chatterbox",
-    }:
-        return "chatterbox_local"
-    if token == "kokoro":
-        return "kokoro"
+    if token in {"kokoro", "piper"}:
+        return "pocket_tts"
     if token in {"pocket_tts", "pockettts", "pocket"}:
         return "pocket_tts"
-    if token == "piper":
-        return "piper"
     if token in {"qwen", "qwen_tts", "qwen3", "qwen3tts", "qwen3_tts"}:
         return "qwen3_tts"
     if token in {"omni", "omni_voice", "omnivoice", "omnivoice_tts"}:
         return "omnivoice"
     return DEFAULT_TTS_BACKEND
-
-
-def _normalize_chatterbox_voice_mode(value: Any) -> str:
-    token = _lower(value).replace("-", "_").replace(" ", "_")
-    if token in {"clone", "cloned", "reference", "reference_audio"}:
-        return "clone"
-    return DEFAULT_CHATTERBOX_TTS_VOICE_MODE
-
-
-def _normalize_chatterbox_chunk_size(value: Any) -> int:
-    return _as_int(value, DEFAULT_CHATTERBOX_TTS_CHUNK_SIZE, minimum=50, maximum=500)
 
 
 def _tts_model_root() -> str:
@@ -2578,9 +2511,7 @@ def _tts_backend_model_root(backend: str) -> str:
         "piper": "piper",
         "qwen3_tts": "qwen3-tts",
         "omnivoice": "omnivoice",
-        "chatterbox_local": "chatterbox-local",
         "openai_compatible": "openai-compatible",
-        "chatterbox": "chatterbox",
         "wyoming": "wyoming",
     }
     dirname = dirname_map.get(token, token or DEFAULT_TTS_BACKEND)
@@ -2953,10 +2884,6 @@ def _build_voice_config_snapshot() -> Dict[str, Any]:
                 "partial_beam_size": DEFAULT_FASTER_WHISPER_PARTIAL_BEAM_SIZE,
                 "model_root": _stt_backend_model_root("faster_whisper"),
             },
-            "mlx_whisper": {
-                "model": _mlx_whisper_model(),
-                "model_root": _stt_backend_model_root("mlx_whisper"),
-            },
             "parakeet_onnx": {
                 "model": DEFAULT_PARAKEET_ONNX_MODEL,
                 "quantization": _parakeet_onnx_quantization() or "fp32",
@@ -2983,18 +2910,12 @@ def _build_voice_config_snapshot() -> Dict[str, Any]:
             "model": (
                 tts_model
                 or (
-                    DEFAULT_KOKORO_MODEL
-                    if tts_backend == "kokoro"
-                    else DEFAULT_POCKET_TTS_MODEL
+                    DEFAULT_POCKET_TTS_MODEL
                     if tts_backend == "pocket_tts"
-                    else DEFAULT_PIPER_MODEL
-                    if tts_backend == "piper"
                     else DEFAULT_QWEN_TTS_MODEL
                     if tts_backend == "qwen3_tts"
                     else DEFAULT_OMNIVOICE_TTS_MODEL
                     if tts_backend == "omnivoice"
-                    else DEFAULT_CHATTERBOX_LOCAL_TTS_MODEL
-                    if tts_backend == "chatterbox_local"
                     else DEFAULT_OPENAI_COMPATIBLE_TTS_MODEL
                     if tts_backend == "openai_compatible"
                     else ""
@@ -3003,14 +2924,8 @@ def _build_voice_config_snapshot() -> Dict[str, Any]:
             "voice": (
                 tts_voice
                 or (
-                    DEFAULT_KOKORO_VOICE
-                    if tts_backend == "kokoro"
-                    else DEFAULT_POCKET_TTS_VOICE
-                    if tts_backend == "pocket_tts"
-                    else DEFAULT_OPENAI_COMPATIBLE_TTS_VOICE
+                    DEFAULT_OPENAI_COMPATIBLE_TTS_VOICE
                     if tts_backend == "openai_compatible"
-                    else _text(settings.get("VOICE_TTS_VOICE"))
-                    if tts_backend == "chatterbox"
                     else ""
                 )
             ),
@@ -3020,34 +2935,9 @@ def _build_voice_config_snapshot() -> Dict[str, Any]:
                 "model": _text(settings.get("VOICE_TTS_MODEL")) or DEFAULT_OPENAI_COMPATIBLE_TTS_MODEL,
                 "voice": _text(settings.get("VOICE_TTS_VOICE")) or DEFAULT_OPENAI_COMPATIBLE_TTS_VOICE,
             },
-            "chatterbox": {
-                "base_url": _text(settings.get("VOICE_CHATTERBOX_TTS_BASE_URL")) or DEFAULT_CHATTERBOX_TTS_BASE_URL,
-                "voice_mode": _normalize_chatterbox_voice_mode(settings.get("VOICE_CHATTERBOX_TTS_VOICE_MODE")),
-                "voice": _text(settings.get("VOICE_TTS_VOICE")),
-                "chunk_size": _normalize_chatterbox_chunk_size(settings.get("VOICE_CHATTERBOX_TTS_CHUNK_SIZE")),
-                "temperature": _text(settings.get("VOICE_CHATTERBOX_TTS_TEMPERATURE")),
-                "exaggeration": _text(settings.get("VOICE_CHATTERBOX_TTS_EXAGGERATION")),
-                "cfg_weight": _text(settings.get("VOICE_CHATTERBOX_TTS_CFG_WEIGHT")),
-                "seed": _text(settings.get("VOICE_CHATTERBOX_TTS_SEED")),
-                "speed_factor": _text(settings.get("VOICE_CHATTERBOX_TTS_SPEED_FACTOR")),
-                "language": _text(settings.get("VOICE_CHATTERBOX_TTS_LANGUAGE")),
-                "streaming_enabled": _as_bool(settings.get("VOICE_CHATTERBOX_TTS_STREAMING_ENABLED"), False),
-            },
-            "kokoro": {
-                "model": _text(settings.get("VOICE_TTS_MODEL")) or DEFAULT_KOKORO_MODEL,
-                "voice": _text(settings.get("VOICE_TTS_VOICE")) or DEFAULT_KOKORO_VOICE,
-                "output_gain": _as_float(
-                    settings.get("VOICE_KOKORO_OUTPUT_GAIN"),
-                    DEFAULT_KOKORO_OUTPUT_GAIN,
-                    minimum=0.1,
-                    maximum=4.0,
-                ),
-                "provider": _kokoro_provider(),
-                "model_root": _tts_backend_model_root("kokoro"),
-            },
             "pocket_tts": {
                 "model": _text(settings.get("VOICE_TTS_MODEL")) or DEFAULT_POCKET_TTS_MODEL,
-                "voice": _text(settings.get("VOICE_TTS_VOICE")) or DEFAULT_POCKET_TTS_VOICE,
+                "clone_audio_configured": bool(_text(settings.get("VOICE_TTS_CLONE_AUDIO"))),
                 "output_gain": _as_float(
                     settings.get("VOICE_POCKET_TTS_OUTPUT_GAIN"),
                     DEFAULT_POCKET_TTS_OUTPUT_GAIN,
@@ -3056,26 +2946,17 @@ def _build_voice_config_snapshot() -> Dict[str, Any]:
                 ),
                 "model_root": _tts_backend_model_root("pocket_tts"),
             },
-            "piper": {
-                "model": _text(settings.get("VOICE_TTS_MODEL")) or DEFAULT_PIPER_MODEL,
-                "model_root": _tts_backend_model_root("piper"),
-            },
             "qwen3_tts": {
                 "model": _text(settings.get("VOICE_TTS_MODEL")) or DEFAULT_QWEN_TTS_MODEL,
-                "clone_audio_configured": bool(_text(settings.get("VOICE_QWEN_TTS_CLONE_AUDIO"))),
-                "language": _text(settings.get("VOICE_QWEN_TTS_LANGUAGE")) or "English",
+                "clone_audio_configured": bool(_text(settings.get("VOICE_TTS_CLONE_AUDIO"))),
+                "language": _text(settings.get("VOICE_QWEN_TTS_LANGUAGE")) or "Auto",
                 "model_root": _tts_backend_model_root("qwen3_tts"),
             },
             "omnivoice": {
                 "model": _text(settings.get("VOICE_TTS_MODEL")) or DEFAULT_OMNIVOICE_TTS_MODEL,
-                "clone_audio_configured": bool(_text(settings.get("VOICE_OMNIVOICE_TTS_CLONE_AUDIO"))),
-                "language": _text(settings.get("VOICE_OMNIVOICE_TTS_LANGUAGE")) or "English",
+                "clone_audio_configured": bool(_text(settings.get("VOICE_TTS_CLONE_AUDIO"))),
+                "language": _text(settings.get("VOICE_OMNIVOICE_TTS_LANGUAGE")) or "Auto",
                 "model_root": _tts_backend_model_root("omnivoice"),
-            },
-            "chatterbox_local": {
-                "model": _text(settings.get("VOICE_TTS_MODEL")) or DEFAULT_CHATTERBOX_LOCAL_TTS_MODEL,
-                "clone_audio_configured": bool(_text(settings.get("VOICE_CHATTERBOX_LOCAL_TTS_CLONE_AUDIO"))),
-                "model_root": _tts_backend_model_root("chatterbox_local"),
             },
         },
         "wyoming_tts": {
@@ -4260,8 +4141,6 @@ def _stt_backend_available(backend: str) -> Tuple[bool, str]:
         return ok, _text(WYOMING_IMPORT_ERROR) or "wyoming dependency unavailable"
     if token == "faster_whisper":
         return WhisperModel is not None, _text(FASTER_WHISPER_IMPORT_ERROR) or "faster-whisper dependency unavailable"
-    if token == "mlx_whisper":
-        return MLXWhisper is not None, _text(MLX_WHISPER_IMPORT_ERROR) or "mlx-whisper dependency unavailable"
     if token == "parakeet_onnx":
         if OnnxASR is None:
             return False, _text(PARAKEET_ONNX_IMPORT_ERROR) or "onnx-asr dependency unavailable"
@@ -4292,7 +4171,7 @@ def _resolve_stt_backend_selected(selected: str) -> Tuple[str, str]:
     if ok:
         return token, ""
     if token != "wyoming":
-        for candidate in (DEFAULT_STT_BACKEND, "faster_whisper", "parakeet_onnx", "mlx_whisper", "vosk"):
+        for candidate in (DEFAULT_STT_BACKEND, "faster_whisper", "parakeet_onnx", "vosk"):
             fallback = _normalize_stt_backend(candidate)
             if fallback == token or fallback == "wyoming":
                 continue
@@ -4532,83 +4411,6 @@ async def _play_live_tool_progress_for_session(
     session.last_tool_progress_text = spoken
 
 
-async def _start_chatterbox_streamed_tts_response(
-    selector: str,
-    client: Any,
-    module: Any,
-    *,
-    session: VoiceSessionRuntime,
-    runtime: Dict[str, Any],
-    response_text: str,
-    transcript: str,
-    streaming_voice_playback: bool,
-) -> Optional[Dict[str, Any]]:
-    if not streaming_voice_playback:
-        return None
-    selection = _tts_selection_from_values()
-    if not _chatterbox_tts_streaming_enabled(selection):
-        return None
-    effective_backend = _normalize_tts_backend(_text(session.tts_backend_effective))
-    if effective_backend != "chatterbox":
-        return None
-    prompt = _text(response_text)
-    if not prompt:
-        return None
-
-    tts_started = time.monotonic()
-    try:
-        stream_url = _store_chatterbox_tts_stream_url(selector, session.session_id, prompt, selection)
-    except Exception as exc:
-        logger.warning(
-            "[native-voice] Chatterbox streaming TTS URL preparation failed selector=%s session_id=%s error=%s",
-            selector,
-            session.session_id,
-            _text(exc),
-        )
-        _native_debug(
-            f"chatterbox streaming tts url failed selector={selector} session_id={session.session_id} error={exc}"
-        )
-        return None
-    if not stream_url:
-        return None
-
-    session.tts_latency_ms = max(0.0, (time.monotonic() - tts_started) * 1000.0)
-    _voice_metrics_record_tts(selector, effective_backend or session.tts_backend, session.tts_latency_ms)
-
-    timeout_s = _run_end_timeout_for_text_s(prompt)
-    lock = runtime.get("lock")
-    async with lock:
-        _set_awaiting_announcement_state(
-            runtime,
-            session_id=_text(session.session_id),
-            kind="response_chatterbox_stream",
-            future=None,
-            timeout_s=timeout_s,
-        )
-        _cancel_announcement_wait(runtime)
-        _schedule_announcement_timeout(selector, client, module, timeout_s)
-
-    await _ensure_voice_stt_end_sent(client, module, session=session, transcript=transcript)
-    if not bool(session.intent_active):
-        await _ensure_voice_intent_active(client, module, session=session)
-    await _send_voice_intent_end(client, module, session=session, continue_conversation=False)
-    await _esphome_send_event(client, module, ("VOICE_ASSISTANT_TTS_START", "TTS_START"), {"text": prompt})
-    await _esphome_send_event(client, module, ("VOICE_ASSISTANT_TTS_END", "TTS_END"), {"url": stream_url})
-    _native_debug(
-        f"chatterbox streaming tts started selector={selector} session_id={session.session_id} "
-        f"timeout_s={timeout_s:.2f} url={stream_url}"
-    )
-    return {
-        "first_url": stream_url,
-        "backend_used": effective_backend,
-        "backend_note": "",
-        "tts_bytes": 0,
-        "tts_mode": "chatterbox_stream_url",
-        "run_end_mode": "announcement_streamed",
-        "segment_count": 1,
-    }
-
-
 async def _start_native_backend_streamed_tts_response(
     selector: str,
     client: Any,
@@ -4625,11 +4427,8 @@ async def _start_native_backend_streamed_tts_response(
     effective_backend = _normalize_tts_backend(_text(session.tts_backend_effective))
     if effective_backend not in {
         "pocket_tts",
-        "piper",
-        "kokoro",
         "wyoming",
         "openai_compatible",
-        "chatterbox_local",
     }:
         return None
     if spud_link_should_use_hub("tts", redis_conn=redis_client):
@@ -5450,58 +5249,6 @@ def _store_tts_url(
     return url
 
 
-def _store_chatterbox_tts_stream_url(
-    selector: str,
-    session_id: str,
-    text: str,
-    selection: Dict[str, Any],
-) -> str:
-    prompt = _text(text)
-    if not prompt:
-        return ""
-
-    endpoint, payload = _chatterbox_tts_request(
-        prompt,
-        voice=_text((selection or {}).get("voice")),
-        base_url=_text((selection or {}).get("chatterbox_base_url")) or DEFAULT_CHATTERBOX_TTS_BASE_URL,
-        voice_mode=_text((selection or {}).get("chatterbox_voice_mode")) or DEFAULT_CHATTERBOX_TTS_VOICE_MODE,
-        chunk_size=(selection or {}).get("chatterbox_chunk_size"),
-        temperature=(selection or {}).get("chatterbox_temperature"),
-        exaggeration=(selection or {}).get("chatterbox_exaggeration"),
-        cfg_weight=(selection or {}).get("chatterbox_cfg_weight"),
-        seed=(selection or {}).get("chatterbox_seed"),
-        speed_factor=(selection or {}).get("chatterbox_speed_factor"),
-        language=(selection or {}).get("chatterbox_language"),
-        stream=True,
-    )
-    if not endpoint or not payload:
-        return ""
-
-    stream_id = uuid.uuid4().hex
-    expires_ts = _now() + _tts_url_ttl_s()
-    with _tts_url_store_lock:
-        _tts_url_prune_locked()
-        _tts_url_store[stream_id] = {
-            "id": stream_id,
-            "selector": _text(selector),
-            "session_id": _text(session_id),
-            "created_ts": _now(),
-            "expires_ts": expires_ts,
-            "stream_kind": "chatterbox",
-            "endpoint": endpoint,
-            "payload": dict(payload),
-            "max_bytes": DEFAULT_CHATTERBOX_TTS_STREAM_MAX_BYTES,
-        }
-
-    base_url = _service_base_url_for_peer(_selector_host(selector))
-    url = f"{base_url}/api/tater/satellite/v1/tts/{stream_id}.wav"
-    _native_debug(
-        f"chatterbox streaming tts url prepared selector={_text(selector)} session_id={_text(session_id)} "
-        f"stream_id={stream_id} url={url}"
-    )
-    return url
-
-
 def _store_native_tts_stream_url(
     selector: str,
     session_id: str,
@@ -5514,11 +5261,8 @@ def _store_native_tts_stream_url(
     effective_backend = _normalize_tts_backend(backend)
     if not prompt or effective_backend not in {
         "pocket_tts",
-        "piper",
-        "kokoro",
         "wyoming",
         "openai_compatible",
-        "chatterbox_local",
     }:
         return ""
 
@@ -5531,9 +5275,8 @@ def _store_native_tts_stream_url(
         "wyoming_voice": selected.get("wyoming_voice"),
         "openai_base_url": _text(selected.get("openai_base_url")),
         "openai_api_key": _text(selected.get("openai_api_key")),
-        "chatterbox_local_tts_clone_audio": _text(selected.get("chatterbox_local_tts_clone_audio")),
-        "chatterbox_temperature": selected.get("chatterbox_temperature"),
-        "chatterbox_seed": selected.get("chatterbox_seed"),
+        "tts_clone_audio": _text(selected.get("tts_clone_audio")),
+        "tts_clone_text": _text(selected.get("tts_clone_text")),
     }
     stream_id = uuid.uuid4().hex
     expires_ts = _now() + _tts_url_ttl_s()
@@ -6448,12 +6191,12 @@ def _native_wake_preroll_pending(session: VoiceSessionRuntime, now_ts: float) ->
     return deadline <= 0.0 or float(now_ts) < deadline
 
 
-def _native_discard_wake_preroll(
+def _native_record_wake_preroll(
     session: VoiceSessionRuntime,
     audio_bytes: bytes,
     now_ts: float,
 ) -> None:
-    """Account for wake audio that must not enter VAD or speech recognition."""
+    """Account for wake audio retained for STT but intentionally hidden from VAD."""
     if not isinstance(session, VoiceSessionRuntime):
         return
     session.last_audio_ts = float(now_ts)
@@ -6478,15 +6221,15 @@ async def _native_mark_wake_preroll_complete(selector: str) -> bool:
             return True
         session.wake_preroll_boundary_received = True
         session.vad_startup_ignore_until_ts = 0.0
-        excluded_chunks = int(session.wake_preroll_chunks or 0)
-        excluded_bytes = int(session.wake_preroll_bytes or 0)
+        retained_chunks = int(session.wake_preroll_chunks or 0)
+        retained_bytes = int(session.wake_preroll_bytes or 0)
         session_id = _text(session.session_id)
     logger.info(
-        "[native-voice] wake pre-roll complete selector=%s session_id=%s chunks=%s bytes=%s — command STT/VAD live",
+        "[native-voice] wake pre-roll complete selector=%s session_id=%s retained_stt_chunks=%s retained_stt_bytes=%s — command VAD live",
         token,
         session_id,
-        excluded_chunks,
-        excluded_bytes,
+        retained_chunks,
+        retained_bytes,
     )
     return True
 
@@ -7108,17 +6851,6 @@ async def _finalize_session(
                 transcript=transcript,
                 streaming_voice_playback=streaming_voice_playback,
             )
-            if not streamed_tts:
-                streamed_tts = await _start_chatterbox_streamed_tts_response(
-                    token,
-                    client,
-                    module,
-                    session=session,
-                    runtime=runtime,
-                    response_text=spoken_response_text,
-                    transcript=transcript,
-                    streaming_voice_playback=streaming_voice_playback,
-                )
         if streamed_tts:
             tts_backend_used = _text(streamed_tts.get("backend_used"))
             tts_backend_note = _text(streamed_tts.get("backend_note"))
@@ -7603,9 +7335,10 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
             )
         if wake_preroll_boundary_expected:
             # New native firmware sends its saved wake audio first and then an
-            # ordered boundary marker. Those frames stay out of STT and VAD;
-            # both begin with the first true post-wake command frame instead
-            # of relying on a fixed wall-clock delay.
+            # ordered boundary marker. Retain those frames for STT so an
+            # immediate command cannot lose its leading word, but keep them
+            # out of command VAD until the authoritative marker arrives.
+            startup_gate_s = 0.0
             vad_startup_ignore_s = 0.0
         max_audio_bytes = int(limits_cfg.get("max_audio_bytes") or DEFAULT_MAX_AUDIO_BYTES)
         if capture_reopen_profile:
@@ -7735,7 +7468,13 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
             blank_wake_timeout_s=blank_wake_timeout_s,
             audio_input_gain=audio_input_gain,
             spud_link_endpointing_requested=requested_vad_backend == "spud_link",
-            spud_link_endpointing_reuse_stt=bool(hub_stt_routed),
+            # Wake pre-roll must reach STT without reaching command VAD. The
+            # combined Hub stream cannot apply the marker to those two jobs
+            # independently, so wake sessions use it only for post-marker VAD
+            # and submit the complete buffered audio to Hub STT at finalize.
+            spud_link_endpointing_reuse_stt=bool(
+                hub_stt_routed and not wake_preroll_boundary_expected
+            ),
         )
         if session.spud_link_endpointing_requested:
             try:
@@ -7947,22 +7686,21 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
 
         if wake_boundary_pending:
             # The firmware marker is authoritative: audio through the local
-            # wake detector's crossing belongs to the wake phrase. Keep it for
-            # room arbitration/diagnostics, but never append it to an STT
-            # buffer or stream it to a remote recognizer.
+            # wake detector's crossing belongs to the wake phrase. Keep it out
+            # of command VAD, but retain it in the normal STT buffer/stream so
+            # speech crossing the detector boundary cannot lose its first word.
             async with lock:
                 active_session = runtime.get("session")
                 if (
                     isinstance(active_session, VoiceSessionRuntime)
                     and active_session.session_id == sid
                 ):
-                    _native_discard_wake_preroll(active_session, audio_bytes, now_ts)
+                    _native_record_wake_preroll(active_session, audio_bytes, now_ts)
                     if active_session.wake_preroll_chunks == 1:
                         _native_debug(
-                            f"native wake pre-roll excluded from STT selector={token} "
+                            f"native wake pre-roll retained for STT and excluded from VAD selector={token} "
                             f"session_id={sid}"
                         )
-            return
 
         if now_ts < gate_ts:
             async with lock:

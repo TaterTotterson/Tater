@@ -32,7 +32,7 @@ def test_music_reaction_uses_metadata_configured_voice_and_ducking(monkeypatch) 
         voice_pipeline,
         "_shared_speech_voice_settings",
         lambda: {
-            "VOICE_TTS_BACKEND": "chatterbox",
+            "VOICE_TTS_BACKEND": "openai_compatible",
             "VOICE_TTS_VOICE": "configured-voice.wav",
         },
     )
@@ -59,7 +59,7 @@ def test_music_reaction_uses_metadata_configured_voice_and_ducking(monkeypatch) 
         (
             "Oh yeah, Michael Jackson—my antennas are already dancing!",
             {
-                "VOICE_TTS_BACKEND": "chatterbox",
+                "VOICE_TTS_BACKEND": "openai_compatible",
                 "VOICE_TTS_VOICE": "configured-voice.wav",
             },
         )

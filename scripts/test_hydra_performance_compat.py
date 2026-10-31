@@ -395,6 +395,31 @@ class LocalLlmSchedulerTests(unittest.TestCase):
 
 
 class LlamaCppPerformanceTests(unittest.TestCase):
+    def test_default_slot_layout_uses_one_shared_context(self):
+        self.assertEqual(helpers.DEFAULT_LLAMA_CPP_SLOT_COUNT, 1)
+
+    def test_slot_count_normalizes_to_supported_modes(self):
+        for configured, expected in ((1, 1), (2, 1), (3, 1), (4, 4), (8, 4)):
+            with (
+                mock.patch.object(helpers, "_safe_redis_text_get", return_value=str(configured)),
+                mock.patch.dict(helpers.os.environ, {}, clear=False),
+            ):
+                self.assertEqual(helpers._llama_cpp_slot_count(), expected)
+
+    def test_ram_prompt_cache_defaults_off_and_allows_environment_override(self):
+        with mock.patch.dict(
+            helpers.os.environ,
+            {"TATER_LLAMA_CPP_CACHE_RAM_MIB": "", "LLAMA_ARG_CACHE_RAM": ""},
+            clear=False,
+        ):
+            self.assertEqual(helpers._llama_cpp_cache_ram_mib(), 0)
+        with mock.patch.dict(
+            helpers.os.environ,
+            {"TATER_LLAMA_CPP_CACHE_RAM_MIB": "2048", "LLAMA_ARG_CACHE_RAM": ""},
+            clear=False,
+        ):
+            self.assertEqual(helpers._llama_cpp_cache_ram_mib(), 2048)
+
     def test_native_backend_is_detected_from_bundled_vulkan_library(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             server_bin = os.path.join(temp_dir, "llama-server")
@@ -447,6 +472,10 @@ class LlamaCppPerformanceTests(unittest.TestCase):
                 )
 
         self.assertIn("--no-warmup", command)
+        self.assertEqual(command[command.index("--parallel") + 1], "1")
+        self.assertIn("--kv-unified", command)
+        self.assertEqual(command[command.index("--cache-ram") + 1], "0")
+        self.assertIn("--no-cache-idle-slots", command)
         self.assertEqual(command[command.index("--load-mode") + 1], "mmap")
         self.assertEqual(command[command.index("--n-cpu-moe") + 1], "99")
         self.assertTrue(metadata["gemma4_vulkan_workaround"])
@@ -623,7 +652,16 @@ class LlamaCppPerformanceTests(unittest.TestCase):
         self.assertEqual(command[command.index("--spec-draft-n-max") + 1], "2")
         self.assertEqual(command[command.index("--spec-draft-ngl") + 1], "all")
         self.assertEqual(command[command.index("--parallel") + 1], "2")
+        self.assertEqual(command[command.index("--ctx-size") + 1], "4096")
+        self.assertIn("--kv-unified", command)
+        self.assertEqual(command[command.index("--cache-ram") + 1], "0")
+        self.assertIn("--no-cache-idle-slots", command)
         self.assertIn("--no-context-shift", command)
+        self.assertEqual(metadata["n_ctx"], 4096)
+        self.assertEqual(metadata["n_ctx_total"], 4096)
+        self.assertEqual(metadata["n_ctx_estimated_per_slot"], 2048)
+        self.assertTrue(metadata["kv_unified"])
+        self.assertEqual(metadata["cache_ram_mib"], 0)
         self.assertEqual(metadata["ctx_checkpoints"], 0)
         self.assertEqual(metadata["configured_slot_count"], 2)
         self.assertEqual(metadata["slot_count"], 2)
@@ -748,7 +786,10 @@ class LlamaCppPerformanceTests(unittest.TestCase):
                     temp_dir=temp_dir,
                 )
 
-        self.assertNotIn("--parallel", command)
+        self.assertEqual(command[command.index("--parallel") + 1], "1")
+        self.assertIn("--kv-unified", command)
+        self.assertEqual(command[command.index("--cache-ram") + 1], "0")
+        self.assertEqual(command[command.index("--ctx-size") + 1], "70000")
         self.assertIn("--spec-type", command)
         self.assertEqual(metadata["configured_slot_count"], 2)
         self.assertEqual(metadata["slot_count"], 1)
@@ -865,7 +906,7 @@ class LlamaCppPerformanceTests(unittest.TestCase):
         self.assertEqual(metadata["n_batch"], 512)
         self.assertEqual(metadata["cache_reuse_tokens"], 256)
 
-    def test_cache_namespaces_auto_assign_roles_and_preserve_explicit_slots(self):
+    def test_cache_namespaces_reserve_base_and_assign_each_hydra_head(self):
         def slot_id(scope="base", value=None):
             if value is not None:
                 try:
@@ -877,36 +918,37 @@ class LlamaCppPerformanceTests(unittest.TestCase):
         with (
             mock.patch.object(helpers, "_llama_cpp_slot_count", return_value=4),
             mock.patch.object(helpers, "_llama_cpp_slot_id", side_effect=slot_id),
+            mock.patch.object(helpers, "_safe_redis_text_get", return_value=""),
         ):
             self.assertEqual(
                 helpers._llama_cpp_cache_namespace_slot(
                     "hydra:astraeus", configured_slot=-1
                 ),
-                0,
+                1,
             )
             self.assertEqual(
                 helpers._llama_cpp_cache_namespace_slot(
                     "hydra:hermes:final", configured_slot=-1
                 ),
-                1,
+                2,
             )
             self.assertEqual(
                 helpers._llama_cpp_cache_namespace_slot(
                     "hydra:thanatos:state", configured_slot=-1
                 ),
-                2,
+                3,
             )
             self.assertEqual(
                 helpers._llama_cpp_cache_namespace_slot(
                     "hydra:hermes:final", configured_slot=1
                 ),
-                1,
+                2,
             )
             self.assertEqual(
                 helpers._llama_cpp_cache_namespace_slot(
                     "hydra:thanatos:state", configured_slot=2
                 ),
-                2,
+                3,
             )
             self.assertEqual(
                 helpers._llama_cpp_cache_namespace_slot(
@@ -917,6 +959,18 @@ class LlamaCppPerformanceTests(unittest.TestCase):
             self.assertEqual(
                 helpers._llama_cpp_cache_namespace_slot(
                     "hydra:hermes:final", configured_slot=1, vision=True
+                ),
+                1,
+            )
+
+        with (
+            mock.patch.object(helpers, "_llama_cpp_slot_count", return_value=4),
+            mock.patch.object(helpers, "_llama_cpp_slot_id", side_effect=slot_id),
+            mock.patch.object(helpers, "_safe_redis_text_get", return_value="1"),
+        ):
+            self.assertEqual(
+                helpers._llama_cpp_cache_namespace_slot(
+                    "hydra:hermes:final", configured_slot=-1
                 ),
                 1,
             )
@@ -1496,16 +1550,22 @@ class ProviderCompatibilityTests(unittest.IsolatedAsyncioTestCase):
                 },
             }
 
-        with mock.patch.object(
-            helpers, "_llama_cpp_native_json_post", side_effect=fake_post
+        with (
+            mock.patch.object(helpers, "_llama_cpp_slot_count", return_value=4),
+            mock.patch.object(
+                helpers, "_llama_cpp_native_json_post", side_effect=fake_post
+            ),
         ):
             result = client._chat_sync(
                 [{"role": "user", "content": "read the file"}],
+                _cache_namespace="hydra:hermes:final",
                 tools=[tool],
             )
 
         self.assertEqual(captured["path"], "/v1/chat/completions")
         self.assertEqual(captured["payload"]["tools"], [tool])
+        self.assertTrue(captured["payload"]["cache_prompt"])
+        self.assertEqual(captured["payload"]["id_slot"], 2)
         self.assertEqual(result["finish_reason"], "tool_calls")
         self.assertEqual(
             result["message"]["tool_calls"][0]["function"]["arguments"],
@@ -1548,10 +1608,11 @@ class ProviderCompatibilityTests(unittest.IsolatedAsyncioTestCase):
             }
 
         with (
+            mock.patch.object(helpers, "_llama_cpp_slot_count", return_value=4),
             mock.patch.object(
                 helpers,
                 "_llama_cpp_native_worker_load",
-                return_value={"slot_count": 1},
+                return_value={"slot_count": 4},
             ),
             mock.patch.object(
                 helpers,
@@ -1565,61 +1626,16 @@ class ProviderCompatibilityTests(unittest.IsolatedAsyncioTestCase):
                 [{"role": "user", "content": "read the file"}],
                 {"tools": [tool]},
                 vision=False,
+                slot_id=3,
                 timeout=30.0,
             )
 
         self.assertEqual(captured["path"], "/v1/chat/completions")
         self.assertEqual(captured["payload"]["tools"], [tool])
+        self.assertTrue(captured["payload"]["cache_prompt"])
+        self.assertEqual(captured["payload"]["id_slot"], 3)
         self.assertEqual(result["finish_reason"], "tool_calls")
 
-    def test_transformers_chat_template_receives_native_tools(self):
-        tool = hydra_tool_index.native_function_tool(
-            tool_id="read_file",
-            description="Read one file.",
-            usage='{"function":"read_file","arguments":{"path":"<path>"}}',
-        )
-
-        class Formatter:
-            def apply_chat_template(self, messages, **kwargs):
-                self.messages = list(messages)
-                self.kwargs = dict(kwargs)
-                return "prompt"
-
-        formatter = Formatter()
-        client = helpers.TransformersLLMClientWrapper(model="test-model")
-        prompt = client._chat_template_inputs(
-            formatter,
-            [{"role": "user", "content": "read the file"}],
-            tokenize=False,
-            tools=[tool],
-        )
-
-        self.assertEqual(prompt, "prompt")
-        self.assertEqual(formatter.kwargs["tools"], [tool])
-
-    def test_mlx_chat_template_receives_native_tools(self):
-        tool = hydra_tool_index.native_function_tool(
-            tool_id="read_file",
-            description="Read one file.",
-            usage='{"function":"read_file","arguments":{"path":"<path>"}}',
-        )
-
-        class Tokenizer:
-            def apply_chat_template(self, messages, **kwargs):
-                self.messages = list(messages)
-                self.kwargs = dict(kwargs)
-                return "prompt"
-
-        tokenizer = Tokenizer()
-        client = helpers.MlxLmLLMClientWrapper(model="test-model")
-        prompt = client._chat_template_prompt(
-            tokenizer,
-            [{"role": "user", "content": "read the file"}],
-            tools=[tool],
-        )
-
-        self.assertEqual(prompt, "prompt")
-        self.assertEqual(tokenizer.kwargs["tools"], [tool])
 
     async def test_thanatos_retries_legacy_contract_when_native_tools_are_rejected(self):
         tool = hydra_tool_index.native_function_tool(
@@ -1718,9 +1734,7 @@ class ProviderCompatibilityTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_omitted_max_tokens_reaches_context_bounded_local_builders(self):
         for client in (
-            helpers.TransformersLLMClientWrapper(model="test-model"),
             helpers.LlamaCppLLMClientWrapper(model="test-model"),
-            helpers.MlxLmLLMClientWrapper(model="test-model"),
         ):
             captured = {}
 
@@ -1736,9 +1750,7 @@ class ProviderCompatibilityTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_explicit_none_reaches_local_provider_builders(self):
         for client in (
-            helpers.TransformersLLMClientWrapper(model="test-model"),
             helpers.LlamaCppLLMClientWrapper(model="test-model"),
-            helpers.MlxLmLLMClientWrapper(model="test-model"),
         ):
             captured = {}
 
@@ -1755,50 +1767,6 @@ class ProviderCompatibilityTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("max_tokens", captured)
             self.assertIsNone(captured["max_tokens"])
 
-    def test_transformers_none_uses_remaining_context(self):
-        client = helpers.TransformersLLMClientWrapper(model="test-model")
-        tokenizer = SimpleNamespace(eos_token_id=2, pad_token_id=2)
-        with mock.patch.object(helpers, "_hf_llm_max_input_tokens", return_value=4096):
-            kwargs = client._build_generation_kwargs(
-                tokenizer,
-                None,
-                {"max_tokens": None, "temperature": 0.0},
-                prompt_tokens=1096,
-            )
-
-        self.assertEqual(kwargs["max_new_tokens"], 3000)
-
-    def test_mlx_none_uses_remaining_model_context(self):
-        client = helpers.MlxLmLLMClientWrapper(model="test-model")
-        tokenizer = SimpleNamespace(encode=lambda _text: list(range(128)))
-        bundle = {
-            "config": {"text_config": {"max_position_embeddings": 32768}},
-            "tokenizer": tokenizer,
-        }
-        captured = {}
-
-        def fake_generate(_bundle, _prompt, **kwargs):
-            captured.update(kwargs)
-            return {
-                "content": "ok",
-                "prompt_tokens": 128,
-                "completion_tokens": 1,
-                "elapsed": 0.01,
-            }
-
-        with (
-            mock.patch.object(client, "_chat_template_prompt", return_value="prompt"),
-            mock.patch.object(helpers, "_mlx_lm_max_kv_size", return_value=None),
-            mock.patch.object(helpers, "_mlx_engine_run_generation", side_effect=fake_generate),
-        ):
-            client._chat_sync_mlx_engine(
-                bundle,
-                [{"role": "user", "content": "hello"}],
-                max_tokens=None,
-                temperature=0.0,
-            )
-
-        self.assertEqual(captured["max_tokens"], 32640)
 
     async def test_local_llama_streams_without_forwarding_cache_metadata(self):
         client = helpers.LlamaCppLLMClientWrapper(
@@ -1845,7 +1813,7 @@ class ProviderCompatibilityTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result["message"]["content"], "ok")
         self.assertEqual(chunks, ["o", "k"])
-        self.assertEqual(captured["slot_id"], 1)
+        self.assertEqual(captured["slot_id"], 0)
         self.assertNotIn("cache_namespace", captured["chat_kwargs"])
 
     async def test_local_llama_explicit_slot_is_not_remapped_by_role(self):
@@ -1941,49 +1909,6 @@ class ProviderCompatibilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(captured["cache_prompt"])
         self.assertEqual(captured["id_slot"], 0)
 
-    async def test_transformers_consumes_cache_metadata_and_stream_falls_back(self):
-        client = helpers.TransformersLLMClientWrapper(model="test-model")
-        captured = {}
-
-        def fake_chat(messages, *, timeout=None, **kwargs):
-            captured.update(kwargs)
-            return _local_result()
-
-        chunks = []
-        with mock.patch.object(client, "_chat_sync", side_effect=fake_chat):
-            result = await client.chat(
-                [{"role": "user", "content": "hello"}],
-                cache_namespace="hydra:hermes:chat",
-                activity="chat",
-                stream_callback=chunks.append,
-            )
-
-        self.assertEqual(result["message"]["content"], "ok")
-        self.assertNotIn("cache_namespace", captured)
-        self.assertNotIn("activity", captured)
-        self.assertEqual(chunks, ["ok"])
-
-    async def test_mlx_consumes_cache_metadata_and_stream_falls_back(self):
-        client = helpers.MlxLmLLMClientWrapper(model="test-model")
-        captured = {}
-
-        def fake_chat(messages, *, timeout=None, **kwargs):
-            captured.update(kwargs)
-            return _local_result()
-
-        chunks = []
-        with mock.patch.object(client, "_chat_sync", side_effect=fake_chat):
-            result = await client.chat(
-                [{"role": "user", "content": "hello"}],
-                cache_namespace="hydra:hermes:final",
-                activity="chat",
-                stream_callback=chunks.append,
-            )
-
-        self.assertEqual(result["message"]["content"], "ok")
-        self.assertNotIn("cache_namespace", captured)
-        self.assertNotIn("activity", captured)
-        self.assertEqual(chunks, ["ok"])
 
     async def test_openai_compatible_consumes_cache_metadata(self):
         class Completions:
@@ -2489,6 +2414,31 @@ class ProviderCompatibilityTests(unittest.IsolatedAsyncioTestCase):
         )
 
 
+class HydraRoleRoutingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_beast_roles_inherit_base_when_no_dedicated_route_is_saved(self):
+        class Redis:
+            def get(self, key):
+                if key == hydra_runtime.HYDRA_BEAST_MODE_ENABLED_KEY:
+                    return "true"
+                return ""
+
+        base_client = SimpleNamespace(
+            provider="llama_cpp",
+            host="llama-cpp://local",
+            model="test-model",
+            api_key="",
+            llama_cpp_slot=-1,
+        )
+        pool = await hydra_runtime._build_hydra_llm_client_pool(
+            base_llm_client=base_client,
+            redis_client=Redis(),
+        )
+
+        self.assertTrue(pool.beast_mode_enabled)
+        for role in hydra_runtime.HYDRA_BEAST_CONFIG_ROLE_IDS:
+            self.assertIs(pool.role_clients[role], base_client)
+
+
 class PromptCacheLayoutTests(unittest.TestCase):
     def test_native_tool_schema_is_inferred_from_legacy_usage(self):
         tool = hydra_tool_index.native_function_tool(
@@ -2759,24 +2709,25 @@ class PromptCacheLayoutTests(unittest.TestCase):
 
         streamed = []
         client = Client()
-        result = asyncio.run(
-            hydra_runtime._run_chat_fallback_reply(
-                llm_client=client,
-                platform="voice_core",
-                user_text="I'm relaxing.",
-                history=[],
-                registry={},
-                enabled_predicate=None,
-                redis_client=None,
-                memory_context_message="",
-                capability_catalog="play_music: play requested music",
-                available_tool_ids={"play_music"},
-                platform_preamble="",
-                max_history_items=6,
-                max_tokens=360,
-                stream_callback=streamed.append,
+        with mock.patch.object(hydra_runtime, "get_tater_name", return_value=("Tater", "")):
+            result = asyncio.run(
+                hydra_runtime._run_chat_fallback_reply(
+                    llm_client=client,
+                    platform="voice_core",
+                    user_text="I'm relaxing.",
+                    history=[],
+                    registry={},
+                    enabled_predicate=None,
+                    redis_client=None,
+                    memory_context_message="",
+                    capability_catalog="play_music: play requested music",
+                    available_tool_ids={"play_music"},
+                    platform_preamble="",
+                    max_history_items=6,
+                    max_tokens=360,
+                    stream_callback=streamed.append,
+                )
             )
-        )
 
         self.assertEqual(result["text"], "Want me to put on some reggae or score music?")
         self.assertEqual(result["pending_interaction"]["kind"], "action_offer")

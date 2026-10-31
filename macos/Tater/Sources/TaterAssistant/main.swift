@@ -5,6 +5,8 @@ import Foundation
 import WebKit
 
 private let taterPort = 8501
+private let taterDataRootPathKey = "TaterDataRootPath"
+private let taterDataRootBookmarkKey = "TaterDataRootBookmark"
 
 private enum BackendState: Equatable {
     case stopped
@@ -36,7 +38,7 @@ private final class BackendManager {
     let pythonRoot: URL
     let managedPythonDir: URL
     let runtimeDir: URL
-    let agentRoot: URL
+    private(set) var agentRoot: URL
     let logsDir: URL
     let sourceRoot: URL
     let webURL = URL(string: "http://127.0.0.1:\(taterPort)")!
@@ -63,6 +65,7 @@ private final class BackendManager {
     private let descendantExitGrace: TimeInterval = 3
     private let lifecycleLock = NSLock()
     private var lifecycleOperationInProgress = false
+    private var dataRootSecurityScope: URL?
 
     init() {
         let home = FileManager.default.homeDirectoryForCurrentUser
@@ -72,9 +75,75 @@ private final class BackendManager {
         pythonRoot = supportRoot.appendingPathComponent("python", isDirectory: true)
         managedPythonDir = pythonRoot.appendingPathComponent("cpython-3.11", isDirectory: true)
         runtimeDir = supportRoot.appendingPathComponent("runtime", isDirectory: true)
-        agentRoot = supportRoot.appendingPathComponent("agent_lab", isDirectory: true)
+        let defaultAgentRoot = supportRoot.appendingPathComponent("agent_lab", isDirectory: true)
+        let resolvedDataRoot = BackendManager.resolveSavedDataRoot(defaultRoot: defaultAgentRoot)
+        agentRoot = resolvedDataRoot.url
+        dataRootSecurityScope = resolvedDataRoot.securityScope
         logsDir = supportRoot.appendingPathComponent("logs", isDirectory: true)
         sourceRoot = BackendManager.resolveSourceRoot(supportRoot: supportRoot)
+    }
+
+    deinit {
+        dataRootSecurityScope?.stopAccessingSecurityScopedResource()
+    }
+
+    private static func resolveSavedDataRoot(defaultRoot: URL) -> (url: URL, securityScope: URL?) {
+        let defaults = UserDefaults.standard
+        guard let savedPath = defaults.string(forKey: taterDataRootPathKey), !savedPath.isEmpty else {
+            return (defaultRoot, nil)
+        }
+
+        var scopeURL: URL?
+        if let bookmark = defaults.data(forKey: taterDataRootBookmarkKey) {
+            var stale = false
+            if let resolved = try? URL(
+                resolvingBookmarkData: bookmark,
+                options: [.withSecurityScope],
+                relativeTo: nil,
+                bookmarkDataIsStale: &stale
+            ) {
+                if resolved.startAccessingSecurityScopedResource() {
+                    scopeURL = resolved
+                }
+                if stale, let refreshed = try? resolved.bookmarkData(
+                    options: [.withSecurityScope],
+                    includingResourceValuesForKeys: nil,
+                    relativeTo: nil
+                ) {
+                    defaults.set(refreshed, forKey: taterDataRootBookmarkKey)
+                }
+            }
+        }
+        return (URL(fileURLWithPath: savedPath, isDirectory: true), scopeURL)
+    }
+
+    func activateDataRoot(_ root: URL, securityScope: URL?, bookmark: Data?) {
+        dataRootSecurityScope?.stopAccessingSecurityScopedResource()
+        dataRootSecurityScope = securityScope
+        agentRoot = root.standardizedFileURL
+        let defaults = UserDefaults.standard
+        defaults.set(agentRoot.path, forKey: taterDataRootPathKey)
+        if let bookmark {
+            defaults.set(bookmark, forKey: taterDataRootBookmarkKey)
+        } else {
+            defaults.removeObject(forKey: taterDataRootBookmarkKey)
+        }
+    }
+
+    func restoreDataRoot(_ root: URL, bookmark: Data?) {
+        var securityScope: URL?
+        if let bookmark {
+            var stale = false
+            if let resolved = try? URL(
+                resolvingBookmarkData: bookmark,
+                options: [.withSecurityScope],
+                relativeTo: nil,
+                bookmarkDataIsStale: &stale
+            ), resolved.startAccessingSecurityScopedResource() {
+                securityScope = resolved
+            }
+        }
+        activateDataRoot(root, securityScope: securityScope, bookmark: bookmark)
     }
 
     func start() {
@@ -99,6 +168,7 @@ private final class BackendManager {
             }
             do {
                 self.cleanupStaleBundledLlamaServers()
+                try self.validateDataRootAvailability()
                 self.appendLauncherLog("Ensuring private folders.\n")
                 try self.ensurePrivateFolders()
                 self.appendLauncherLog("Ensuring Python runtime.\n")
@@ -336,6 +406,24 @@ private final class BackendManager {
         }
     }
 
+    private func validateDataRootAvailability() throws {
+        let defaultRoot = supportRoot.appendingPathComponent("agent_lab", isDirectory: true).standardizedFileURL
+        let selectedRoot = agentRoot.standardizedFileURL
+        guard selectedRoot != defaultRoot else { return }
+
+        let parent = selectedRoot.deletingLastPathComponent()
+        guard FileManager.default.fileExists(atPath: parent.path) else {
+            throw LauncherError(
+                "Tater's data location is unavailable: \(selectedRoot.path). Reconnect the drive, then start Tater again or choose a new data location from the menu bar."
+            )
+        }
+        if !FileManager.default.fileExists(atPath: selectedRoot.path) {
+            throw LauncherError(
+                "Tater's data folder is missing: \(selectedRoot.path). Tater will not create an empty replacement automatically."
+            )
+        }
+    }
+
     private func ensurePythonRuntime() throws {
         let managedPython = managedPythonDir.appendingPathComponent("bin/python3.11").path
         if isUsablePython(managedPython) {
@@ -561,14 +649,13 @@ private final class BackendManager {
         let venvReady = FileManager.default.isExecutableFile(atPath: python.path)
         let profileReady = FileManager.default.fileExists(atPath: profile.path)
         let dependenciesReady = venvReady ? pinnedRuntimeDependenciesReady(using: python) : false
-        let localLLMDepsReady = venvReady ? localLLMPythonDependenciesReady(using: python) : false
         let localLLMRuntimesReady = localLLMRuntimesReady()
         let airPlayRuntimeReady = venvReady ? airPlayDependenciesReady(using: python) : false
-        guard !venvReady || !profileReady || !dependenciesReady || !localLLMDepsReady || !localLLMRuntimesReady || !airPlayRuntimeReady else {
+        guard !venvReady || !profileReady || !dependenciesReady || !localLLMRuntimesReady || !airPlayRuntimeReady else {
             appendLog("Private runtime is ready: \(venvDir.path)\n")
             return
         }
-        appendLog("Private runtime needs setup; venvReady=\(venvReady) profileReady=\(profileReady) dependenciesReady=\(dependenciesReady) localLLMDepsReady=\(localLLMDepsReady) localLLMRuntimesReady=\(localLLMRuntimesReady) airPlayRuntimeReady=\(airPlayRuntimeReady). Running setup.\n")
+        appendLog("Private runtime needs setup; venvReady=\(venvReady) profileReady=\(profileReady) dependenciesReady=\(dependenciesReady) localLLMRuntimesReady=\(localLLMRuntimesReady) airPlayRuntimeReady=\(airPlayRuntimeReady). Running setup.\n")
 
         guard FileManager.default.fileExists(atPath: sourceRoot.appendingPathComponent("setup_tater.sh").path) else {
             throw LauncherError("Could not find setup_tater.sh in \(sourceRoot.path)")
@@ -604,55 +691,12 @@ private final class BackendManager {
         appendLauncherLog("Recorded installed Python requirements fingerprint.\n")
     }
 
-    private func localLLMPythonDependenciesReady(using python: URL) -> Bool {
-        var modules = ["transformers", "accelerate"]
-        if isAppleSilicon {
-            modules.append(contentsOf: ["mlx_lm", "mlx_vlm", "outlines", "outlines_core", "dill", "xxhash"])
-        }
-
-        let process = Process()
-        process.executableURL = python
-        process.arguments = [
-            "-c",
-            "import importlib.util, os, sys\nissues=[name for name in sys.argv[1:] if importlib.util.find_spec(name) is None]\nengine=os.getenv('TATER_MLX_ENGINE_PATH', '')\nif not issues and engine:\n    sys.path.insert(0, engine)\n    try:\n        from mlx_engine.generate import create_generator, load_model, tokenize\n    except Exception as exc:\n        issues.append(f'mlx_engine: {type(exc).__name__}: {exc}')\nprint('\\n'.join(issues))\nsys.exit(1 if issues else 0)"
-        ] + modules
-        process.environment = backendEnvironment()
-
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = Pipe()
-
-        do {
-            try process.run()
-            process.waitUntilExit()
-        } catch {
-            appendLog("Private runtime could not inspect local LLM Python dependencies: \(error.localizedDescription)\n")
-            return false
-        }
-
-        guard process.terminationStatus == 0 else {
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            let missing = String(decoding: data, as: UTF8.self)
-                .split(separator: "\n")
-                .map(String.init)
-                .filter { !$0.isEmpty }
-                .joined(separator: ", ")
-            appendLog("Private runtime has incomplete local LLM Python dependencies: \(missing.isEmpty ? modules.joined(separator: ", ") : missing).\n")
-            return false
-        }
-        return true
-    }
-
     private func localLLMRuntimesReady() -> Bool {
         let llamaReady = nativeLlamaServerReady()
-        let mlxReady = !isAppleSilicon || mlxEngineReady()
         if !llamaReady {
             appendLog("Private runtime is missing native llama.cpp server under \(runtimeDir.appendingPathComponent("llama.cpp").path).\n")
         }
-        if !mlxReady {
-            appendLog("Private runtime is missing MLX engine checkout under \(runtimeDir.appendingPathComponent("mlx-engine").path).\n")
-        }
-        return llamaReady && mlxReady
+        return llamaReady
     }
 
     private func nativeLlamaServerReady() -> Bool {
@@ -671,14 +715,6 @@ private final class BackendManager {
         return candidates.contains { FileManager.default.isExecutableFile(atPath: $0.path) }
     }
 
-    private func mlxEngineReady() -> Bool {
-        let override = ProcessInfo.processInfo.environment["TATER_MLX_ENGINE_PATH"]
-        let root = (override?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
-            ? URL(fileURLWithPath: NSString(string: override ?? "").expandingTildeInPath, isDirectory: true)
-            : (bundledMLXEngineURL() ?? runtimeDir.appendingPathComponent("mlx-engine", isDirectory: true))
-        return FileManager.default.fileExists(atPath: root.appendingPathComponent("mlx_engine", isDirectory: true).path)
-    }
-
     private func bundledLlamaServerURL() -> URL? {
         guard let resources = Bundle.main.resourceURL else {
             return nil
@@ -688,15 +724,6 @@ private final class BackendManager {
             .appendingPathComponent("llama.cpp", isDirectory: true)
             .appendingPathComponent("bin", isDirectory: true)
             .appendingPathComponent("llama-server")
-    }
-
-    private func bundledMLXEngineURL() -> URL? {
-        guard let resources = Bundle.main.resourceURL else {
-            return nil
-        }
-        return resources
-            .appendingPathComponent("Native", isDirectory: true)
-            .appendingPathComponent("mlx-engine", isDirectory: true)
     }
 
     private func bundledAirPlaySenderURL() -> URL? {
@@ -828,9 +855,16 @@ private final class BackendManager {
         }
         let obsoletePackages = [
             "aioesphomeapi",
+            "mlx",
+            "mlx-audio",
+            "mlx-lm",
+            "mlx-metal",
+            "mlx-vlm",
+            "mlx-whisper",
             "nanowakeword",
             "openwakeword",
-            "noiseprotocol",
+            "outlines",
+            "outlines-core",
             "scikit-learn",
             "narwhals",
             "threadpoolctl",
@@ -847,6 +881,14 @@ private final class BackendManager {
         ]
         if legacyFaceIDEnvironments.contains(where: { FileManager.default.fileExists(atPath: $0.path) }) {
             appendLog("Private runtime contains an obsolete Face ID worker environment; setup will remove it.\n")
+            return false
+        }
+        let obsoleteRuntimeDirectories = [
+            runtimeDir.appendingPathComponent("mlx-engine", isDirectory: true),
+            agentRoot.appendingPathComponent("models/tts/chatterbox-local/runtime", isDirectory: true)
+        ]
+        if obsoleteRuntimeDirectories.contains(where: { FileManager.default.fileExists(atPath: $0.path) }) {
+            appendLog("Private runtime contains a retired model engine environment; setup will remove it.\n")
             return false
         }
         let legacyFirmwareRoot = agentRoot.appendingPathComponent("esphome", isDirectory: true)
@@ -1003,6 +1045,7 @@ private final class BackendManager {
         environment["OBJC_DISABLE_INITIALIZE_FORK_SAFETY"] = "YES"
         environment["TATER_SETUP_REBUILD"] = "1"
         environment["TATER_SETUP_REQUIRE_LOCAL_LLM"] = "1"
+        environment["TATER_EARLY_WEB_UI_ON_STARTUP"] = "1"
         environment["TATER_VENV_DIR"] = venvDir.path
         environment["TATER_RUNTIME_DIR"] = runtimeDir.path
         environment["TATER_PROFILE_ENV"] = profileEnv.path
@@ -1017,18 +1060,11 @@ private final class BackendManager {
         if let resources = Bundle.main.resourceURL {
             environment["TATER_APP_RESOURCES_DIR"] = resources.path
         }
-        environment["TATER_HF_TRANSFORMERS_MODEL_ROOT"] = llmRoot.appendingPathComponent("huggingface", isDirectory: true).path
         environment["TATER_LLAMA_CPP_MODEL_ROOT"] = llmRoot.appendingPathComponent("llama-cpp", isDirectory: true).path
-        environment["TATER_MLX_LM_MODEL_ROOT"] = llmRoot.appendingPathComponent("mlx", isDirectory: true).path
         if environment["TATER_LLAMA_CPP_SERVER_BIN"]?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true,
            let bundled = bundledLlamaServerURL(),
            FileManager.default.isExecutableFile(atPath: bundled.path) {
             environment["TATER_LLAMA_CPP_SERVER_BIN"] = bundled.path
-        }
-        if environment["TATER_MLX_ENGINE_PATH"]?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true,
-           let bundled = bundledMLXEngineURL(),
-           FileManager.default.fileExists(atPath: bundled.appendingPathComponent("mlx_engine", isDirectory: true).path) {
-            environment["TATER_MLX_ENGINE_PATH"] = bundled.path
         }
         if let bundled = bundledAirPlaySenderURL(),
            FileManager.default.isExecutableFile(atPath: bundled.path) {
@@ -2858,7 +2894,7 @@ private final class TaterWindowController: NSWindowController, WKNavigationDeleg
             return "Python packages installed"
         }
         if line.hasPrefix("Cloning into ") {
-            return "Downloading optional MLX runtime..."
+            return "Downloading native runtime..."
         }
         if line.contains("core imports ok") {
             return "Checking installed runtime..."
@@ -2890,15 +2926,180 @@ private final class TaterWindowController: NSWindowController, WKNavigationDeleg
     }
 }
 
+private final class DataMigrationCancellation {
+    private let lock = NSLock()
+    private var cancelled = false
+
+    func cancel() {
+        lock.lock()
+        cancelled = true
+        lock.unlock()
+    }
+
+    var isCancelled: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return cancelled
+    }
+}
+
+private struct DataMigrationStats {
+    let entryCount: Int
+    let fileCount: Int
+    let byteCount: Int64
+}
+
+private struct DataMigrationCancelled: LocalizedError {
+    var errorDescription: String? { "The data move was cancelled. Your original data was not changed." }
+}
+
+private final class DataMigrationWindowController: NSWindowController {
+    private let titleLabel = NSTextField(labelWithString: "Moving Tater Data")
+    private let statusLabel = NSTextField(labelWithString: "Preparing…")
+    private let detailLabel = NSTextField(labelWithString: "")
+    private let pathLabel = NSTextField(wrappingLabelWithString: "")
+    private let progress = NSProgressIndicator()
+    private let cancelButton = NSButton(title: "Cancel", target: nil, action: nil)
+    var onCancel: (() -> Void)?
+
+    init(source: URL, destination: URL) {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 560, height: 330),
+            styleMask: [.titled, .closable, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "Move Tater Data"
+        window.titlebarAppearsTransparent = true
+        window.isMovableByWindowBackground = true
+        window.standardWindowButton(.closeButton)?.isEnabled = false
+        window.center()
+        super.init(window: window)
+
+        let icon = NSImageView()
+        icon.image = NSImage(systemSymbolName: "externaldrive.badge.plus", accessibilityDescription: "Move data")
+        icon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 34, weight: .medium)
+        icon.contentTintColor = .systemPurple
+        icon.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            icon.widthAnchor.constraint(equalToConstant: 44),
+            icon.heightAnchor.constraint(equalToConstant: 44),
+        ])
+
+        titleLabel.font = .systemFont(ofSize: 24, weight: .bold)
+        statusLabel.font = .systemFont(ofSize: 15, weight: .semibold)
+        detailLabel.textColor = .secondaryLabelColor
+        pathLabel.textColor = .secondaryLabelColor
+        pathLabel.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        pathLabel.stringValue = "\(source.path)\n→ \(destination.path)"
+        pathLabel.maximumNumberOfLines = 3
+
+        progress.isIndeterminate = true
+        progress.style = .bar
+        progress.controlSize = .large
+        progress.startAnimation(nil)
+
+        cancelButton.target = self
+        cancelButton.action = #selector(cancelPressed)
+        cancelButton.bezelStyle = .rounded
+
+        let headerText = NSStackView(views: [titleLabel, statusLabel])
+        headerText.orientation = .vertical
+        headerText.alignment = .leading
+        headerText.spacing = 5
+        let header = NSStackView(views: [icon, headerText])
+        header.orientation = .horizontal
+        header.alignment = .centerY
+        header.spacing = 14
+
+        let buttonRow = NSStackView(views: [NSView(), cancelButton])
+        buttonRow.orientation = .horizontal
+        buttonRow.alignment = .centerY
+
+        let content = NSStackView(views: [header, pathLabel, progress, detailLabel, buttonRow])
+        content.orientation = .vertical
+        content.alignment = .leading
+        content.spacing = 18
+        content.edgeInsets = NSEdgeInsets(top: 34, left: 36, bottom: 28, right: 36)
+        content.translatesAutoresizingMaskIntoConstraints = false
+        window.contentView = NSView()
+        window.contentView?.addSubview(content)
+        NSLayoutConstraint.activate([
+            content.leadingAnchor.constraint(equalTo: window.contentView!.leadingAnchor),
+            content.trailingAnchor.constraint(equalTo: window.contentView!.trailingAnchor),
+            content.topAnchor.constraint(equalTo: window.contentView!.topAnchor),
+            content.bottomAnchor.constraint(equalTo: window.contentView!.bottomAnchor),
+            pathLabel.widthAnchor.constraint(equalTo: content.widthAnchor, constant: -72),
+            progress.widthAnchor.constraint(equalTo: content.widthAnchor, constant: -72),
+            detailLabel.widthAnchor.constraint(equalTo: content.widthAnchor, constant: -72),
+            buttonRow.widthAnchor.constraint(equalTo: content.widthAnchor, constant: -72),
+        ])
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    @objc private func cancelPressed() {
+        cancelButton.isEnabled = false
+        statusLabel.stringValue = "Cancelling safely…"
+        detailLabel.stringValue = "Finishing the current file and removing the incomplete copy."
+        onCancel?()
+    }
+
+    func setScanning() {
+        statusLabel.stringValue = "Measuring your Tater data"
+        detailLabel.stringValue = "Checking files and available space before copying."
+        progress.isIndeterminate = true
+        progress.startAnimation(nil)
+    }
+
+    func setCopying(copied: Int64, total: Int64, files: Int, totalFiles: Int) {
+        progress.stopAnimation(nil)
+        progress.isIndeterminate = false
+        progress.minValue = 0
+        progress.maxValue = 1
+        progress.doubleValue = total > 0 ? min(1, Double(copied) / Double(total)) : 1
+        statusLabel.stringValue = "Copying Tater data"
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        let copiedText = formatter.string(fromByteCount: copied)
+        let totalText = formatter.string(fromByteCount: total)
+        detailLabel.stringValue = "\(copiedText) of \(totalText)  •  \(files) of \(totalFiles) files"
+    }
+
+    func setSwitching(_ text: String) {
+        cancelButton.isEnabled = false
+        progress.isIndeterminate = true
+        progress.startAnimation(nil)
+        statusLabel.stringValue = text
+        detailLabel.stringValue = "The original data stays available until Tater starts successfully."
+    }
+
+    func finish(success: Bool, title: String, detail: String) {
+        progress.stopAnimation(nil)
+        progress.isIndeterminate = false
+        progress.doubleValue = success ? 1 : 0
+        titleLabel.stringValue = success ? "Tater Data Moved" : "Data Move Stopped"
+        statusLabel.stringValue = title
+        detailLabel.stringValue = detail
+        cancelButton.title = "Close"
+        cancelButton.isEnabled = true
+        window?.standardWindowButton(.closeButton)?.isEnabled = true
+        cancelButton.target = window
+        cancelButton.action = #selector(NSWindow.performClose(_:))
+    }
+}
+
 private final class AppDelegate: NSObject, NSApplicationDelegate {
     private let backend = BackendManager()
     private let updater = UpdateManager()
     private var statusItem: NSStatusItem?
     private var statusMenuItem: NSMenuItem?
     private var startMenuItem: NSMenuItem?
+    private var restartMenuItem: NSMenuItem?
     private var stopMenuItem: NSMenuItem?
     private var updateMenuItem: NSMenuItem?
     private var checkUpdatesMenuItem: NSMenuItem?
+    private var dataMigrationMenuItem: NSMenuItem?
     private var mascotMenuItem: NSMenuItem?
     private var windowController: TaterWindowController?
     private var mascotController: TaterMascotController?
@@ -2911,6 +3112,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     private let mascotEnabledKey = "TaterMascotEnabled"
     private var mascotEnabled = false
     private var terminationInProgress = false
+    private var migrationInProgress = false
+    private var migrationWindowController: DataMigrationWindowController?
+    private var migrationCancellation: DataMigrationCancellation?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
@@ -2943,6 +3147,15 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if migrationInProgress {
+            let alert = NSAlert()
+            alert.messageText = "Tater is still moving data"
+            alert.informativeText = "Wait for the move to finish, or cancel it in the migration window before quitting. This keeps both the original and new copies safe."
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "Keep Tater Open")
+            alert.runModal()
+            return .terminateCancel
+        }
         if terminationInProgress {
             return .terminateLater
         }
@@ -3044,12 +3257,16 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(mascot)
         menu.addItem(NSMenuItem.separator())
         let start = NSMenuItem(title: "Start", action: #selector(startTater), keyEquivalent: "s")
+        let restart = NSMenuItem(title: "Restart", action: #selector(restartTater), keyEquivalent: "r")
         let stop = NSMenuItem(title: "Stop", action: #selector(stopTater), keyEquivalent: "")
         menu.addItem(start)
-        menu.addItem(NSMenuItem(title: "Restart", action: #selector(restartTater), keyEquivalent: "r"))
+        menu.addItem(restart)
         menu.addItem(stop)
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Show Logs", action: #selector(showLogs), keyEquivalent: "l"))
+        let moveData = NSMenuItem(title: "Move Tater Data…", action: #selector(moveTaterData), keyEquivalent: "")
+        moveData.target = self
+        menu.addItem(moveData)
         let checkUpdates = NSMenuItem(title: "Check for Updates...", action: #selector(checkForUpdates), keyEquivalent: "")
         checkUpdates.target = self
         menu.addItem(checkUpdates)
@@ -3060,9 +3277,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem = item
         statusMenuItem = status
         startMenuItem = start
+        restartMenuItem = restart
         stopMenuItem = stop
         updateMenuItem = update
         checkUpdatesMenuItem = checkUpdates
+        dataMigrationMenuItem = moveData
         mascotMenuItem = mascot
         refreshMenu(for: backend.state)
         refreshUpdateMenu(for: updater.state)
@@ -3084,6 +3303,14 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             if !usesMenuBarImage {
                 statusItem?.button?.title = "T"
             }
+        }
+        dataMigrationMenuItem?.isEnabled = !migrationInProgress
+        if migrationInProgress {
+            startMenuItem?.isEnabled = false
+            restartMenuItem?.isEnabled = false
+            stopMenuItem?.isEnabled = false
+        } else {
+            restartMenuItem?.isEnabled = true
         }
     }
 
@@ -3196,19 +3423,281 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func startTater() {
+        guard !migrationInProgress else { return }
         backend.start()
     }
 
     @objc private func stopTater() {
+        guard !migrationInProgress else { return }
         backend.stop()
     }
 
     @objc private func restartTater() {
+        guard !migrationInProgress else { return }
         backend.restart()
     }
 
     @objc private func showLogs() {
         backend.openLogsFolder()
+    }
+
+    @objc private func moveTaterData() {
+        guard !migrationInProgress else { return }
+
+        let panel = NSOpenPanel()
+        panel.title = "Choose a New Location for Tater Data"
+        panel.message = "Tater will create a “Tater Data” folder here. Choose a fast drive with enough room for your models."
+        panel.prompt = "Choose Location"
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = backend.agentRoot.deletingLastPathComponent()
+        guard panel.runModal() == .OK, let selectedParent = panel.url?.standardizedFileURL else { return }
+
+        let source = backend.agentRoot.standardizedFileURL
+        let destination = selectedParent.appendingPathComponent("Tater Data", isDirectory: true).standardizedFileURL
+        guard source != destination else {
+            presentMigrationAlert(title: "That is already Tater's data location", detail: source.path)
+            return
+        }
+        let sourcePrefix = source.path.hasSuffix("/") ? source.path : source.path + "/"
+        let destinationPrefix = destination.path.hasSuffix("/") ? destination.path : destination.path + "/"
+        guard !destination.path.hasPrefix(sourcePrefix), !source.path.hasPrefix(destinationPrefix) else {
+            presentMigrationAlert(title: "Choose a separate location", detail: "The new data folder cannot be inside the current data folder, or contain it.")
+            return
+        }
+        guard !FileManager.default.fileExists(atPath: destination.path) else {
+            presentMigrationAlert(title: "A Tater Data folder already exists there", detail: "Choose another location or move the existing folder out of the way first. Tater will not merge or overwrite data.")
+            return
+        }
+
+        let confirm = NSAlert()
+        confirm.messageText = "Move all Tater data?"
+        confirm.informativeText = "Tater will stop, copy and verify your models, documents, workspace, and Redis data, switch to the new location, then start again. The old folder is moved to the Trash only after Tater is running from the new location."
+        confirm.alertStyle = .informational
+        confirm.addButton(withTitle: "Move Data")
+        confirm.addButton(withTitle: "Cancel")
+        guard confirm.runModal() == .alertFirstButtonReturn else { return }
+
+        beginDataMigration(from: source, to: destination, selectedParent: selectedParent)
+    }
+
+    private func beginDataMigration(from source: URL, to destination: URL, selectedParent: URL) {
+        migrationInProgress = true
+        dataMigrationMenuItem?.isEnabled = false
+        let cancellation = DataMigrationCancellation()
+        migrationCancellation = cancellation
+        let controller = DataMigrationWindowController(source: source, destination: destination)
+        controller.onCancel = { cancellation.cancel() }
+        migrationWindowController = controller
+        controller.showWindow(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        controller.setScanning()
+
+        let previousBookmark = UserDefaults.standard.data(forKey: taterDataRootBookmarkKey)
+        let scoped = selectedParent.startAccessingSecurityScopedResource() ? selectedParent : nil
+        let newBookmark = try? selectedParent.bookmarkData(
+            options: [.withSecurityScope],
+            includingResourceValuesForKeys: nil,
+            relativeTo: nil
+        )
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            do {
+                self.backend.stop(waitForExit: true)
+                let stats = try self.migrationStats(at: source)
+                try self.requireMigrationCapacity(stats.byteCount, at: selectedParent)
+                try self.copyDataForMigration(
+                    from: source,
+                    to: destination,
+                    stats: stats,
+                    cancellation: cancellation
+                )
+                if cancellation.isCancelled { throw DataMigrationCancelled() }
+
+                DispatchQueue.main.async {
+                    controller.setSwitching("Verifying the new location")
+                }
+                let copiedStats = try self.migrationStats(at: destination)
+                guard
+                    copiedStats.entryCount == stats.entryCount,
+                    copiedStats.fileCount == stats.fileCount,
+                    copiedStats.byteCount == stats.byteCount
+                else {
+                    throw LauncherError("The copied data did not match the original. Tater kept using the original folder.")
+                }
+
+                self.backend.activateDataRoot(destination, securityScope: scoped, bookmark: newBookmark)
+                DispatchQueue.main.async {
+                    controller.setSwitching("Starting Tater from the new location")
+                }
+                self.backend.start()
+                let startupResult = self.waitForBackendStart(timeout: 180)
+                guard startupResult.ok else {
+                    self.backend.stop(waitForExit: true)
+                    self.backend.restoreDataRoot(source, bookmark: previousBookmark)
+                    self.backend.start()
+                    throw LauncherError("Tater could not start from the new location. It switched back to the original data folder. \(startupResult.message)")
+                }
+
+                var cleanupDetail = "The original data was moved to the Trash and can be recovered from there."
+                do {
+                    var trashedURL: NSURL?
+                    try FileManager.default.trashItem(at: source, resultingItemURL: &trashedURL)
+                } catch {
+                    cleanupDetail = "Tater is using the new location. The original folder remains at \(source.path) because macOS could not move it to the Trash."
+                }
+                DispatchQueue.main.async {
+                    self.finishDataMigration()
+                    controller.finish(success: true, title: "Tater is running from \(destination.path)", detail: cleanupDetail)
+                }
+            } catch {
+                if FileManager.default.fileExists(atPath: destination.path), self.backend.agentRoot.standardizedFileURL != destination.standardizedFileURL {
+                    try? FileManager.default.removeItem(at: destination)
+                }
+                if self.backend.state == .stopped {
+                    self.backend.start()
+                }
+                scoped?.stopAccessingSecurityScopedResource()
+                DispatchQueue.main.async {
+                    self.finishDataMigration()
+                    controller.finish(success: false, title: error.localizedDescription, detail: "Your original data remains at \(source.path).")
+                }
+            }
+        }
+    }
+
+    private func migrationStats(at root: URL) throws -> DataMigrationStats {
+        guard FileManager.default.fileExists(atPath: root.path) else {
+            return DataMigrationStats(entryCount: 0, fileCount: 0, byteCount: 0)
+        }
+        let keys: [URLResourceKey] = [.isRegularFileKey, .fileSizeKey]
+        var enumerationError: Error?
+        guard let enumerator = FileManager.default.enumerator(
+            at: root,
+            includingPropertiesForKeys: keys,
+            options: [],
+            errorHandler: { _, error in
+                enumerationError = error
+                return false
+            }
+        ) else {
+            throw LauncherError("Tater could not read the current data folder.")
+        }
+        var entries = 0
+        var files = 0
+        var bytes: Int64 = 0
+        for case let file as URL in enumerator {
+            entries += 1
+            let values = try file.resourceValues(forKeys: Set(keys))
+            if values.isRegularFile == true {
+                files += 1
+                bytes += Int64(values.fileSize ?? 0)
+            }
+        }
+        if let enumerationError { throw enumerationError }
+        return DataMigrationStats(entryCount: entries, fileCount: files, byteCount: bytes)
+    }
+
+    private func requireMigrationCapacity(_ requiredBytes: Int64, at location: URL) throws {
+        let values = try location.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+        if let available = values.volumeAvailableCapacityForImportantUsage,
+           available < requiredBytes + 1_073_741_824 {
+            let formatter = ByteCountFormatter()
+            formatter.countStyle = .file
+            throw LauncherError(
+                "The selected drive needs at least \(formatter.string(fromByteCount: requiredBytes + 1_073_741_824)) free before Tater can move the data."
+            )
+        }
+    }
+
+    private func copyDataForMigration(
+        from source: URL,
+        to destination: URL,
+        stats: DataMigrationStats,
+        cancellation: DataMigrationCancellation
+    ) throws {
+        let fm = FileManager.default
+        try fm.createDirectory(at: destination, withIntermediateDirectories: false)
+        let keys: [URLResourceKey] = [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey]
+        var enumerationError: Error?
+        guard let enumerator = fm.enumerator(
+            at: source,
+            includingPropertiesForKeys: keys,
+            options: [],
+            errorHandler: { _, error in
+                enumerationError = error
+                return false
+            }
+        ) else {
+            throw LauncherError("Tater could not enumerate the current data folder.")
+        }
+
+        var copiedBytes: Int64 = 0
+        var copiedFiles = 0
+        var lastUpdate = Date.distantPast
+        for case let item as URL in enumerator {
+            if cancellation.isCancelled { throw DataMigrationCancelled() }
+            let components = item.pathComponents.dropFirst(source.pathComponents.count)
+            let target = components.reduce(destination) { partial, component in
+                partial.appendingPathComponent(component)
+            }
+            let values = try item.resourceValues(forKeys: Set(keys))
+            if values.isDirectory == true && values.isSymbolicLink != true {
+                try fm.createDirectory(at: target, withIntermediateDirectories: true)
+                continue
+            }
+            try fm.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try fm.copyItem(at: item, to: target)
+            if values.isRegularFile == true {
+                copiedBytes += Int64(values.fileSize ?? 0)
+                copiedFiles += 1
+            }
+            if Date().timeIntervalSince(lastUpdate) >= 0.08 || copiedFiles == stats.fileCount {
+                lastUpdate = Date()
+                DispatchQueue.main.async {
+                    self.migrationWindowController?.setCopying(
+                        copied: copiedBytes,
+                        total: stats.byteCount,
+                        files: copiedFiles,
+                        totalFiles: stats.fileCount
+                    )
+                }
+            }
+        }
+        if let enumerationError { throw enumerationError }
+    }
+
+    private func waitForBackendStart(timeout: TimeInterval) -> (ok: Bool, message: String) {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            switch backend.state {
+            case .running:
+                return (true, "")
+            case .failed(let message):
+                return (false, message)
+            case .stopped, .bootstrapping, .starting:
+                Thread.sleep(forTimeInterval: 0.4)
+            }
+        }
+        return (false, "Startup timed out.")
+    }
+
+    private func finishDataMigration() {
+        migrationInProgress = false
+        migrationCancellation = nil
+        refreshMenu(for: backend.state)
+    }
+
+    private func presentMigrationAlert(title: String, detail: String) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = detail
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
     }
 
     @objc private func checkForUpdates() {

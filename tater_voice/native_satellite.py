@@ -640,7 +640,7 @@ def _screen_camera_payload(
     from . import display_cameras
 
     try:
-        payload = dict(display_cameras.build_camera_directory())
+        payload = dict(display_cameras.build_camera_directory(include_satellites=False))
     except Exception:
         _vp().logger.warning("[native-satellite] screen camera directory refresh failed", exc_info=True)
         payload = {"available": False, "cameras": []}
@@ -1750,7 +1750,8 @@ class _NativeVoicePipelineBridge:
 
     async def wake_preroll_boundary(self) -> None:
         # This marker shares the audio worker queue so every saved wake frame
-        # is classified before command audio is allowed into STT or VAD.
+        # is classified before command audio is allowed into VAD. STT retains
+        # the ordered wake frames so speech crossing the boundary stays whole.
         self._ensure_audio_task()
         await self._audio_queue.put(_NATIVE_WAKE_PREROLL_BOUNDARY)
 
@@ -5296,12 +5297,17 @@ async def _handle_text_message(selector: str, message: Dict[str, Any]) -> Option
     if msg_type == "display.climate.action":
         from . import display_climate
 
-        result = await asyncio.to_thread(display_climate.run_climate_action, payload)
         preferred_room = ""
         async with _clients_lock:
             client = _clients.get(selector)
             hello = client.get("hello") if isinstance(client, dict) and isinstance(client.get("hello"), dict) else {}
             preferred_room = _text(_message_payload(hello).get("room"))
+        result = await asyncio.to_thread(
+            display_climate.run_climate_action,
+            payload,
+            selector=selector,
+            preferred_room=preferred_room,
+        )
         climate = await asyncio.to_thread(_screen_climate_payload, selector, preferred_room)
         climate = display_climate.apply_action_to_summary(climate, payload)
         await send_command(selector, "display.climate", climate)
@@ -5350,6 +5356,22 @@ async def _handle_text_message(selector: str, message: Dict[str, Any]) -> Option
         return _envelope(
             "display.camera.close.ack",
             {"ok": True},
+            message_id=_text(message.get("id")),
+        )
+    if msg_type in {
+        "display.video.pause",
+        "display.video.resume",
+        "display.video.stop",
+        "display.video.progress",
+        "display.video.ended",
+        "display.video.error",
+    }:
+        from . import display_video
+
+        result = await display_video.handle_device_action(selector, msg_type, payload)
+        return _envelope(
+            f"{msg_type}.ack",
+            result,
             message_id=_text(message.get("id")),
         )
     if msg_type.startswith("sat_chat."):
@@ -5607,6 +5629,12 @@ async def handle_websocket(websocket: WebSocket) -> None:
 
         if _screen_cameras_supported(payload):
             await send_json(_envelope("display.cameras", await asyncio.to_thread(_screen_camera_payload)))
+
+        if bool(_capabilities(payload).get("screen_video_playback")):
+            from . import display_video
+
+            active_video = display_video.session_payload(selector)
+            await send_json(_envelope("display.video", active_video))
 
         if _screen_notifications_supported(payload):
             from . import display_bus

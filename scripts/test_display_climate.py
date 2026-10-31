@@ -31,6 +31,7 @@ class DisplayClimateTests(unittest.TestCase):
     def test_rook_uses_only_three_configured_room_temperature_slots(self) -> None:
         profile = {
             "screen_target": "rook",
+            "thermostat": "ecobee_homekit::thermostat:living-room",
             "slots": {
                 "room_temp_1": "sensor_provider::sensor:kitchen",
                 "room_temp_2": "sensor_provider::sensor:bedroom",
@@ -56,6 +57,10 @@ class DisplayClimateTests(unittest.TestCase):
             ],
         )
         self.assertEqual(build.call_args.kwargs["maximum_rooms"], 3)
+        self.assertEqual(
+            build.call_args.kwargs["thermostat_ref"],
+            "ecobee_homekit::thermostat:living-room",
+        )
 
     def test_climate_action_reuses_normalized_integration_action(self) -> None:
         thermostat = {
@@ -81,6 +86,49 @@ class DisplayClimateTests(unittest.TestCase):
             "set_temperature",
             "thermostat:living-room",
             {"temperature": 72.0, "target_temperature": 72.0, "temperature_unit": "F"},
+        )
+
+    def test_climate_action_targets_the_satellites_selected_thermostat(self) -> None:
+        office = {
+            "integration_id": "ecobee_homekit",
+            "id": "thermostat:office",
+            "room": "Office",
+            "room_id": "office",
+            "category_ids": ["climate"],
+            "actions": ["set_temperature", "set_hvac_mode"],
+        }
+        living_room = {
+            "integration_id": "homekit",
+            "id": "thermostat:living-room",
+            "room": "Living Room",
+            "room_id": "living_room",
+            "category_ids": ["climate"],
+            "actions": ["set_temperature", "set_hvac_mode"],
+        }
+        with (
+            mock.patch.object(
+                display_climate.display_feed,
+                "_saved_display_profile_from_query",
+                return_value=({"thermostat": "homekit::thermostat:living-room"}, True),
+            ),
+            mock.patch.object(
+                display_climate,
+                "get_integration_device_registry",
+                return_value={"devices": [office, living_room]},
+            ),
+            mock.patch.object(display_climate, "run_integration_device_action", return_value={"ok": True}) as run,
+        ):
+            result = display_climate.run_climate_action(
+                {"action": "set_hvac_mode", "room_id": "living_room", "mode": "cool"},
+                selector="native:crown",
+            )
+
+        self.assertTrue(result["ok"])
+        run.assert_called_once_with(
+            "homekit",
+            "set_hvac_mode",
+            "thermostat:living-room",
+            {"mode": "cool", "hvac_mode": "cool"},
         )
 
     def test_temperature_action_stays_visible_while_provider_state_catches_up(self) -> None:

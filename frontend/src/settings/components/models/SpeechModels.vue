@@ -2,27 +2,24 @@
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { getJson, responseJson } from "../../../shared/api";
 import type { JsonRow } from "../../types";
-import ModelFields from "./ModelFields.vue";
 import TtsProfile from "./TtsProfile.vue";
 
 const props = defineProps<{
   draft: JsonRow;
   speechUi: JsonRow;
   announcementUi: JsonRow;
-  voiceModelUi: JsonRow;
   endpoints: {
     modelsSpeechPreview: string;
     modelsWyomingVoices: string;
     modelsOpenAiVoices: string;
     modelsOpenAiModels: string;
-    modelsChatterboxVoices: string;
     modelsSpeechWarmup: string;
     modelsCloneAudio: string;
   };
 }>();
 const emit = defineEmits<{ dirty: []; notify: [message: string, tone?: string] }>();
 
-const area = ref("listening");
+const area = ref<"replies" | "announcements" | "playback">("replies");
 const warmup = ref<JsonRow>({});
 const previewText = ref("Hello from Tater. This is a voice preview.");
 const previewScope = ref<"direct" | "announcement">("direct");
@@ -32,32 +29,8 @@ const previewAudio = ref<HTMLAudioElement | null>(null);
 const error = ref("");
 let warmupTimer: number | null = null;
 
-const sttMeta: Record<string, { mark: string; short: string }> = {
-  faster_whisper: { mark: "FW", short: "Fast, accurate local Whisper transcription." },
-  mlx_whisper: { mark: "MLX", short: "Whisper optimized for Apple Silicon." },
-  parakeet_onnx: { mark: "PK", short: "Efficient local speech recognition with ONNX." },
-  qwen3_asr_llama_cpp: { mark: "Q3", short: "Experimental local Qwen3-ASR through llama.cpp." },
-  wyoming: { mark: "WY", short: "Use a Wyoming speech service on your network." },
-  vosk: { mark: "VK", short: "Lightweight offline recognition for modest hardware." },
-};
-
-const voiceSections = computed<JsonRow[]>(() => Array.isArray(props.voiceModelUi.sections) ? props.voiceModelUi.sections : []);
-const sttOptions = computed<JsonRow[]>(() => Array.isArray(props.speechUi.stt_backend_options) ? props.speechUi.stt_backend_options : []);
-const accelerationOptions = computed<JsonRow[]>(() => Array.isArray(props.speechUi.acceleration_options) ? props.speechUi.acceleration_options : []);
 const warmupItems = computed<JsonRow[]>(() => Array.isArray(warmup.value.items) ? warmup.value.items : []);
 const warmupHasErrors = computed(() => warmupItems.value.some((item) => String(item.status || "").toLowerCase() === "error") || (Array.isArray(warmup.value.errors) && warmup.value.errors.length > 0));
-const voiceValues = computed<JsonRow>(() => {
-  if (!props.draft.esphome_settings || typeof props.draft.esphome_settings !== "object") props.draft.esphome_settings = {};
-  return props.draft.esphome_settings as JsonRow;
-});
-const selectedStt = computed(() => String(props.draft.speech_stt_backend || "faster_whisper"));
-const selectedSttLabel = computed(() => labelFor(sttOptions.value, selectedStt.value, "Speech recognition"));
-const selectedAccelerationLabel = computed(() => labelFor(accelerationOptions.value, props.draft.speech_acceleration, "Auto acceleration"));
-const localStt = computed(() => selectedStt.value !== "wyoming");
-const visibleVoiceSections = computed(() => voiceSections.value.filter((section) => {
-  const label = String(section.label || "").toLowerCase();
-  return !label.includes("faster whisper") || selectedStt.value === "faster_whisper";
-}));
 const directVoiceLabel = computed(() => labelFor(
   Array.isArray(props.speechUi.tts_backend_options) ? props.speechUi.tts_backend_options as JsonRow[] : [],
   props.draft.speech_tts_backend,
@@ -74,7 +47,6 @@ const announcementVoiceLabel = computed(() => {
 });
 const previewBackendLabel = computed(() => previewScope.value === "direct" ? directVoiceLabel.value : announcementVoiceLabel.value);
 const areaIntro = computed(() => {
-  if (area.value === "listening") return { eyebrow: "Hear clearly", title: "Listening and speech recognition", description: "Choose how Tater turns speech into text, then tune only the runtime that is actually in use.", status: selectedSttLabel.value, badge: localStt.value ? selectedAccelerationLabel.value : "Network service" };
   if (area.value === "replies") return { eyebrow: "Tater's voice", title: "Conversational reply voice", description: "Choose the voice engine Tater uses when answering people directly.", status: directVoiceLabel.value, badge: "Direct replies" };
   if (area.value === "announcements") return { eyebrow: "Whole-home voice", title: "Announcements and proactive speech", description: "Reuse the reply voice or give announcements their own sound, then control satellite ducking.", status: announcementVoiceLabel.value, badge: "Announcements" };
   return { eyebrow: "Sound check", title: "Preview before you save", description: "Generate a sample from the settings currently on screen, including unsaved changes.", status: previewBackendLabel.value, badge: "Live preview" };
@@ -83,12 +55,7 @@ const areaIntro = computed(() => {
 function optionValue(option: JsonRow) { return String(option.value ?? option.id ?? ""); }
 function optionLabel(option: JsonRow) { return String(option.label ?? option.name ?? option.value ?? option.id ?? ""); }
 function labelFor(options: JsonRow[], value: unknown, fallback: string) { return optionLabel(options.find((option) => optionValue(option) === String(value || "")) || {}) || fallback; }
-function sttMark(option: JsonRow) { return sttMeta[optionValue(option)]?.mark || optionLabel(option).slice(0, 2).toUpperCase(); }
-function sttDescription(option: JsonRow) { return sttMeta[optionValue(option)]?.short || "Speech recognition provider."; }
 function dirty() { error.value = ""; emit("dirty"); }
-function updateVoice(key: string, value: unknown) { voiceValues.value[key] = value; dirty(); }
-function setStt(value: string) { props.draft.speech_stt_backend = value; dirty(); }
-function setAcceleration(value: string) { props.draft.speech_acceleration = value; dirty(); }
 
 async function refreshWarmup() {
   try {
@@ -121,18 +88,8 @@ function previewPayload(): JsonRow {
     wyoming_voice: props.draft[`${prefix}wyoming_tts_voice`] || props.draft.speech_wyoming_tts_voice || "",
     openai_base_url: props.draft[`${prefix}openai_tts_base_url`] || props.draft.speech_openai_tts_base_url || "",
     openai_api_key: props.draft[`${prefix}openai_tts_api_key`] || props.draft.speech_openai_tts_api_key || "",
-    chatterbox_base_url: props.draft[`${prefix}chatterbox_tts_base_url`] || props.draft.speech_chatterbox_tts_base_url || "",
-    chatterbox_voice_mode: props.draft[`${prefix}chatterbox_tts_voice_mode`] || props.draft.speech_chatterbox_tts_voice_mode || "",
-    chatterbox_chunk_size: props.draft[`${prefix}chatterbox_tts_chunk_size`] || props.draft.speech_chatterbox_tts_chunk_size || null,
-    chatterbox_temperature: props.draft[`${prefix}chatterbox_tts_temperature`] || props.draft.speech_chatterbox_tts_temperature || null,
-    chatterbox_exaggeration: props.draft[`${prefix}chatterbox_tts_exaggeration`] || props.draft.speech_chatterbox_tts_exaggeration || null,
-    chatterbox_cfg_weight: props.draft[`${prefix}chatterbox_tts_cfg_weight`] || props.draft.speech_chatterbox_tts_cfg_weight || null,
-    chatterbox_seed: props.draft[`${prefix}chatterbox_tts_seed`] || props.draft.speech_chatterbox_tts_seed || null,
-    chatterbox_speed_factor: props.draft[`${prefix}chatterbox_tts_speed_factor`] || props.draft.speech_chatterbox_tts_speed_factor || null,
-    chatterbox_language: props.draft[`${prefix}chatterbox_tts_language`] || props.draft.speech_chatterbox_tts_language || "",
-    kokoro_output_gain: props.draft[`${prefix}kokoro_output_gain`] || props.draft.speech_kokoro_output_gain || null,
     pocket_tts_output_gain: props.draft[`${prefix}pocket_tts_output_gain`] || props.draft.speech_pocket_tts_output_gain || null,
-    clone_text: managed ? props.draft[`${prefix}${managed}_clone_text`] || "" : "",
+    clone_text: managed ? props.draft[`${prefix}tts_clone_text`] || "" : "",
     managed_language: managed ? props.draft[`${prefix}${managed}_language`] || "" : "",
     managed_instruct: managed ? props.draft[`${prefix}${managed}_instruct`] || "" : "",
   };
@@ -167,7 +124,6 @@ defineExpose({ refreshWarmup });
 <template>
   <section class="tm-stack tm-speech-workspace">
     <nav class="tv-tabs tm-inner-tabs tm-speech-tabs" aria-label="Speech settings areas">
-      <button type="button" :class="{ active: area === 'listening' }" @click="area = 'listening'">Listening & STT</button>
       <button type="button" :class="{ active: area === 'replies' }" @click="area = 'replies'">Reply voice</button>
       <button type="button" :class="{ active: area === 'announcements' }" @click="area = 'announcements'">Announcements</button>
       <button type="button" :class="{ active: area === 'playback' }" @click="area = 'playback'">Playback & test</button>
@@ -187,29 +143,7 @@ defineExpose({ refreshWarmup });
       <div v-else class="tm-speech-ready"><i>{{ warmupHasErrors ? "!" : "✓" }}</i><span>{{ warmupItems.length }} voice {{ warmupItems.length === 1 ? "item" : "items" }} checked</span></div>
     </article>
 
-    <template v-if="area === 'listening'">
-      <article class="tm-form-card tm-speech-picker-card">
-        <header><div><span class="tv-eyebrow">Step 1</span><h3>Choose how Tater listens</h3><p>Only settings for the selected speech-recognition engine appear below.</p></div><span class="tm-speech-status-chip">{{ selectedSttLabel }}</span></header>
-        <div class="tm-speech-provider-grid" role="group" aria-label="Speech recognition backend">
-          <button v-for="option in sttOptions" :key="optionValue(option)" type="button" :class="{ active: selectedStt === optionValue(option) }" :aria-pressed="selectedStt === optionValue(option)" @click="setStt(optionValue(option))"><i>{{ sttMark(option) }}</i><span><strong>{{ optionLabel(option) }}</strong><small>{{ sttDescription(option) }}</small></span><b aria-hidden="true">✓</b></button>
-        </div>
-      </article>
-
-      <article class="tm-form-card tm-speech-runtime-card">
-        <header><div><span class="tv-eyebrow">Step 2</span><h3>{{ localStt ? "Choose the processing hardware" : "Connect the Wyoming service" }}</h3><p>{{ localStt ? "Pick Auto unless you know which accelerator should run speech recognition." : "Enter the host and port of the Wyoming speech-to-text service." }}</p></div><span class="tm-speech-status-chip">{{ localStt ? selectedAccelerationLabel : "Network" }}</span></header>
-        <div v-if="localStt" class="tm-speech-acceleration" role="group" aria-label="Speech acceleration">
-          <button v-for="option in accelerationOptions" :key="optionValue(option)" type="button" :class="{ active: String(draft.speech_acceleration || 'auto') === optionValue(option) }" @click="setAcceleration(optionValue(option))"><i />{{ optionLabel(option) }}</button>
-        </div>
-        <div v-else class="tm-field-grid tm-speech-connection-fields">
-          <label class="tm-field tm-field-wide"><span class="tm-field-label">Wyoming host</span><input v-model="draft.speech_wyoming_stt_host" type="text" placeholder="127.0.0.1" @input="dirty" /><small>Hostname or IP address of your Wyoming STT service.</small></label>
-          <label class="tm-field"><span class="tm-field-label">Wyoming port</span><input v-model="draft.speech_wyoming_stt_port" type="number" min="1" max="65535" placeholder="10300" @input="dirty" /></label>
-        </div>
-      </article>
-
-      <section v-if="visibleVoiceSections.length" class="tm-speech-runtime-settings"><div class="tm-speech-section-heading"><div><span class="tv-eyebrow">Fine tuning</span><h3>Listening controls</h3><p>These controls apply to the selected recognition path and shared voice runtime.</p></div><span>{{ visibleVoiceSections.length }} {{ visibleVoiceSections.length === 1 ? "section" : "sections" }}</span></div><ModelFields :sections="visibleVoiceSections" :values="voiceValues" @change="updateVoice" /></section>
-    </template>
-
-    <TtsProfile v-else-if="area === 'replies'" scope="direct" :draft="draft" :ui="speechUi" :endpoints="endpoints" @dirty="dirty" @notify="(message, tone) => emit('notify', message, tone)" />
+    <TtsProfile v-if="area === 'replies'" scope="direct" :draft="draft" :ui="speechUi" :endpoints="endpoints" @dirty="dirty" @notify="(message, tone) => emit('notify', message, tone)" />
 
     <template v-else-if="area === 'announcements'">
       <TtsProfile scope="announcement" :draft="draft" :ui="announcementUi" :endpoints="endpoints" @dirty="dirty" @notify="(message, tone) => emit('notify', message, tone)" />

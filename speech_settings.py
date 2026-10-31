@@ -3,17 +3,12 @@ from __future__ import annotations
 import contextlib
 import importlib
 import importlib.util
-import json
-from typing import Any, Dict, List, Optional, Tuple
-from urllib import request as urllib_request
+from typing import Any, Dict, List, Optional
 
 from helpers import redis_client
 from tater_runtime_profile import remote_only_enabled
 
 SPEECH_SETTINGS_KEY = "verba_settings:Speech"
-REDIS_PIPER_TTS_MODELS_KEY = "tater:voice:piper:tts_models:v1"
-REDIS_PIPER_TTS_MODELS_META_KEY = "tater:voice:piper:tts_models:meta:v1"
-
 DEFAULT_STT_BACKEND = "wyoming" if remote_only_enabled() else "faster_whisper"
 DEFAULT_TTS_BACKEND = "wyoming"
 DEFAULT_WYOMING_STT_HOST = "127.0.0.1"
@@ -25,70 +20,681 @@ DEFAULT_OPENAI_COMPATIBLE_TTS_BASE_URL = ""
 DEFAULT_OPENAI_COMPATIBLE_TTS_API_KEY = ""
 DEFAULT_OPENAI_COMPATIBLE_TTS_MODEL = "tts-1"
 DEFAULT_OPENAI_COMPATIBLE_TTS_VOICE = "alloy"
-DEFAULT_CHATTERBOX_TTS_BASE_URL = ""
-DEFAULT_CHATTERBOX_TTS_VOICE_MODE = "predefined"
-DEFAULT_CHATTERBOX_TTS_CHUNK_SIZE = 120
-DEFAULT_CHATTERBOX_TTS_STREAMING_ENABLED = True
 DEFAULT_SPEECH_ACCELERATION = "auto"
-DEFAULT_KOKORO_MODEL = "v1.0:q8"
-DEFAULT_KOKORO_VOICE = "af_bella"
-DEFAULT_KOKORO_OUTPUT_GAIN = 1.5
 DEFAULT_POCKET_TTS_MODEL = "b6369a24"
-DEFAULT_POCKET_TTS_VOICE = "alba"
 DEFAULT_POCKET_TTS_OUTPUT_GAIN = 1.5
-DEFAULT_PIPER_MODEL = "en_US-lessac-medium"
 DEFAULT_QWEN_TTS_MODEL = "Qwen/Qwen3-TTS-12Hz-0.6B-Base"
-QWEN_TTS_VOICE_DESIGN_MODEL = "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign"
+QWEN_TTS_LARGE_MODEL = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
 DEFAULT_OMNIVOICE_TTS_MODEL = "k2-fsa/OmniVoice"
-DEFAULT_CHATTERBOX_LOCAL_TTS_MODEL = "ResembleAI/chatterbox-turbo"
-CHATTERBOX_NANO_TTS_MODEL = "ResembleAI/chatterbox-nano"
-DEFAULT_QWEN_TTS_LANGUAGE = "English"
-DEFAULT_OMNIVOICE_TTS_LANGUAGE = "English"
+DEFAULT_QWEN_TTS_LANGUAGE = "Auto"
+DEFAULT_OMNIVOICE_TTS_LANGUAGE = "Auto"
+QWEN_TTS_LANGUAGES = (
+    "Auto",
+    "Chinese",
+    "English",
+    "Japanese",
+    "Korean",
+    "German",
+    "French",
+    "Russian",
+    "Portuguese",
+    "Spanish",
+    "Italian",
+)
+OMNIVOICE_TTS_LANGUAGES = (
+    "Auto",
+    "Abadi",
+    "Abkhazian",
+    "Abron",
+    "Abua",
+    "Adamawa Fulfulde",
+    "Adyghe",
+    "Afade",
+    "Afrikaans",
+    "Agwagwune",
+    "Aja (Benin)",
+    "Akebu",
+    "Alago",
+    "Albanian",
+    "Algerian Arabic",
+    "Algerian Saharan Arabic",
+    "Ambo-Pasco Quechua",
+    "Ambonese Malay",
+    "Amdo Tibetan",
+    "Amharic",
+    "Anaang",
+    "Angika",
+    "Antankarana Malagasy",
+    "Aragonese",
+    "Arbëreshë Albanian",
+    "Arequipa-La Unión Quechua",
+    "Armenian",
+    "Ashe",
+    "Ashéninka Perené",
+    "Askopan",
+    "Assamese",
+    "Asturian",
+    "Atayal",
+    "Awak",
+    "Ayacucho Quechua",
+    "Azerbaijani",
+    "Baatonum",
+    "Bacama",
+    "Bade",
+    "Bafia",
+    "Bafut",
+    "Bagirmi Fulfulde",
+    "Bago-Kusuntu",
+    "Baharna Arabic",
+    "Bakoko",
+    "Balanta-Ganja",
+    "Balti",
+    "Bamenyam",
+    "Bamun",
+    "Bangwinji",
+    "Banjar",
+    "Bankon",
+    "Baoulé",
+    "Bara Malagasy",
+    "Barok",
+    "Basa (Cameroon)",
+    "Basa (Nigeria)",
+    "Bashkir",
+    "Basque",
+    "Batak Mandailing",
+    "Batanga",
+    "Bateri",
+    "Bats",
+    "Bayot",
+    "Bebele",
+    "Belarusian",
+    "Bengali",
+    "Betawi",
+    "Bhili",
+    "Bhojpuri",
+    "Bilur",
+    "Bima",
+    "Bodo",
+    "Boghom",
+    "Bokyi",
+    "Bomu",
+    "Bondei",
+    "Borgu Fulfulde",
+    "Bosnian",
+    "Brahui",
+    "Braj",
+    "Breton",
+    "Buduma",
+    "Buginese",
+    "Bukharic",
+    "Bulgarian",
+    "Bulu (Cameroon)",
+    "Bundeli",
+    "Bunun",
+    "Bura-Pabir",
+    "Burak",
+    "Burmese",
+    "Burushaski",
+    "Cacaloxtepec Mixtec",
+    "Cajatambo North Lima Quechua",
+    "Cakfem-Mushere",
+    "Cameroon Pidgin",
+    "Campidanese Sardinian",
+    "Cantonese",
+    "Catalan",
+    "Cebuano",
+    "Cen",
+    "Central Kurdish",
+    "Central Nahuatl",
+    "Central Pame",
+    "Central Pashto",
+    "Central Puebla Nahuatl",
+    "Central Tarahumara",
+    "Central Yupik",
+    "Central-Eastern Niger Fulfulde",
+    "Chadian Arabic",
+    "Chichewa",
+    "Chichicapan Zapotec",
+    "Chiga",
+    "Chimalapa Zoque",
+    "Chimborazo Highland Quichua",
+    "Chinese",
+    "Chiquián Ancash Quechua",
+    "Chitwania Tharu",
+    "Chokwe",
+    "Chuvash",
+    "Cibak",
+    "Coastal Konjo",
+    "Copainalá Zoque",
+    "Cornish",
+    "Corongo Ancash Quechua",
+    "Croatian",
+    "Cross River Mbembe",
+    "Cuyamecalco Mixtec",
+    "Czech",
+    "Dadiya",
+    "Dagbani",
+    "Dameli",
+    "Danish",
+    "Dargwa",
+    "Dazaga",
+    "Deccan",
+    "Degema",
+    "Dera (Nigeria)",
+    "Dghwede",
+    "Dhatki",
+    "Dhivehi",
+    "Dhofari Arabic",
+    "Dijim-Bwilim",
+    "Dogri",
+    "Domaaki",
+    "Dotyali",
+    "Duala",
+    "Dutch",
+    "DũYa",
+    "Dyula",
+    "Eastern Balochi",
+    "Eastern Bolivian Guaraní",
+    "Eastern Egyptian Bedawi Arabic",
+    "Eastern Krahn",
+    "Eastern Mari",
+    "Eastern Yiddish",
+    "Ebrié",
+    "Eggon",
+    "Egyptian Arabic",
+    "Ejagham",
+    "Eleme",
+    "Eloyi",
+    "Embu",
+    "English",
+    "Erzya",
+    "Esan",
+    "Esperanto",
+    "Estonian",
+    "Eton (Cameroon)",
+    "Ewondo",
+    "Extremaduran",
+    "Fang (Equatorial Guinea)",
+    "Fanti",
+    "Farefare",
+    "Fe'fe'",
+    "Filipino",
+    "Filomena Mata-Coahuitlán Totonac",
+    "Finnish",
+    "Fipa",
+    "French",
+    "Fulah",
+    "Galician",
+    "Gambian Wolof",
+    "Ganda",
+    "Garhwali",
+    "Gawar-Bati",
+    "Gawri",
+    "Gbagyi",
+    "Gbari",
+    "Geji",
+    "Gen",
+    "Georgian",
+    "German",
+    "Geser-Gorom",
+    "Gheg Albanian",
+    "Ghomálá'",
+    "Gidar",
+    "Glavda",
+    "Goan Konkani",
+    "Goaria",
+    "Goemai",
+    "Gola",
+    "Greek",
+    "Guarani",
+    "Guduf-Gava",
+    "Guerrero Amuzgo",
+    "Güilá Zapotec",
+    "Gujarati",
+    "Gujari",
+    "Gulf Arabic",
+    "Gurgula",
+    "Gusii",
+    "Gusilay",
+    "Gweno",
+    "Hadothi",
+    "Hahon",
+    "Haitian",
+    "Hakha Chin",
+    "Hakö",
+    "Halia",
+    "Hausa",
+    "Hawaiian",
+    "Hazaragi",
+    "Hebrew",
+    "Hemba",
+    "Herero",
+    "Highland Konjo",
+    "Hijazi Arabic",
+    "Hindi",
+    "Huarijio",
+    "Huautla Mazatec",
+    "Huaxcaleca Nahuatl",
+    "Huba",
+    "Huitepec Mixtec",
+    "Hula",
+    "Hungarian",
+    "Hunjara-Kaina Ke",
+    "Hwana",
+    "Ibibio",
+    "Icelandic",
+    "Idakho-Isukha-Tiriki",
+    "Idoma",
+    "Igbo",
+    "Igo",
+    "Ikposo",
+    "Ikwere",
+    "Imbabura Highland Quichua",
+    "Indonesian",
+    "Indus Kohistani",
+    "Interlingua (International Auxiliary Language Association)",
+    "Inupiaq",
+    "Irish",
+    "Iron Ossetic",
+    "Isekiri",
+    "Isoko",
+    "Italian",
+    "Ito",
+    "Itzá",
+    "Ixtayutla Mixtec",
+    "Izon",
+    "Jambi Malay",
+    "Japanese",
+    "Jaqaru",
+    "Jauja Wanca Quechua",
+    "Jaunsari",
+    "Javanese",
+    "Jiba",
+    "Jju",
+    "Judeo-Moroccan Arabic",
+    "Juxtlahuaca Mixtec",
+    "Kabardian",
+    "Kabras",
+    "Kabuverdianu",
+    "Kabyle",
+    "Kachi Koli",
+    "Kairak",
+    "Kalabari",
+    "Kalasha",
+    "Kalenjin",
+    "Kalkoti",
+    "Kamba",
+    "Kamo",
+    "Kanauji",
+    "Kanembu",
+    "Kannada",
+    "Karekare",
+    "Kashmiri",
+    "Kathoriya Tharu",
+    "Kati",
+    "Kazakh",
+    "Keiyo",
+    "Khams Tibetan",
+    "Khana",
+    "Khetrani",
+    "Khmer",
+    "Khowar",
+    "Kinga",
+    "Kinnauri",
+    "Kinyarwanda",
+    "Kirghiz",
+    "Kirya-Konzəl",
+    "Kochila Tharu",
+    "Kohistani Shina",
+    "Kohumono",
+    "Kok Borok",
+    "Kol (Papua New Guinea)",
+    "Kom (Cameroon)",
+    "Koma",
+    "Konkani",
+    "Konzo",
+    "Korean",
+    "Korwa",
+    "Kota (India)",
+    "Koti",
+    "Kuanua",
+    "Kuanyama",
+    "Kui (India)",
+    "Kulung (Nigeria)",
+    "Kuot",
+    "Kushi",
+    "Kwambi",
+    "Kwasio",
+    "Lala-Roba",
+    "Lamang",
+    "Lao",
+    "Larike-Wakasihu",
+    "Lasi",
+    "Latgalian",
+    "Latvian",
+    "Levantine Arabic",
+    "Liana-Seti",
+    "Liberia Kpelle",
+    "Liberian English",
+    "Libyan Arabic",
+    "Ligurian",
+    "Lijili",
+    "Lingala",
+    "Lithuanian",
+    "Loarki",
+    "Logooli",
+    "Logudorese Sardinian",
+    "Loja Highland Quichua",
+    "Loloda",
+    "Longuda",
+    "Loxicha Zapotec",
+    "Luba-Lulua",
+    "Luo",
+    "Lushai",
+    "Luxembourgish",
+    "Maasina Fulfulde",
+    "Maba (Chad)",
+    "Macedo-Romanian",
+    "Macedonian",
+    "Mada (Cameroon)",
+    "Mafa",
+    "Maithili",
+    "Malay",
+    "Malayalam",
+    "Mali",
+    "Malinaltepec Me'phaa",
+    "Maltese",
+    "Mandara",
+    "Mandjak",
+    "Manggarai",
+    "Manipuri",
+    "Mansoanka",
+    "Manx",
+    "Maori",
+    "Marathi",
+    "Marghi Central",
+    "Marghi South",
+    "Maria (India)",
+    "Marwari (Pakistan)",
+    "Masana",
+    "Masikoro Malagasy",
+    "Matsés",
+    "Mazaltepec Zapotec",
+    "Mazatlán Mazatec",
+    "Mazatlán Mixe",
+    "Mbe",
+    "Mbo (Cameroon)",
+    "Mbum",
+    "Medumba",
+    "Mekeo",
+    "Meru",
+    "Mesopotamian Arabic",
+    "Mewari",
+    "Min Nan Chinese",
+    "Mingrelian",
+    "Mitlatongo Mixtec",
+    "Miya",
+    "Mokpwe",
+    "Moksha",
+    "Mom Jango",
+    "Mongolian",
+    "Moroccan Arabic",
+    "Motu",
+    "Mpiemo",
+    "Mpumpong",
+    "Mundang",
+    "Mungaka",
+    "Musey",
+    "Musgu",
+    "Musi",
+    "Naba",
+    "Najdi Arabic",
+    "Nalik",
+    "Nawdm",
+    "Ndonga",
+    "Neapolitan",
+    "Nepali",
+    "Ngamo",
+    "Ngas",
+    "Ngiemboon",
+    "Ngizim",
+    "Ngomba",
+    "Ngombale",
+    "Nigerian Fulfulde",
+    "Nigerian Pidgin",
+    "Nimadi",
+    "Nobiin",
+    "North Mesopotamian Arabic",
+    "North Moluccan Malay",
+    "Northern Betsimisaraka Malagasy",
+    "Northern Hindko",
+    "Northern Kurdish",
+    "Northern Pame",
+    "Northern Pashto",
+    "Northern Uzbek",
+    "Northwest Gbaya",
+    "Norwegian",
+    "Norwegian Bokmål",
+    "Norwegian Nynorsk",
+    "Notsi",
+    "Nüpode Huitoto",
+    "Nyankpa",
+    "Nyungwe",
+    "Nzanyi",
+    "Occitan",
+    "Od",
+    "Odia",
+    "Odual",
+    "Omani Arabic",
+    "Ömie",
+    "Orizaba Nahuatl",
+    "Orma",
+    "Ormuri",
+    "Oromo",
+    "Pahari-Potwari",
+    "Paiwan",
+    "Panjabi",
+    "Papuan Malay",
+    "Parkari Koli",
+    "Pedi",
+    "Pero",
+    "Persian",
+    "Petats",
+    "Phalura",
+    "Piemontese",
+    "Piya-Kwonci",
+    "Plateau Malagasy",
+    "Pökoot",
+    "Polish",
+    "Poqomam",
+    "Portuguese",
+    "Pulaar",
+    "Pular",
+    "Puno Quechua",
+    "Pushto",
+    "Qaqet",
+    "Quiotepec Chinantec",
+    "Rana Tharu",
+    "Rangi",
+    "Rapoisi",
+    "Ratahan",
+    "Rayón Zoque",
+    "Romanian",
+    "Romansh",
+    "Rombo",
+    "Rotokas",
+    "Rukai",
+    "Russian",
+    "Sacapulteco",
+    "Saidi Arabic",
+    "Sakalava Malagasy",
+    "Sakizaya",
+    "Saleman",
+    "Samba Daka",
+    "Samba Leko",
+    "San Felipe Otlaltepec Popoloca",
+    "San Francisco Del Mar Huave",
+    "San Juan Atzingo Popoloca",
+    "San Martín Itunyoso Triqui",
+    "San Miguel El Grande Mixtec",
+    "Sansi",
+    "Sanskrit",
+    "Santa Ana de Tusi Pasco Quechua",
+    "Santa Catarina Albarradas Zapotec",
+    "Santali",
+    "Santiago del Estero Quichua",
+    "Saposa",
+    "Saraiki",
+    "Sardinian",
+    "Saya",
+    "Sediq",
+    "Serbian",
+    "Seri",
+    "Shina",
+    "Shona",
+    "Siar-Lak",
+    "Sibe",
+    "Sicilian",
+    "Sihuas Ancash Quechua",
+    "Sikkimese",
+    "Sinaugoro",
+    "Sindhi",
+    "Sindhi Bhil",
+    "Sinhala",
+    "Sinicahua Mixtec",
+    "Sipacapense",
+    "Siwai",
+    "Slovak",
+    "Slovenian",
+    "Solos",
+    "Somali",
+    "Soninke",
+    "South Giziga",
+    "South Ucayali Ashéninka",
+    "Southeastern Nochixtlán Mixtec",
+    "Southern Betsimisaraka Malagasy",
+    "Southern Pashto",
+    "Southern Pastaza Quechua",
+    "Soyaltepec Mazatec",
+    "Spanish",
+    "Standard Arabic",
+    "Standard Moroccan Tamazight",
+    "Sudanese Arabic",
+    "Sulka",
+    "Svan",
+    "Swahili",
+    "Swedish",
+    "Tae'",
+    "Tahaggart Tamahaq",
+    "Taita",
+    "Tajik",
+    "Tamil",
+    "Tandroy-Mahafaly Malagasy",
+    "Tangale",
+    "Tanosy Malagasy",
+    "Tarok",
+    "Tatar",
+    "Tedaga",
+    "Telugu",
+    "Tem",
+    "Teop",
+    "Tepeuxila Cuicatec",
+    "Tepinapa Chinantec",
+    "Tera",
+    "Terei",
+    "Termanu",
+    "Tesaka Malagasy",
+    "Tetelcingo Nahuatl",
+    "Teutila Cuicatec",
+    "Thai",
+    "Tibetan",
+    "Tidaá Mixtec",
+    "Tidore",
+    "Tigak",
+    "Tigre",
+    "Tigrinya",
+    "Tilquiapan Zapotec",
+    "Tinputz",
+    "Tlacoapa Me'phaa",
+    "Tlacoatzintepec Chinantec",
+    "Tlingit",
+    "Toki Pona",
+    "Tomoip",
+    "Tondano",
+    "Tonsea",
+    "Tooro",
+    "Torau",
+    "Torwali",
+    "Tsimihety Malagasy",
+    "Tsotso",
+    "Tswana",
+    "Tugen",
+    "Tuki",
+    "Tula",
+    "Tulu",
+    "Tunen",
+    "Tungag",
+    "Tunisian Arabic",
+    "Tupuri",
+    "Turkana",
+    "Turkish",
+    "Turkmen",
+    "Tututepec Mixtec",
+    "Twi",
+    "Ubaghara",
+    "Uighur",
+    "Ukrainian",
+    "Umbundu",
+    "Upper Sorbian",
+    "Urdu",
+    "Ushojo",
+    "Uzbek",
+    "Vai",
+    "Vietnamese",
+    "Võro",
+    "Votic",
+    "Waci Gbe",
+    "Wadiyara Koli",
+    "Waja",
+    "Wakhi",
+    "Wanga",
+    "Wapan",
+    "Warji",
+    "Welsh",
+    "Wemale",
+    "Western Frisian",
+    "Western Highland Purepecha",
+    "Western Juxtlahuaca Mixtec",
+    "Western Maninkakan",
+    "Western Mari",
+    "Western Niger Fulfulde",
+    "Western Panjabi",
+    "Wolof",
+    "Wuzlam",
+    "Xanaguía Zapotec",
+    "Xhosa",
+    "Yace",
+    "Yakut",
+    "Yalahatan",
+    "Yanahuanca Pasco Quechua",
+    "Yangben",
+    "Yaqui",
+    "Yauyos Quechua",
+    "Yekhee",
+    "Yiddish",
+    "Yidgha",
+    "Yoruba",
+    "Yutanduchi Mixtec",
+    "Zacatlán-Ahuacatlán-Tepetzintla Nahuatl",
+    "Zarma",
+    "Zaza",
+    "Zulu",
+)
 DEFAULT_ANNOUNCEMENT_TTS_BACKEND = DEFAULT_TTS_BACKEND
 ANNOUNCEMENT_TTS_DIRECT_BACKEND = "same_as_direct"
 DEFAULT_SATELLITE_DUCKING_TARGET_PERCENT = 20
 DEFAULT_SATELLITE_DUCKING_ATTACK_MS = 150
 DEFAULT_SATELLITE_DUCKING_RELEASE_MS = 350
-
-KOKORO_MODEL_SPECS: Dict[str, Dict[str, str]] = {
-    "v1.0:q8": {
-        "label": "Kokoro English v1.0 (q8)",
-        "variant": "v1.0",
-        "quality": "q8",
-    },
-    "v1.0:fp32": {
-        "label": "Kokoro English v1.0 (fp32)",
-        "variant": "v1.0",
-        "quality": "fp32",
-    },
-    "v1.1-zh:q8": {
-        "label": "Kokoro Chinese v1.1 (q8)",
-        "variant": "v1.1-zh",
-        "quality": "q8",
-    },
-}
-
-try:
-    from pykokoro.onnx_backend import VOICE_NAMES_BY_VARIANT as KOKORO_VOICE_NAMES_BY_VARIANT
-except Exception:  # pragma: no cover - optional dependency
-    KOKORO_VOICE_NAMES_BY_VARIANT = {}
-
-try:
-    from pocket_tts.utils import utils as pocket_tts_utils
-
-    POCKET_TTS_PREDEFINED_VOICES = (
-        getattr(pocket_tts_utils, "PREDEFINED_VOICES", None)
-        or getattr(pocket_tts_utils, "_ORIGINS_OF_PREDEFINED_VOICES", None)
-        or {}
-    )
-except Exception:  # pragma: no cover - optional dependency
-    POCKET_TTS_PREDEFINED_VOICES = {}
-
-try:
-    from piper.download_voices import VOICES_JSON as PIPER_VOICES_CATALOG_URL
-except Exception:  # pragma: no cover - optional dependency
-    PIPER_VOICES_CATALOG_URL = ""
-
 
 def _clean(value: Any) -> str:
     return str(value or "").strip()
@@ -131,29 +737,12 @@ def normalize_tts_output_gain(value: Any, default: float = 1.5) -> float:
     return min(4.0, max(0.1, parsed))
 
 
-def normalize_chatterbox_voice_mode(value: Any) -> str:
-    token = _clean(value).lower().replace("-", "_").replace(" ", "_")
-    if token in {"clone", "cloned", "reference", "reference_audio"}:
-        return "clone"
-    return DEFAULT_CHATTERBOX_TTS_VOICE_MODE
-
-
-def normalize_chatterbox_chunk_size(value: Any, default: int = DEFAULT_CHATTERBOX_TTS_CHUNK_SIZE) -> int:
-    try:
-        parsed = int(float(value))
-    except Exception:
-        parsed = int(default)
-    return min(500, max(50, parsed))
-
-
 def _normalize_stt_backend(value: Any) -> str:
     token = _clean(value).lower().replace("-", "_").replace(" ", "_")
     if token in {"", "default"}:
         return DEFAULT_STT_BACKEND
     if token in {"faster_whisper", "fasterwhisper", "whisper"}:
         return "faster_whisper"
-    if token in {"mlx_whisper", "mlxwhisper", "mlx"}:
-        return "mlx_whisper"
     if token in {"parakeet", "parakeet_onnx", "onnx_parakeet"}:
         return "parakeet_onnx"
     if token in {
@@ -179,22 +768,10 @@ def _normalize_tts_backend(value: Any) -> str:
         return "wyoming"
     if token in {"openai_compatible", "openai", "openai_api"}:
         return "openai_compatible"
-    if token in {"chatterbox", "chatterbox_tts"}:
-        return "chatterbox"
-    if token in {
-        "chatterbox_builtin",
-        "chatterbox_built_in",
-        "chatterbox_local",
-        "local_chatterbox",
-        "managed_chatterbox",
-    }:
-        return "chatterbox_local"
-    if token == "kokoro":
-        return "kokoro"
+    if token in {"kokoro", "piper"}:
+        return "pocket_tts"
     if token in {"pocket_tts", "pockettts", "pocket"}:
         return "pocket_tts"
-    if token == "piper":
-        return "piper"
     if token in {"qwen", "qwen_tts", "qwen3", "qwen3tts", "qwen3_tts"}:
         return "qwen3_tts"
     if token in {"omni", "omni_voice", "omnivoice", "omnivoice_tts"}:
@@ -207,6 +784,20 @@ def normalize_announcement_tts_backend(value: Any, *, default: str = DEFAULT_ANN
     if token in {"same_as_direct", "same_as_direct_tts", "direct", "direct_tts", "shared"}:
         return ANNOUNCEMENT_TTS_DIRECT_BACKEND
     return _normalize_tts_backend(_clean(value) or default)
+
+
+def _normalize_tts_model_for_backend(backend: Any, value: Any) -> str:
+    token = _normalize_tts_backend(backend)
+    if token == "pocket_tts":
+        return DEFAULT_POCKET_TTS_MODEL
+    if token == "qwen3_tts":
+        selected = _clean(value)
+        if selected.endswith("-VoiceDesign"):
+            return DEFAULT_QWEN_TTS_MODEL
+        return selected or DEFAULT_QWEN_TTS_MODEL
+    if token == "omnivoice":
+        return DEFAULT_OMNIVOICE_TTS_MODEL
+    return _clean(value)
 
 
 def normalize_speech_acceleration(value: Any, *, default: str = DEFAULT_SPEECH_ACCELERATION) -> str:
@@ -315,7 +906,6 @@ def _mps_runtime_available() -> bool:
 def _stt_backend_option_rows() -> List[Dict[str, Any]]:
     return [
         {"value": "faster_whisper", "label": "Faster Whisper"},
-        {"value": "mlx_whisper", "label": "MLX Whisper"},
         {"value": "parakeet_onnx", "label": "Parakeet ONNX"},
         {
             "value": "qwen3_asr_llama_cpp",
@@ -342,168 +932,49 @@ def _module_available(module_name: str) -> bool:
         return False
 
 
-def _supported_kokoro_language_prefixes() -> set[str]:
-    prefixes = {"a", "b", "d", "f"}
-    if _module_available("pypinyin"):
-        prefixes.add("z")
-    if _module_available("pyopenjtalk"):
-        prefixes.add("j")
-    return prefixes
-
-
-def _kokoro_voice_supported(value: Any) -> bool:
-    token = _clean(value).lower()
-    if not token:
-        return False
-    return token[0] in _supported_kokoro_language_prefixes()
-
-
-def _kokoro_voice_label(value: Any) -> str:
-    token = _clean(value)
-    if not token:
-        return ""
-    prefix, _, remainder = token.partition("_")
-    prefix_labels = {
-        "af": "American Female",
-        "am": "American Male",
-        "bf": "British Female",
-        "bm": "British Male",
-        "ef": "Spanish Female",
-        "em": "Spanish Male",
-        "ff": "French Female",
-        "hf": "Hindi Female",
-        "hm": "Hindi Male",
-        "if": "Italian Female",
-        "im": "Italian Male",
-        "jf": "Japanese Female",
-        "jm": "Japanese Male",
-        "pf": "Portuguese Female",
-        "pm": "Portuguese Male",
-        "zf": "Chinese Female",
-        "zm": "Chinese Male",
-        "df": "German Female",
-        "dm": "German Male",
-    }
-    prefix_label = prefix_labels.get(prefix, prefix.upper())
-    if not remainder:
-        return prefix_label
-    pretty_name = remainder.replace("-", " ").replace("_", " ").title()
-    return f"{pretty_name} ({prefix_label})"
-
-
-def _kokoro_model_option_rows(*, current_value: Any = "") -> List[Dict[str, str]]:
-    labels = {key: _clean(spec.get("label")) or key for key, spec in KOKORO_MODEL_SPECS.items()}
-    values = []
-    for model_key, spec in KOKORO_MODEL_SPECS.items():
-        variant = _clean((spec or {}).get("variant")) or "v1.0"
-        voices = list(KOKORO_VOICE_NAMES_BY_VARIANT.get(variant) or KOKORO_VOICE_NAMES_BY_VARIANT.get("v1.0") or [])
-        if any(_kokoro_voice_supported(voice) for voice in voices):
-            values.append(model_key)
-    current_model = _clean(current_value)
-    if current_model not in values:
-        current_model = DEFAULT_KOKORO_MODEL if DEFAULT_KOKORO_MODEL in values else ""
-    return _option_rows_from_values(values, current_value=current_model, labels=labels)
-
-
-def _kokoro_voice_option_rows(*, model_id: Any, current_value: Any = "") -> List[Dict[str, str]]:
-    model_token = _clean(model_id)
-    spec = dict(KOKORO_MODEL_SPECS.get(model_token) or KOKORO_MODEL_SPECS[DEFAULT_KOKORO_MODEL])
-    variant = _clean(spec.get("variant")) or "v1.0"
-    voices = [
-        voice
-        for voice in list(KOKORO_VOICE_NAMES_BY_VARIANT.get(variant) or KOKORO_VOICE_NAMES_BY_VARIANT.get("v1.0") or [])
-        if _kokoro_voice_supported(voice)
-    ]
-    labels = {voice: _kokoro_voice_label(voice) for voice in voices}
-    preferred_voice = _clean(current_value)
-    if preferred_voice not in voices:
-        preferred_voice = DEFAULT_KOKORO_VOICE if DEFAULT_KOKORO_VOICE in voices else _clean(voices[0] if voices else "")
-    voices = _prefer_value_first(voices, preferred_voice)
-    return _option_rows_from_values(voices, current_value=preferred_voice, labels=labels)
-
-
 def _pocket_tts_model_option_rows(*, current_value: Any = "") -> List[Dict[str, str]]:
-    labels = {DEFAULT_POCKET_TTS_MODEL: f"Pocket TTS {DEFAULT_POCKET_TTS_MODEL}"}
+    labels = {DEFAULT_POCKET_TTS_MODEL: "Pocket TTS (CPU Voice Clone)"}
     return _option_rows_from_values([DEFAULT_POCKET_TTS_MODEL], current_value=current_value, labels=labels)
-
-
-def _pocket_tts_voice_option_rows(*, current_value: Any = "") -> List[Dict[str, str]]:
-    values = sorted(POCKET_TTS_PREDEFINED_VOICES.keys())
-    labels = {value: value.replace("-", " ").replace("_", " ").title() for value in values}
-    preferred_voice = _clean(current_value) or (DEFAULT_POCKET_TTS_VOICE if DEFAULT_POCKET_TTS_VOICE in values else "")
-    values = _prefer_value_first(values, preferred_voice)
-    return _option_rows_from_values(values, current_value=preferred_voice, labels=labels)
-
-
-def _load_piper_tts_model_catalog() -> Tuple[List[Dict[str, str]], Dict[str, Any]]:
-    rows: List[Dict[str, str]] = []
-    meta: Dict[str, Any] = {}
-    with contextlib.suppress(Exception):
-        rows_raw = redis_client.get(REDIS_PIPER_TTS_MODELS_KEY)
-        meta_raw = redis_client.get(REDIS_PIPER_TTS_MODELS_META_KEY)
-        parsed_rows = json.loads(rows_raw) if rows_raw else []
-        parsed_meta = json.loads(meta_raw) if meta_raw else {}
-        if isinstance(parsed_rows, list):
-            rows = [row for row in parsed_rows if isinstance(row, dict)]
-        if isinstance(parsed_meta, dict):
-            meta = dict(parsed_meta)
-    return rows, meta
-
-
-def _save_piper_tts_model_catalog(rows: List[Dict[str, str]], *, source: str, error: str = "") -> None:
-    clean: List[Dict[str, str]] = []
-    seen = set()
-    for row in rows:
-        value = _clean((row or {}).get("value"))
-        label = _clean((row or {}).get("label")) or value
-        if not value or value in seen:
-            continue
-        seen.add(value)
-        clean.append({"value": value, "label": label})
-    meta = {
-        "updated_ts": float(__import__("time").time()),
-        "source": _clean(source),
-        "error": _clean(error),
-    }
-    with contextlib.suppress(Exception):
-        redis_client.set(REDIS_PIPER_TTS_MODELS_KEY, json.dumps(clean, ensure_ascii=False))
-        redis_client.set(REDIS_PIPER_TTS_MODELS_META_KEY, json.dumps(meta, ensure_ascii=False))
-
-
-def refresh_piper_tts_model_catalog(force: bool = False) -> Dict[str, Any]:
-    rows, meta = _load_piper_tts_model_catalog()
-    if rows and not force:
-        return {"models": rows, "meta": meta, "count": len(rows)}
-    if not PIPER_VOICES_CATALOG_URL:
-        return {"models": [], "meta": meta, "count": 0}
-    catalog_rows: List[Dict[str, str]] = []
-    with urllib_request.urlopen(PIPER_VOICES_CATALOG_URL, timeout=20) as response:
-        payload = json.load(response)
-    if isinstance(payload, dict):
-        for voice_code in sorted(payload.keys()):
-            value = _clean(voice_code)
-            if value:
-                catalog_rows.append({"value": value, "label": value})
-    _save_piper_tts_model_catalog(catalog_rows, source=PIPER_VOICES_CATALOG_URL, error="")
-    rows, meta = _load_piper_tts_model_catalog()
-    return {"models": rows, "meta": meta, "count": len(rows)}
-
-
-def _piper_tts_model_option_rows(*, current_value: Any = "", ensure_catalog: bool = False) -> List[Dict[str, str]]:
-    rows, _meta = _load_piper_tts_model_catalog()
-    if ensure_catalog and not rows:
-        with contextlib.suppress(Exception):
-            rows = list((refresh_piper_tts_model_catalog(force=False) or {}).get("models") or [])
-    options = sorted(rows, key=lambda row: _clean(row.get("label")).lower())
-    current = _clean(current_value) or DEFAULT_PIPER_MODEL
-    if current and current not in {row.get("value") for row in options}:
-        options.insert(0, {"value": current, "label": current})
-    return options
 
 
 def get_speech_settings() -> Dict[str, Any]:
     shared = redis_client.hgetall(SPEECH_SETTINGS_KEY) or {}
     current_tts_backend = _normalize_tts_backend(shared.get("tts_backend"))
+    announcement_backend = normalize_announcement_tts_backend(
+        shared.get("announcement_tts_backend"),
+        default=DEFAULT_ANNOUNCEMENT_TTS_BACKEND,
+    )
+
+    def legacy_clone_value(field: str, backend: str, *, announcement: bool = False) -> str:
+        prefix = "announcement_" if announcement else ""
+        preferred = (
+            f"{prefix}omnivoice_tts_{field}"
+            if backend == "omnivoice"
+            else f"{prefix}qwen_tts_{field}"
+        )
+        alternate = (
+            f"{prefix}qwen_tts_{field}"
+            if backend == "omnivoice"
+            else f"{prefix}omnivoice_tts_{field}"
+        )
+        return _clean(shared.get(preferred)) or _clean(shared.get(alternate))
+
+    direct_clone_audio = _clean(shared.get("tts_clone_audio")) or legacy_clone_value(
+        "clone_audio", current_tts_backend
+    )
+    direct_clone_text = _clean(shared.get("tts_clone_text")) or legacy_clone_value(
+        "clone_text", current_tts_backend
+    )
+    announcement_clone_audio = (
+        _clean(shared.get("announcement_tts_clone_audio"))
+        if "announcement_tts_clone_audio" in shared
+        else legacy_clone_value("clone_audio", announcement_backend, announcement=True) or direct_clone_audio
+    )
+    announcement_clone_text = (
+        _clean(shared.get("announcement_tts_clone_text"))
+        if "announcement_tts_clone_text" in shared
+        else legacy_clone_value("clone_text", announcement_backend, announcement=True) or direct_clone_text
+    )
 
     def announcement_value(field: str, direct_field: str, default: Any = "") -> str:
         value = shared.get(field) if field in shared else shared.get(direct_field)
@@ -514,102 +985,62 @@ def get_speech_settings() -> Dict[str, Any]:
     has_announcement_wyoming_voice = "announcement_wyoming_tts_voice" in shared
     has_announcement_openai_base_url = "announcement_openai_tts_base_url" in shared
     has_announcement_openai_api_key = "announcement_openai_tts_api_key" in shared
-    has_announcement_chatterbox_base_url = "announcement_chatterbox_tts_base_url" in shared
-    has_announcement_chatterbox_voice_mode = "announcement_chatterbox_tts_voice_mode" in shared
-    has_announcement_chatterbox_chunk_size = "announcement_chatterbox_tts_chunk_size" in shared
-    has_announcement_chatterbox_temperature = "announcement_chatterbox_tts_temperature" in shared
-    has_announcement_chatterbox_exaggeration = "announcement_chatterbox_tts_exaggeration" in shared
-    has_announcement_chatterbox_cfg_weight = "announcement_chatterbox_tts_cfg_weight" in shared
-    has_announcement_chatterbox_seed = "announcement_chatterbox_tts_seed" in shared
-    has_announcement_chatterbox_speed_factor = "announcement_chatterbox_tts_speed_factor" in shared
-    has_announcement_chatterbox_language = "announcement_chatterbox_tts_language" in shared
     return {
         "stt_backend": _normalize_stt_backend(shared.get("stt_backend")),
         "acceleration": normalize_speech_acceleration(shared.get("acceleration")),
         "wyoming_stt_host": _clean(shared.get("wyoming_stt_host")) or DEFAULT_WYOMING_STT_HOST,
         "wyoming_stt_port": _as_int(shared.get("wyoming_stt_port"), DEFAULT_WYOMING_STT_PORT),
         "tts_backend": current_tts_backend,
-        "tts_model": _clean(shared.get("tts_model")),
+        "tts_model": _normalize_tts_model_for_backend(current_tts_backend, shared.get("tts_model")),
         "tts_voice": _clean(shared.get("tts_voice")),
-        "kokoro_output_gain": normalize_tts_output_gain(
-            shared.get("kokoro_output_gain"),
-            DEFAULT_KOKORO_OUTPUT_GAIN,
-        ),
         "pocket_tts_output_gain": normalize_tts_output_gain(
             shared.get("pocket_tts_output_gain"),
             DEFAULT_POCKET_TTS_OUTPUT_GAIN,
         ),
-        "qwen_tts_clone_audio": _clean(shared.get("qwen_tts_clone_audio")),
-        "qwen_tts_clone_text": _clean(shared.get("qwen_tts_clone_text")),
+        "tts_clone_audio": direct_clone_audio,
+        "tts_clone_text": direct_clone_text,
+        "qwen_tts_clone_audio": direct_clone_audio,
+        "qwen_tts_clone_text": direct_clone_text,
         "qwen_tts_language": _clean(shared.get("qwen_tts_language")) or DEFAULT_QWEN_TTS_LANGUAGE,
         "qwen_tts_instruct": _clean(shared.get("qwen_tts_instruct")),
-        "omnivoice_tts_clone_audio": _clean(shared.get("omnivoice_tts_clone_audio")),
-        "omnivoice_tts_clone_text": _clean(shared.get("omnivoice_tts_clone_text")),
+        "omnivoice_tts_clone_audio": direct_clone_audio,
+        "omnivoice_tts_clone_text": direct_clone_text,
         "omnivoice_tts_language": _clean(shared.get("omnivoice_tts_language")) or DEFAULT_OMNIVOICE_TTS_LANGUAGE,
         "omnivoice_tts_instruct": _clean(shared.get("omnivoice_tts_instruct")),
-        "chatterbox_local_tts_clone_audio": _clean(shared.get("chatterbox_local_tts_clone_audio")),
         "wyoming_tts_host": _clean(shared.get("wyoming_tts_host")) or DEFAULT_WYOMING_TTS_HOST,
         "wyoming_tts_port": _as_int(shared.get("wyoming_tts_port"), DEFAULT_WYOMING_TTS_PORT),
         "wyoming_tts_voice": _clean(shared.get("wyoming_tts_voice")) or DEFAULT_WYOMING_TTS_VOICE,
         "openai_tts_base_url": _clean(shared.get("openai_tts_base_url")) or DEFAULT_OPENAI_COMPATIBLE_TTS_BASE_URL,
         "openai_tts_api_key": _clean(shared.get("openai_tts_api_key")) or DEFAULT_OPENAI_COMPATIBLE_TTS_API_KEY,
-        "chatterbox_tts_base_url": _clean(shared.get("chatterbox_tts_base_url")) or DEFAULT_CHATTERBOX_TTS_BASE_URL,
-        "chatterbox_tts_voice_mode": normalize_chatterbox_voice_mode(shared.get("chatterbox_tts_voice_mode")),
-        "chatterbox_tts_chunk_size": normalize_chatterbox_chunk_size(shared.get("chatterbox_tts_chunk_size")),
-        "chatterbox_tts_temperature": _clean(shared.get("chatterbox_tts_temperature")),
-        "chatterbox_tts_exaggeration": _clean(shared.get("chatterbox_tts_exaggeration")),
-        "chatterbox_tts_cfg_weight": _clean(shared.get("chatterbox_tts_cfg_weight")),
-        "chatterbox_tts_seed": _clean(shared.get("chatterbox_tts_seed")),
-        "chatterbox_tts_speed_factor": _clean(shared.get("chatterbox_tts_speed_factor")),
-        "chatterbox_tts_language": _clean(shared.get("chatterbox_tts_language")),
-        "chatterbox_tts_streaming_enabled": normalize_bool(
-            shared.get("chatterbox_tts_streaming_enabled"),
-            DEFAULT_CHATTERBOX_TTS_STREAMING_ENABLED,
+        "announcement_tts_backend": announcement_backend,
+        "announcement_tts_model": _normalize_tts_model_for_backend(
+            announcement_backend,
+            shared.get("announcement_tts_model"),
         ),
-        "announcement_tts_backend": normalize_announcement_tts_backend(
-            shared.get("announcement_tts_backend"),
-            default=DEFAULT_ANNOUNCEMENT_TTS_BACKEND,
-        ),
-        "announcement_tts_model": _clean(shared.get("announcement_tts_model")),
         "announcement_tts_voice": _clean(shared.get("announcement_tts_voice")),
-        "announcement_kokoro_output_gain": normalize_tts_output_gain(
-            shared.get("announcement_kokoro_output_gain")
-            if "announcement_kokoro_output_gain" in shared
-            else shared.get("kokoro_output_gain"),
-            DEFAULT_KOKORO_OUTPUT_GAIN,
-        ),
         "announcement_pocket_tts_output_gain": normalize_tts_output_gain(
             shared.get("announcement_pocket_tts_output_gain")
             if "announcement_pocket_tts_output_gain" in shared
             else shared.get("pocket_tts_output_gain"),
             DEFAULT_POCKET_TTS_OUTPUT_GAIN,
         ),
-        "announcement_qwen_tts_clone_audio": announcement_value(
-            "announcement_qwen_tts_clone_audio", "qwen_tts_clone_audio"
-        ),
-        "announcement_qwen_tts_clone_text": announcement_value(
-            "announcement_qwen_tts_clone_text", "qwen_tts_clone_text"
-        ),
+        "announcement_tts_clone_audio": announcement_clone_audio,
+        "announcement_tts_clone_text": announcement_clone_text,
+        "announcement_qwen_tts_clone_audio": announcement_clone_audio,
+        "announcement_qwen_tts_clone_text": announcement_clone_text,
         "announcement_qwen_tts_language": announcement_value(
             "announcement_qwen_tts_language", "qwen_tts_language", DEFAULT_QWEN_TTS_LANGUAGE
         ),
         "announcement_qwen_tts_instruct": announcement_value(
             "announcement_qwen_tts_instruct", "qwen_tts_instruct"
         ),
-        "announcement_omnivoice_tts_clone_audio": announcement_value(
-            "announcement_omnivoice_tts_clone_audio", "omnivoice_tts_clone_audio"
-        ),
-        "announcement_omnivoice_tts_clone_text": announcement_value(
-            "announcement_omnivoice_tts_clone_text", "omnivoice_tts_clone_text"
-        ),
+        "announcement_omnivoice_tts_clone_audio": announcement_clone_audio,
+        "announcement_omnivoice_tts_clone_text": announcement_clone_text,
         "announcement_omnivoice_tts_language": announcement_value(
             "announcement_omnivoice_tts_language", "omnivoice_tts_language", DEFAULT_OMNIVOICE_TTS_LANGUAGE
         ),
         "announcement_omnivoice_tts_instruct": announcement_value(
             "announcement_omnivoice_tts_instruct", "omnivoice_tts_instruct"
-        ),
-        "announcement_chatterbox_local_tts_clone_audio": announcement_value(
-            "announcement_chatterbox_local_tts_clone_audio", "chatterbox_local_tts_clone_audio"
         ),
         "satellite_ducking_target_percent": _as_int(
             shared.get("satellite_ducking_target_percent"),
@@ -655,51 +1086,6 @@ def get_speech_settings() -> Dict[str, Any]:
             if has_announcement_openai_api_key
             else _clean(shared.get("openai_tts_api_key"))
         ) or DEFAULT_OPENAI_COMPATIBLE_TTS_API_KEY,
-        "announcement_chatterbox_tts_base_url": (
-            _clean(shared.get("announcement_chatterbox_tts_base_url"))
-            if has_announcement_chatterbox_base_url
-            else _clean(shared.get("chatterbox_tts_base_url"))
-        ) or DEFAULT_CHATTERBOX_TTS_BASE_URL,
-        "announcement_chatterbox_tts_voice_mode": normalize_chatterbox_voice_mode(
-            shared.get("announcement_chatterbox_tts_voice_mode")
-            if has_announcement_chatterbox_voice_mode
-            else shared.get("chatterbox_tts_voice_mode")
-        ),
-        "announcement_chatterbox_tts_chunk_size": normalize_chatterbox_chunk_size(
-            shared.get("announcement_chatterbox_tts_chunk_size")
-            if has_announcement_chatterbox_chunk_size
-            else shared.get("chatterbox_tts_chunk_size")
-        ),
-        "announcement_chatterbox_tts_temperature": (
-            _clean(shared.get("announcement_chatterbox_tts_temperature"))
-            if has_announcement_chatterbox_temperature
-            else _clean(shared.get("chatterbox_tts_temperature"))
-        ),
-        "announcement_chatterbox_tts_exaggeration": (
-            _clean(shared.get("announcement_chatterbox_tts_exaggeration"))
-            if has_announcement_chatterbox_exaggeration
-            else _clean(shared.get("chatterbox_tts_exaggeration"))
-        ),
-        "announcement_chatterbox_tts_cfg_weight": (
-            _clean(shared.get("announcement_chatterbox_tts_cfg_weight"))
-            if has_announcement_chatterbox_cfg_weight
-            else _clean(shared.get("chatterbox_tts_cfg_weight"))
-        ),
-        "announcement_chatterbox_tts_seed": (
-            _clean(shared.get("announcement_chatterbox_tts_seed"))
-            if has_announcement_chatterbox_seed
-            else _clean(shared.get("chatterbox_tts_seed"))
-        ),
-        "announcement_chatterbox_tts_speed_factor": (
-            _clean(shared.get("announcement_chatterbox_tts_speed_factor"))
-            if has_announcement_chatterbox_speed_factor
-            else _clean(shared.get("chatterbox_tts_speed_factor"))
-        ),
-        "announcement_chatterbox_tts_language": (
-            _clean(shared.get("announcement_chatterbox_tts_language"))
-            if has_announcement_chatterbox_language
-            else _clean(shared.get("chatterbox_tts_language"))
-        ),
     }
 
 
@@ -719,18 +1105,9 @@ def save_speech_settings(
     announcement_tts_backend: Any,
     announcement_tts_model: Any,
     announcement_tts_voice: Any,
-    chatterbox_tts_base_url: Any = DEFAULT_CHATTERBOX_TTS_BASE_URL,
-    chatterbox_tts_voice_mode: Any = DEFAULT_CHATTERBOX_TTS_VOICE_MODE,
-    chatterbox_tts_chunk_size: Any = DEFAULT_CHATTERBOX_TTS_CHUNK_SIZE,
-    chatterbox_tts_temperature: Any = "",
-    chatterbox_tts_exaggeration: Any = "",
-    chatterbox_tts_cfg_weight: Any = "",
-    chatterbox_tts_seed: Any = "",
-    chatterbox_tts_speed_factor: Any = "",
-    chatterbox_tts_language: Any = "",
-    chatterbox_tts_streaming_enabled: Any = DEFAULT_CHATTERBOX_TTS_STREAMING_ENABLED,
-    kokoro_output_gain: Any = DEFAULT_KOKORO_OUTPUT_GAIN,
     pocket_tts_output_gain: Any = DEFAULT_POCKET_TTS_OUTPUT_GAIN,
+    tts_clone_audio: Any = None,
+    tts_clone_text: Any = None,
     qwen_tts_clone_audio: Any = "",
     qwen_tts_clone_text: Any = "",
     qwen_tts_language: Any = DEFAULT_QWEN_TTS_LANGUAGE,
@@ -739,9 +1116,9 @@ def save_speech_settings(
     omnivoice_tts_clone_text: Any = "",
     omnivoice_tts_language: Any = DEFAULT_OMNIVOICE_TTS_LANGUAGE,
     omnivoice_tts_instruct: Any = "",
-    chatterbox_local_tts_clone_audio: Any = "",
-    announcement_kokoro_output_gain: Any = None,
     announcement_pocket_tts_output_gain: Any = None,
+    announcement_tts_clone_audio: Any = None,
+    announcement_tts_clone_text: Any = None,
     announcement_qwen_tts_clone_audio: Any = None,
     announcement_qwen_tts_clone_text: Any = None,
     announcement_qwen_tts_language: Any = None,
@@ -750,27 +1127,45 @@ def save_speech_settings(
     announcement_omnivoice_tts_clone_text: Any = None,
     announcement_omnivoice_tts_language: Any = None,
     announcement_omnivoice_tts_instruct: Any = None,
-    announcement_chatterbox_local_tts_clone_audio: Any = None,
     announcement_wyoming_tts_host: Any = None,
     announcement_wyoming_tts_port: Any = None,
     announcement_wyoming_tts_voice: Any = None,
     announcement_openai_tts_base_url: Any = None,
     announcement_openai_tts_api_key: Any = None,
-    announcement_chatterbox_tts_base_url: Any = None,
-    announcement_chatterbox_tts_voice_mode: Any = None,
-    announcement_chatterbox_tts_chunk_size: Any = None,
-    announcement_chatterbox_tts_temperature: Any = None,
-    announcement_chatterbox_tts_exaggeration: Any = None,
-    announcement_chatterbox_tts_cfg_weight: Any = None,
-    announcement_chatterbox_tts_seed: Any = None,
-    announcement_chatterbox_tts_speed_factor: Any = None,
-    announcement_chatterbox_tts_language: Any = None,
     satellite_ducking_target_percent: Any = DEFAULT_SATELLITE_DUCKING_TARGET_PERCENT,
     satellite_ducking_attack_ms: Any = DEFAULT_SATELLITE_DUCKING_ATTACK_MS,
     satellite_ducking_release_ms: Any = DEFAULT_SATELLITE_DUCKING_RELEASE_MS,
     acceleration: Any = DEFAULT_SPEECH_ACCELERATION,
 ) -> None:
     direct_tts_backend = _normalize_tts_backend(tts_backend)
+    shared_clone_audio = _clean(
+        tts_clone_audio
+        if tts_clone_audio is not None
+        else qwen_tts_clone_audio or omnivoice_tts_clone_audio
+    )
+    shared_clone_text = _clean(
+        tts_clone_text
+        if tts_clone_text is not None
+        else qwen_tts_clone_text or omnivoice_tts_clone_text
+    )
+    shared_announcement_clone_audio = _clean(
+        announcement_tts_clone_audio
+        if announcement_tts_clone_audio is not None
+        else announcement_qwen_tts_clone_audio
+        if announcement_qwen_tts_clone_audio is not None
+        else announcement_omnivoice_tts_clone_audio
+        if announcement_omnivoice_tts_clone_audio is not None
+        else shared_clone_audio
+    )
+    shared_announcement_clone_text = _clean(
+        announcement_tts_clone_text
+        if announcement_tts_clone_text is not None
+        else announcement_qwen_tts_clone_text
+        if announcement_qwen_tts_clone_text is not None
+        else announcement_omnivoice_tts_clone_text
+        if announcement_omnivoice_tts_clone_text is not None
+        else shared_clone_text
+    )
     redis_client.hset(
         SPEECH_SETTINGS_KEY,
         mapping={
@@ -779,52 +1174,35 @@ def save_speech_settings(
             "wyoming_stt_host": _clean(wyoming_stt_host) or DEFAULT_WYOMING_STT_HOST,
             "wyoming_stt_port": str(_as_int(wyoming_stt_port, DEFAULT_WYOMING_STT_PORT)),
             "tts_backend": direct_tts_backend,
-            "tts_model": _clean(tts_model),
+            "tts_model": _normalize_tts_model_for_backend(direct_tts_backend, tts_model),
             "tts_voice": _clean(tts_voice),
-            "kokoro_output_gain": str(normalize_tts_output_gain(kokoro_output_gain, DEFAULT_KOKORO_OUTPUT_GAIN)),
             "pocket_tts_output_gain": str(
                 normalize_tts_output_gain(pocket_tts_output_gain, DEFAULT_POCKET_TTS_OUTPUT_GAIN)
             ),
-            "qwen_tts_clone_audio": _clean(qwen_tts_clone_audio),
-            "qwen_tts_clone_text": _clean(qwen_tts_clone_text),
+            "tts_clone_audio": shared_clone_audio,
+            "tts_clone_text": shared_clone_text,
+            "qwen_tts_clone_audio": shared_clone_audio,
+            "qwen_tts_clone_text": shared_clone_text,
             "qwen_tts_language": _clean(qwen_tts_language) or DEFAULT_QWEN_TTS_LANGUAGE,
             "qwen_tts_instruct": _clean(qwen_tts_instruct),
-            "omnivoice_tts_clone_audio": _clean(omnivoice_tts_clone_audio),
-            "omnivoice_tts_clone_text": _clean(omnivoice_tts_clone_text),
+            "omnivoice_tts_clone_audio": shared_clone_audio,
+            "omnivoice_tts_clone_text": shared_clone_text,
             "omnivoice_tts_language": _clean(omnivoice_tts_language) or DEFAULT_OMNIVOICE_TTS_LANGUAGE,
             "omnivoice_tts_instruct": _clean(omnivoice_tts_instruct),
-            "chatterbox_local_tts_clone_audio": _clean(chatterbox_local_tts_clone_audio),
             "wyoming_tts_host": _clean(wyoming_tts_host) or DEFAULT_WYOMING_TTS_HOST,
             "wyoming_tts_port": str(_as_int(wyoming_tts_port, DEFAULT_WYOMING_TTS_PORT)),
             "wyoming_tts_voice": _clean(wyoming_tts_voice),
             "openai_tts_base_url": _clean(openai_tts_base_url),
             "openai_tts_api_key": _clean(openai_tts_api_key),
-            "chatterbox_tts_base_url": _clean(chatterbox_tts_base_url),
-            "chatterbox_tts_voice_mode": normalize_chatterbox_voice_mode(chatterbox_tts_voice_mode),
-            "chatterbox_tts_chunk_size": str(normalize_chatterbox_chunk_size(chatterbox_tts_chunk_size)),
-            "chatterbox_tts_temperature": _clean(chatterbox_tts_temperature),
-            "chatterbox_tts_exaggeration": _clean(chatterbox_tts_exaggeration),
-            "chatterbox_tts_cfg_weight": _clean(chatterbox_tts_cfg_weight),
-            "chatterbox_tts_seed": _clean(chatterbox_tts_seed),
-            "chatterbox_tts_speed_factor": _clean(chatterbox_tts_speed_factor),
-            "chatterbox_tts_language": _clean(chatterbox_tts_language),
-            "chatterbox_tts_streaming_enabled": "1"
-            if normalize_bool(chatterbox_tts_streaming_enabled, DEFAULT_CHATTERBOX_TTS_STREAMING_ENABLED)
-            else "0",
             "announcement_tts_backend": normalize_announcement_tts_backend(
                 announcement_tts_backend,
                 default=DEFAULT_ANNOUNCEMENT_TTS_BACKEND,
             ),
-            "announcement_tts_model": _clean(announcement_tts_model),
-            "announcement_tts_voice": _clean(announcement_tts_voice),
-            "announcement_kokoro_output_gain": str(
-                normalize_tts_output_gain(
-                    announcement_kokoro_output_gain
-                    if announcement_kokoro_output_gain is not None
-                    else kokoro_output_gain,
-                    DEFAULT_KOKORO_OUTPUT_GAIN,
-                )
+            "announcement_tts_model": _normalize_tts_model_for_backend(
+                announcement_tts_backend,
+                announcement_tts_model,
             ),
+            "announcement_tts_voice": _clean(announcement_tts_voice),
             "announcement_pocket_tts_output_gain": str(
                 normalize_tts_output_gain(
                     announcement_pocket_tts_output_gain
@@ -833,16 +1211,10 @@ def save_speech_settings(
                     DEFAULT_POCKET_TTS_OUTPUT_GAIN,
                 )
             ),
-            "announcement_qwen_tts_clone_audio": _clean(
-                announcement_qwen_tts_clone_audio
-                if announcement_qwen_tts_clone_audio is not None
-                else qwen_tts_clone_audio
-            ),
-            "announcement_qwen_tts_clone_text": _clean(
-                announcement_qwen_tts_clone_text
-                if announcement_qwen_tts_clone_text is not None
-                else qwen_tts_clone_text
-            ),
+            "announcement_tts_clone_audio": shared_announcement_clone_audio,
+            "announcement_tts_clone_text": shared_announcement_clone_text,
+            "announcement_qwen_tts_clone_audio": shared_announcement_clone_audio,
+            "announcement_qwen_tts_clone_text": shared_announcement_clone_text,
             "announcement_qwen_tts_language": _clean(
                 announcement_qwen_tts_language
                 if announcement_qwen_tts_language is not None
@@ -853,16 +1225,8 @@ def save_speech_settings(
                 if announcement_qwen_tts_instruct is not None
                 else qwen_tts_instruct
             ),
-            "announcement_omnivoice_tts_clone_audio": _clean(
-                announcement_omnivoice_tts_clone_audio
-                if announcement_omnivoice_tts_clone_audio is not None
-                else omnivoice_tts_clone_audio
-            ),
-            "announcement_omnivoice_tts_clone_text": _clean(
-                announcement_omnivoice_tts_clone_text
-                if announcement_omnivoice_tts_clone_text is not None
-                else omnivoice_tts_clone_text
-            ),
+            "announcement_omnivoice_tts_clone_audio": shared_announcement_clone_audio,
+            "announcement_omnivoice_tts_clone_text": shared_announcement_clone_text,
             "announcement_omnivoice_tts_language": _clean(
                 announcement_omnivoice_tts_language
                 if announcement_omnivoice_tts_language is not None
@@ -872,11 +1236,6 @@ def save_speech_settings(
                 announcement_omnivoice_tts_instruct
                 if announcement_omnivoice_tts_instruct is not None
                 else omnivoice_tts_instruct
-            ),
-            "announcement_chatterbox_local_tts_clone_audio": _clean(
-                announcement_chatterbox_local_tts_clone_audio
-                if announcement_chatterbox_local_tts_clone_audio is not None
-                else chatterbox_local_tts_clone_audio
             ),
             "satellite_ducking_target_percent": str(
                 _as_int(
@@ -928,82 +1287,37 @@ def save_speech_settings(
                 if announcement_openai_tts_api_key is not None
                 else _clean(openai_tts_api_key)
             ),
-            "announcement_chatterbox_tts_base_url": (
-                _clean(announcement_chatterbox_tts_base_url)
-                if announcement_chatterbox_tts_base_url is not None
-                else _clean(chatterbox_tts_base_url)
-            ),
-            "announcement_chatterbox_tts_voice_mode": normalize_chatterbox_voice_mode(
-                announcement_chatterbox_tts_voice_mode
-                if announcement_chatterbox_tts_voice_mode is not None
-                else chatterbox_tts_voice_mode
-            ),
-            "announcement_chatterbox_tts_chunk_size": str(
-                normalize_chatterbox_chunk_size(
-                    announcement_chatterbox_tts_chunk_size
-                    if announcement_chatterbox_tts_chunk_size is not None
-                    else chatterbox_tts_chunk_size
-                )
-            ),
-            "announcement_chatterbox_tts_temperature": (
-                _clean(announcement_chatterbox_tts_temperature)
-                if announcement_chatterbox_tts_temperature is not None
-                else _clean(chatterbox_tts_temperature)
-            ),
-            "announcement_chatterbox_tts_exaggeration": (
-                _clean(announcement_chatterbox_tts_exaggeration)
-                if announcement_chatterbox_tts_exaggeration is not None
-                else _clean(chatterbox_tts_exaggeration)
-            ),
-            "announcement_chatterbox_tts_cfg_weight": (
-                _clean(announcement_chatterbox_tts_cfg_weight)
-                if announcement_chatterbox_tts_cfg_weight is not None
-                else _clean(chatterbox_tts_cfg_weight)
-            ),
-            "announcement_chatterbox_tts_seed": (
-                _clean(announcement_chatterbox_tts_seed)
-                if announcement_chatterbox_tts_seed is not None
-                else _clean(chatterbox_tts_seed)
-            ),
-            "announcement_chatterbox_tts_speed_factor": (
-                _clean(announcement_chatterbox_tts_speed_factor)
-                if announcement_chatterbox_tts_speed_factor is not None
-                else _clean(chatterbox_tts_speed_factor)
-            ),
-            "announcement_chatterbox_tts_language": (
-                _clean(announcement_chatterbox_tts_language)
-                if announcement_chatterbox_tts_language is not None
-                else _clean(chatterbox_tts_language)
-            ),
         },
     )
     with contextlib.suppress(Exception):
-        redis_client.hdel(SPEECH_SETTINGS_KEY, "tts_public_base_url")
+        redis_client.hdel(
+            SPEECH_SETTINGS_KEY,
+            "tts_public_base_url",
+        )
 
 
-def save_managed_tts_clone_audio_path(backend: Any, path: Any, *, profile: Any = "direct") -> None:
-    token = _normalize_tts_backend(backend)
-    direct_field = {
-        "qwen3_tts": "qwen_tts_clone_audio",
-        "omnivoice": "omnivoice_tts_clone_audio",
-        "chatterbox_local": "chatterbox_local_tts_clone_audio",
-    }.get(token)
-    if not direct_field:
-        raise ValueError("Clone audio is only available for managed local TTS backends.")
-    field = f"announcement_{direct_field}" if _clean(profile).lower() == "announcement" else direct_field
-    redis_client.hset(SPEECH_SETTINGS_KEY, field, _clean(path))
+def save_tts_clone_audio_path(path: Any, *, profile: Any = "direct") -> None:
+    announcement = _clean(profile).lower() == "announcement"
+    field = "announcement_tts_clone_audio" if announcement else "tts_clone_audio"
+    legacy_fields = (
+        ("announcement_qwen_tts_clone_audio", "announcement_omnivoice_tts_clone_audio")
+        if announcement
+        else ("qwen_tts_clone_audio", "omnivoice_tts_clone_audio")
+    )
+    value = _clean(path)
+    redis_client.hset(SPEECH_SETTINGS_KEY, mapping={field: value, **{key: value for key in legacy_fields}})
 
 
-def save_managed_tts_clone_text(backend: Any, text: Any, *, profile: Any = "direct") -> None:
-    token = _normalize_tts_backend(backend)
-    direct_field = {
-        "qwen3_tts": "qwen_tts_clone_text",
-        "omnivoice": "omnivoice_tts_clone_text",
-    }.get(token)
-    if not direct_field:
-        raise ValueError("Clone transcripts are only available for Qwen3-TTS and OmniVoice.")
-    field = f"announcement_{direct_field}" if _clean(profile).lower() == "announcement" else direct_field
-    redis_client.hset(SPEECH_SETTINGS_KEY, field, _clean(text))
+def save_tts_clone_text(text: Any, *, profile: Any = "direct") -> None:
+    announcement = _clean(profile).lower() == "announcement"
+    field = "announcement_tts_clone_text" if announcement else "tts_clone_text"
+    legacy_fields = (
+        ("announcement_qwen_tts_clone_text", "announcement_omnivoice_tts_clone_text")
+        if announcement
+        else ("qwen_tts_clone_text", "omnivoice_tts_clone_text")
+    )
+    value = _clean(text)
+    redis_client.hset(SPEECH_SETTINGS_KEY, mapping={field: value, **{key: value for key in legacy_fields}})
 
 
 def get_speech_ui_payload(settings: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -1012,22 +1326,15 @@ def get_speech_ui_payload(settings: Optional[Dict[str, Any]] = None) -> Dict[str
     current_tts_model = _clean(current.get("tts_model"))
     current_tts_voice = _clean(current.get("tts_voice"))
 
-    kokoro_model_rows = _kokoro_model_option_rows(
-        current_value=current_tts_model if current_tts_backend == "kokoro" else ""
-    )
     pocket_model_rows = _pocket_tts_model_option_rows(
         current_value=current_tts_model if current_tts_backend == "pocket_tts" else ""
     )
-    piper_model_rows = _piper_tts_model_option_rows(
-        current_value=current_tts_model if current_tts_backend == "piper" else "",
-        ensure_catalog=True,
-    )
     qwen_model_rows = _option_rows_from_values(
-        [DEFAULT_QWEN_TTS_MODEL, QWEN_TTS_VOICE_DESIGN_MODEL],
+        [DEFAULT_QWEN_TTS_MODEL, QWEN_TTS_LARGE_MODEL],
         current_value=current_tts_model if current_tts_backend == "qwen3_tts" else "",
         labels={
-            DEFAULT_QWEN_TTS_MODEL: "Qwen3-TTS 0.6B Base (Voice Clone)",
-            QWEN_TTS_VOICE_DESIGN_MODEL: "Qwen3-TTS 1.7B VoiceDesign",
+            DEFAULT_QWEN_TTS_MODEL: "Qwen3-TTS 0.6B Base — Faster",
+            QWEN_TTS_LARGE_MODEL: "Qwen3-TTS 1.7B Base — Higher quality",
         },
     )
     omnivoice_model_rows = _option_rows_from_values(
@@ -1035,29 +1342,7 @@ def get_speech_ui_payload(settings: Optional[Dict[str, Any]] = None) -> Dict[str
         current_value=current_tts_model if current_tts_backend == "omnivoice" else "",
         labels={DEFAULT_OMNIVOICE_TTS_MODEL: "OmniVoice"},
     )
-    chatterbox_local_model_rows = _option_rows_from_values(
-        [DEFAULT_CHATTERBOX_LOCAL_TTS_MODEL, CHATTERBOX_NANO_TTS_MODEL],
-        current_value=current_tts_model if current_tts_backend == "chatterbox_local" else "",
-        labels={
-            DEFAULT_CHATTERBOX_LOCAL_TTS_MODEL: "Chatterbox Turbo 350M",
-            CHATTERBOX_NANO_TTS_MODEL: "Chatterbox Nano 110M (CPU-friendly)",
-        },
-    )
-
     voice_options_by_model: Dict[str, List[Dict[str, str]]] = {}
-    for row in kokoro_model_rows:
-        model_value = _clean((row or {}).get("value"))
-        if model_value:
-            voice_options_by_model[model_value] = _kokoro_voice_option_rows(
-                model_id=model_value,
-                current_value=current_tts_voice if current_tts_backend == "kokoro" and model_value == current_tts_model else "",
-            )
-    for row in pocket_model_rows:
-        model_value = _clean((row or {}).get("value"))
-        if model_value:
-            voice_options_by_model[model_value] = _pocket_tts_voice_option_rows(
-                current_value=current_tts_voice if current_tts_backend == "pocket_tts" and model_value == current_tts_model else ""
-            )
 
     return {
         "stt_backend_options": _stt_backend_option_rows(),
@@ -1069,10 +1354,7 @@ def get_speech_ui_payload(settings: Optional[Dict[str, Any]] = None) -> Dict[str
             "torch_cuda_available": _torch_cuda_available(),
             "torch_rocm_available": _torch_rocm_available(),
             "mps_available": _mps_runtime_available(),
-            "mlx_whisper_available": _module_available("mlx_whisper"),
             "parakeet_onnx_available": _module_available("onnx_asr"),
-            "kokoro_torch_available": _module_available("kokoro"),
-            "kokoro_mlx_available": _module_available("kokoro_mlx"),
         },
         "acceleration_options": [
             {"value": "auto", "label": "Auto"},
@@ -1084,23 +1366,25 @@ def get_speech_ui_payload(settings: Optional[Dict[str, Any]] = None) -> Dict[str
         "tts_backend_options": [
             {"value": "wyoming", "label": "Wyoming"},
             {"value": "openai_compatible", "label": "OpenAI-Compatible"},
-            {"value": "chatterbox", "label": "Chatterbox"},
-            {"value": "chatterbox_local", "label": "Chatterbox (Built-in)"},
-            {"value": "kokoro", "label": "Kokoro"},
             {"value": "pocket_tts", "label": "Pocket TTS"},
-            {"value": "piper", "label": "Piper"},
             {"value": "qwen3_tts", "label": "Qwen3-TTS"},
             {"value": "omnivoice", "label": "OmniVoice"},
         ],
         "tts_model_options_by_backend": {
             "openai_compatible": [],
-            "chatterbox": [],
-            "chatterbox_local": chatterbox_local_model_rows,
-            "kokoro": kokoro_model_rows,
             "pocket_tts": pocket_model_rows,
-            "piper": piper_model_rows,
             "qwen3_tts": qwen_model_rows,
             "omnivoice": omnivoice_model_rows,
+        },
+        "tts_language_options_by_backend": {
+            "qwen3_tts": _option_rows_from_values(
+                list(QWEN_TTS_LANGUAGES),
+                labels={"Auto": "Auto detect (recommended)"},
+            ),
+            "omnivoice": _option_rows_from_values(
+                list(OMNIVOICE_TTS_LANGUAGES),
+                labels={"Auto": "Auto detect (recommended)"},
+            ),
         },
         "tts_voice_options_by_model": voice_options_by_model,
     }
@@ -1133,6 +1417,7 @@ def get_announcement_tts_ui_payload(
     return {
         "tts_backend_options": backend_options,
         "tts_model_options_by_backend": dict(speech_ui.get("tts_model_options_by_backend") or {}),
+        "tts_language_options_by_backend": dict(speech_ui.get("tts_language_options_by_backend") or {}),
         "tts_voice_options_by_model": dict(speech_ui.get("tts_voice_options_by_model") or {}),
     }
 

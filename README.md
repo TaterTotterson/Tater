@@ -9,7 +9,7 @@
   </a>
 </p>
 
-**Tater** is a local-first AI platform that can run local models through **llama.cpp**, **Hugging Face Transformers**, and **MLX**, or connect to local OpenAI-compatible APIs. It supports voice satellites like **VoicePE**, **Sat1**, **S3Box**, and **ReSpeaker XVF3800**, plus portals for **Discord**, **Home Assistant**, **HomeKit**, **IRC**, **macOS**, **Matrix**, **Meshtastic**, **Telegram**, and **XBMC4Xbox**.
+**Tater** is a local-first AI platform that can run local models through **llama.cpp**, or connect to remote OpenAI-compatible and llama.cpp APIs. It supports voice satellites like **VoicePE**, **Sat1**, **S3Box**, and **ReSpeaker XVF3800**, plus portals for **Discord**, **Home Assistant**, **HomeKit**, **IRC**, **macOS**, **Matrix**, **Meshtastic**, **Telegram**, and **XBMC4Xbox**.
 
 ---
 
@@ -292,27 +292,22 @@ After Tater is running, open TaterOS and finish the first-run setup:
 
 1. Configure your base model in **Settings -> Models -> LLM / Vision**:
    - choose `OpenAI-Compatible API` for a local server such as Ollama, LM Studio, LocalAI, Lemonade, or vLLM
-   - choose `Hugging Face Transformers` to load a local model directly inside Tater
    - choose `llama.cpp GGUF` to load a GGUF model through Tater's native llama.cpp engine
-   - choose `MLX LM (Apple Silicon)` to load an MLX model directly on an Apple Silicon Mac
-   - for built-in local providers, download models from the Hugging Face mini-tab first, then select the downloaded model from the Settings mini-tab
+   - for built-in local models, download llama.cpp GGUF models from the Models tab first, then select a downloaded model in the LLM tab
    - for OpenAI-compatible providers, set the endpoint host/port and model name
 2. Optional:
    - add more Base servers for round-robin regular AI calls
    - enable `Beast Mode` and set per-head model settings for Astraeus/Hermes
 
-Hydra model settings are saved by TaterOS and used at runtime. Base, Terminal, Beast Mode routing, and Vision can each use the selected built-in local providers or OpenAI-compatible providers.
+Hydra model settings are saved by TaterOS and used at runtime. Base, Terminal, Beast Mode routing, and Vision can each use llama.cpp or a configured remote provider.
 
 ### Local Models
 
-- Download local Hugging Face Transformers, llama.cpp GGUF, or MLX models from the Hugging Face mini-tab first, then select them from Settings.
+- Use the Models tab to download llama.cpp GGUF files from Hugging Face. The LLM tab lists downloaded models only.
 - Model caches live under `agent_lab/models/llm/` by default:
-  - `huggingface` for Transformers
   - `llama-cpp` for GGUF models and matching `mmproj*.gguf` vision projectors
-  - `mlx` for MLX text and vision models
 - The Hugging Face browser uses the token saved in **Integration Manager -> Hugging Face** for private/gated models and better Hub rate limits.
 - llama.cpp uses the native `llama-server` engine built by setup. It uses GPU offload by default when the installed build supports it. Set `TATER_LLAMA_CPP_N_GPU_LAYERS=0` for CPU-only or `TATER_LLAMA_CPP_SERVER_BIN` to point at a custom llama-server binary.
-- MLX is intended for Apple Silicon Macs. Use llama.cpp GGUF on Linux, Raspberry Pi, NVIDIA, AMD/ROCm, Jetson, or other non-Apple-Silicon devices.
 
 ### Vision
 

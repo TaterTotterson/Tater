@@ -50,7 +50,7 @@ psutil
 # enabling Face ID only downloads model weights and starts its worker process.
 deepface==0.0.100
 # AdaFace IR-50 uses the official pinned CVLFace checkpoint. Torch,
-# Transformers, Accelerate, and huggingface-hub are shared with other models.
+# Transformers, Accelerate, and huggingface-hub are required by Face ID and Emotion ID.
 omegaconf>=2.3.0,<3
 fvcore>=0.1.5.post20221221,<0.2
 tf-keras==2.18.0 ; sys_platform == "darwin" and platform_machine == "arm64"
@@ -64,14 +64,6 @@ huggingface-hub
 transformers
 accelerate
 esptool==5.3.1
-mlx-lm; platform_system == "Darwin" and platform_machine == "arm64"
-mlx-vlm; platform_system == "Darwin" and platform_machine == "arm64"
-outlines; platform_system == "Darwin" and platform_machine == "arm64"
-outlines-core==0.1.26; platform_system == "Darwin" and platform_machine == "arm64"
-dill==0.4.1; platform_system == "Darwin" and platform_machine == "arm64"
-xxhash==3.8.1; platform_system == "Darwin" and platform_machine == "arm64"
 faster-whisper
 vosk
-pykokoro
 pocket-tts
-piper-tts

@@ -232,10 +232,8 @@ HYDRA_LLM_PORT_KEY = "tater:hydra:llm_port"
 HYDRA_LLM_MODEL_KEY = "tater:hydra:llm_model"
 HYDRA_LLM_PROVIDER_KEY = "tater:hydra:llm_provider"
 HYDRA_LLM_PROVIDER_OPENAI_COMPATIBLE = "openai_compatible"
-HYDRA_LLM_PROVIDER_HF_TRANSFORMERS = "hf_transformers"
 HYDRA_LLM_PROVIDER_LLAMA_CPP = "llama_cpp"
 HYDRA_LLM_PROVIDER_LLAMA_CPP_REMOTE = "llama_cpp_remote"
-HYDRA_LLM_PROVIDER_MLX_LM = "mlx_lm"
 CHAT_HISTORY_MAX_ITEMS_KEY = "tater:max_llm"
 HYDRA_BEAST_MODE_ENABLED_KEY = "tater:hydra:beast_mode_enabled"
 HYDRA_BEAST_ROLE_IDS = (
@@ -484,8 +482,6 @@ def _build_hydra_llm_endpoint(host: Any, port: Any) -> str:
 
 def _normalize_hydra_llm_provider(value: Any) -> str:
     token = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
-    if token in {"hf", "huggingface", "hugging_face", "transformers", "hf_transformers", "local_transformers"}:
-        return HYDRA_LLM_PROVIDER_HF_TRANSFORMERS
     if token in {
         "llama_cpp_remote",
         "llama.cpp_remote",
@@ -498,17 +494,11 @@ def _normalize_hydra_llm_provider(value: Any) -> str:
         return HYDRA_LLM_PROVIDER_LLAMA_CPP_REMOTE
     if token in {"llama", "llamacpp", "llama_cpp", "llama.cpp", "gguf", "llama_cpp_python", "llama-cpp-python"}:
         return HYDRA_LLM_PROVIDER_LLAMA_CPP
-    if token in {"mlx", "mlx_lm", "mlx-lm", "apple_mlx", "apple_silicon", "mlxlm"}:
-        return HYDRA_LLM_PROVIDER_MLX_LM
     return HYDRA_LLM_PROVIDER_OPENAI_COMPATIBLE
 
 
 def _is_local_hydra_llm_provider(provider: Any) -> bool:
-    return _normalize_hydra_llm_provider(provider) in {
-        HYDRA_LLM_PROVIDER_HF_TRANSFORMERS,
-        HYDRA_LLM_PROVIDER_LLAMA_CPP,
-        HYDRA_LLM_PROVIDER_MLX_LM,
-    }
+    return _normalize_hydra_llm_provider(provider) == HYDRA_LLM_PROVIDER_LLAMA_CPP
 
 
 def _is_llama_cpp_hydra_llm_provider(provider: Any) -> bool:
@@ -586,6 +576,13 @@ async def _build_hydra_llm_client_pool(
 
     for role in HYDRA_BEAST_CONFIG_ROLE_IDS:
         raw_provider = _safe_get_text(_hydra_role_llm_key(role, "provider"))
+        if not raw_provider or raw_provider.strip().lower().replace("-", "_").replace(" ", "_") in {
+            "base",
+            "same_as_base",
+            "use_base",
+        }:
+            role_clients[role] = base_llm_client
+            continue
         role_provider = _normalize_hydra_llm_provider(raw_provider)
         raw_host = _safe_get_text(_hydra_role_llm_key(role, "host"))
         raw_port = _safe_get_text(_hydra_role_llm_key(role, "port"))
@@ -3677,7 +3674,7 @@ async def _run_chat_fallback_reply(
     except Exception as exc:
         provider = str(getattr(llm_client, "provider", "") or "").strip().lower()
         host = str(getattr(llm_client, "host", "") or "").strip().lower()
-        if provider in {"hf_transformers", "llama_cpp", "mlx_lm"} or host.startswith(("hf://", "llama-cpp://", "mlx-lm://")):
+        if provider == "llama_cpp" or host.startswith("llama-cpp://"):
             detail = _short_text(str(exc) or type(exc).__name__, limit=420)
             if not detail:
                 detail = type(exc).__name__

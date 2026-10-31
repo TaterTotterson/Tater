@@ -33,25 +33,16 @@ from tateros import integration_store as integration_store_module
 from speech_settings import (
     ANNOUNCEMENT_TTS_DIRECT_BACKEND,
     DEFAULT_ANNOUNCEMENT_TTS_BACKEND,
-    DEFAULT_CHATTERBOX_TTS_BASE_URL,
-    DEFAULT_CHATTERBOX_TTS_CHUNK_SIZE,
-    DEFAULT_CHATTERBOX_TTS_VOICE_MODE,
-    DEFAULT_KOKORO_MODEL,
-    DEFAULT_KOKORO_VOICE,
     DEFAULT_OPENAI_COMPATIBLE_TTS_API_KEY,
     DEFAULT_OPENAI_COMPATIBLE_TTS_BASE_URL,
     DEFAULT_OPENAI_COMPATIBLE_TTS_MODEL,
     DEFAULT_OPENAI_COMPATIBLE_TTS_VOICE,
-    DEFAULT_PIPER_MODEL,
     DEFAULT_POCKET_TTS_MODEL,
-    DEFAULT_POCKET_TTS_VOICE,
     DEFAULT_TTS_BACKEND,
     DEFAULT_WYOMING_TTS_HOST,
     DEFAULT_WYOMING_TTS_PORT,
     DEFAULT_WYOMING_TTS_VOICE,
     get_speech_settings,
-    normalize_chatterbox_chunk_size,
-    normalize_chatterbox_voice_mode,
     normalize_announcement_tts_backend,
     normalize_speech_acceleration,
 )
@@ -126,42 +117,27 @@ except Exception as exc:  # pragma: no cover - runtime dependency guard
     WYOMING_IMPORT_ERROR = str(exc)
 
 try:
-    from pykokoro import build_pipeline as build_kokoro_pipeline, PipelineConfig as KokoroPipelineConfig
-    from pykokoro.tokenizer import TokenizerConfig as KokoroTokenizerConfig
-    KOKORO_IMPORT_ERROR: Optional[str] = None
-except Exception as exc:  # pragma: no cover - runtime dependency guard
-    build_kokoro_pipeline = None
-    KokoroPipelineConfig = None
-    KokoroTokenizerConfig = None
-    KOKORO_IMPORT_ERROR = str(exc)
-
-try:
-    from kokoro import KPipeline as KokoroTorchPipeline
-    KOKORO_TORCH_IMPORT_ERROR: Optional[str] = None
-except Exception as exc:  # pragma: no cover - runtime dependency guard
-    KokoroTorchPipeline = None
-    KOKORO_TORCH_IMPORT_ERROR = str(exc)
-
-try:
     from pocket_tts import TTSModel as PocketTTSModel
     POCKET_TTS_IMPORT_ERROR: Optional[str] = None
 except Exception as exc:  # pragma: no cover - runtime dependency guard
     PocketTTSModel = None
     POCKET_TTS_IMPORT_ERROR = str(exc)
 
-try:
-    from piper import PiperVoice
-    from piper.config import SynthesisConfig as PiperSynthesisConfig
-    from piper.download_voices import download_voice as piper_download_voice
-    PIPER_IMPORT_ERROR: Optional[str] = None
-except Exception as exc:  # pragma: no cover - runtime dependency guard
-    PiperVoice = None
-    PiperSynthesisConfig = None
-    piper_download_voice = None
-    PIPER_IMPORT_ERROR = str(exc)
-
-
 DEFAULT_TTS_MODEL_ROOT = str(agent_lab_path("models", "tts"))
+DEFAULT_KOKORO_MODEL = "removed"
+DEFAULT_KOKORO_VOICE = ""
+DEFAULT_PIPER_MODEL = "removed"
+DEFAULT_POCKET_TTS_VOICE = ""
+build_kokoro_pipeline = None
+KokoroPipelineConfig = None
+KokoroTokenizerConfig = None
+KokoroTorchPipeline = None
+KOKORO_IMPORT_ERROR = "Kokoro support has been removed."
+KOKORO_TORCH_IMPORT_ERROR = KOKORO_IMPORT_ERROR
+PiperVoice = None
+PiperSynthesisConfig = None
+piper_download_voice = None
+PIPER_IMPORT_ERROR = "Piper support has been removed."
 DEFAULT_KOKORO_ENGINE = "auto"
 DEFAULT_KOKORO_PROVIDER = "cpu"
 DEFAULT_KOKORO_OUTPUT_GAIN = 1.5
@@ -169,7 +145,6 @@ DEFAULT_POCKET_TTS_OUTPUT_GAIN = 1.5
 DEFAULT_KOKORO_TORCH_REPO_ID = "hexgrad/Kokoro-82M"
 DEFAULT_KOKORO_TORCH_ZH_REPO_ID = "hexgrad/Kokoro-82M-v1.1-zh"
 DEFAULT_OPENAI_COMPATIBLE_TTS_TIMEOUT_SECONDS = 90.0
-DEFAULT_CHATTERBOX_TTS_TIMEOUT_SECONDS = 90.0
 DEFAULT_WYOMING_TIMEOUT_SECONDS = 45.0
 DEFAULT_PIPER_SENTENCE_PAUSE_SECONDS = 0.24
 DEFAULT_PIPER_PARAGRAPH_PAUSE_SECONDS = 0.46
@@ -509,22 +484,10 @@ def normalize_tts_backend(value: Any) -> str:
         return "wyoming"
     if token in {"openai_compatible", "openai", "openai_api"}:
         return "openai_compatible"
-    if token in {"chatterbox", "chatterbox_tts"}:
-        return "chatterbox"
-    if token in {
-        "chatterbox_builtin",
-        "chatterbox_built_in",
-        "chatterbox_local",
-        "local_chatterbox",
-        "managed_chatterbox",
-    }:
-        return "chatterbox_local"
-    if token == "kokoro":
-        return "kokoro"
+    if token in {"kokoro", "piper"}:
+        return "pocket_tts"
     if token in {"pocket_tts", "pockettts", "pocket"}:
         return "pocket_tts"
-    if token == "piper":
-        return "piper"
     if token in {"qwen", "qwen_tts", "qwen3", "qwen3tts", "qwen3_tts"}:
         return "qwen3_tts"
     if token in {"omni", "omni_voice", "omnivoice", "omnivoice_tts"}:
@@ -833,7 +796,6 @@ def _tts_backend_model_root(backend: str) -> str:
         "pocket_tts": "pocket-tts",
         "piper": "piper",
         "openai_compatible": "openai-compatible",
-        "chatterbox": "chatterbox",
         "wyoming": "wyoming",
     }
     dirname = dirname_map.get(token, token or DEFAULT_TTS_BACKEND)
@@ -936,10 +898,6 @@ def _openai_compatible_tts_timeout_s() -> float:
     return float(DEFAULT_OPENAI_COMPATIBLE_TTS_TIMEOUT_SECONDS)
 
 
-def _chatterbox_tts_timeout_s() -> float:
-    return float(DEFAULT_CHATTERBOX_TTS_TIMEOUT_SECONDS)
-
-
 def _looks_like_wav_bytes(payload: bytes) -> bool:
     raw = bytes(payload or b"")
     return len(raw) >= 12 and raw[:4] == b"RIFF" and raw[8:12] == b"WAVE"
@@ -1022,41 +980,6 @@ def _openai_compatible_tts_helper_endpoint(base_url: Any, helper_path: str) -> s
     return f"{root}{helper}"
 
 
-def _chatterbox_tts_service_root(base_url: Any) -> str:
-    base = _text(base_url).rstrip("/")
-    if not base:
-        return ""
-    for suffix in (
-        "/tts",
-        "/v1/audio/speech",
-        "/v1/audio/voices",
-        "/v1/models",
-        "/audio/speech",
-        "/audio/voices",
-        "/models",
-        "/v1",
-    ):
-        if base.endswith(suffix):
-            trimmed = base[: -len(suffix)].rstrip("/")
-            return trimmed or base
-    return base
-
-
-def _chatterbox_tts_endpoint(base_url: Any) -> str:
-    root = _chatterbox_tts_service_root(base_url)
-    return f"{root}/tts" if root else ""
-
-
-def _chatterbox_tts_helper_endpoint(base_url: Any, helper_path: str) -> str:
-    root = _chatterbox_tts_service_root(base_url)
-    helper = _text(helper_path).strip()
-    if not root or not helper:
-        return ""
-    if not helper.startswith("/"):
-        helper = f"/{helper}"
-    return f"{root}{helper}"
-
-
 def _resolve_openai_compatible_tts_settings(
     *,
     base_url: Any = None,
@@ -1072,38 +995,6 @@ def _resolve_openai_compatible_tts_settings(
     if api_key is None:
         resolved_key = _text(shared.get("openai_tts_api_key")) or DEFAULT_OPENAI_COMPATIBLE_TTS_API_KEY
     return resolved_base, resolved_key
-
-
-def _resolve_chatterbox_tts_settings(
-    *,
-    base_url: Any = None,
-    voice_mode: Any = None,
-    chunk_size: Any = None,
-    temperature: Any = None,
-    exaggeration: Any = None,
-    cfg_weight: Any = None,
-    seed: Any = None,
-    speed_factor: Any = None,
-    language: Any = None,
-) -> Dict[str, Any]:
-    shared = get_speech_settings() or {}
-    return {
-        "base_url": _text(base_url)
-        if base_url is not None
-        else (_text(shared.get("chatterbox_tts_base_url")) or DEFAULT_CHATTERBOX_TTS_BASE_URL),
-        "voice_mode": normalize_chatterbox_voice_mode(
-            voice_mode if voice_mode is not None else shared.get("chatterbox_tts_voice_mode")
-        ),
-        "chunk_size": normalize_chatterbox_chunk_size(
-            chunk_size if chunk_size is not None else shared.get("chatterbox_tts_chunk_size")
-        ),
-        "temperature": temperature if temperature is not None else shared.get("chatterbox_tts_temperature"),
-        "exaggeration": exaggeration if exaggeration is not None else shared.get("chatterbox_tts_exaggeration"),
-        "cfg_weight": cfg_weight if cfg_weight is not None else shared.get("chatterbox_tts_cfg_weight"),
-        "seed": seed if seed is not None else shared.get("chatterbox_tts_seed"),
-        "speed_factor": speed_factor if speed_factor is not None else shared.get("chatterbox_tts_speed_factor"),
-        "language": language if language is not None else shared.get("chatterbox_tts_language"),
-    }
 
 
 def _response_error_text(response: Any) -> str:
@@ -1820,116 +1711,6 @@ async def fetch_openai_compatible_tts_voice_options(
     )
 
 
-def _normalize_chatterbox_predefined_voice_row(item: Any) -> Optional[Dict[str, str]]:
-    if isinstance(item, str):
-        value = _text(item)
-        return {"value": value, "label": value} if value else None
-    if isinstance(item, dict):
-        value = (
-            _text(item.get("filename"))
-            or _text(item.get("file"))
-            or _text(item.get("path"))
-            or _text(item.get("voice"))
-            or _text(item.get("voice_name"))
-            or _text(item.get("voice_id"))
-            or _text(item.get("reference_audio_filename"))
-            or _text(item.get("id"))
-            or _text(item.get("value"))
-            or _text(item.get("name"))
-        )
-        label = (
-            _text(item.get("label"))
-            or _text(item.get("display_name"))
-            or _text(item.get("name"))
-            or _text(item.get("title"))
-            or value
-        )
-        return {"value": value, "label": label or value} if value else None
-    value = _text(item)
-    return {"value": value, "label": value} if value else None
-
-
-def _extract_chatterbox_voice_items(payload: Any) -> List[Any]:
-    if isinstance(payload, list):
-        return payload
-    if not isinstance(payload, dict):
-        return []
-
-    for key in (
-        "voices",
-        "predefined_voices",
-        "reference_files",
-        "files",
-        "items",
-        "data",
-        "results",
-    ):
-        value = payload.get(key)
-        if isinstance(value, list):
-            return value
-
-    items: List[Any] = []
-    for key, value in payload.items():
-        if isinstance(value, dict):
-            row = dict(value)
-            row.setdefault("id", key)
-            row.setdefault("name", key)
-            items.append(row)
-        elif isinstance(value, str):
-            items.append({"id": key, "name": key, "filename": value})
-    return items
-
-
-def _fetch_chatterbox_tts_voice_options_sync(*, base_url: str, voice_mode: str) -> Dict[str, Any]:
-    resolved_mode = normalize_chatterbox_voice_mode(voice_mode)
-    endpoint = _chatterbox_tts_helper_endpoint(
-        base_url,
-        "/get_reference_files" if resolved_mode == "clone" else "/get_predefined_voices",
-    )
-    if not endpoint:
-        raise RuntimeError("Chatterbox TTS base URL is required.")
-
-    response = requests.get(
-        endpoint,
-        headers={"Accept": "application/json"},
-        timeout=_chatterbox_tts_timeout_s(),
-    )
-    if response.status_code >= 400:
-        raise RuntimeError(f"Chatterbox voice list failed: {_response_error_text(response)}")
-    payload = response.json()
-    items = _extract_chatterbox_voice_items(payload)
-    rows: List[Dict[str, str]] = []
-    seen = set()
-    for item in items:
-        row = _normalize_chatterbox_predefined_voice_row(item)
-        value = _text((row or {}).get("value"))
-        if not row or not value or value in seen:
-            continue
-        seen.add(value)
-        rows.append(row)
-    rows.sort(key=lambda row: _text(row.get("label")).lower())
-    return {
-        "base_url": _text(base_url),
-        "endpoint": endpoint,
-        "voice_mode": resolved_mode,
-        "voices": rows,
-        "count": len(rows),
-    }
-
-
-async def fetch_chatterbox_tts_voice_options(
-    *,
-    base_url: Any = None,
-    voice_mode: Any = None,
-) -> Dict[str, Any]:
-    settings = _resolve_chatterbox_tts_settings(base_url=base_url, voice_mode=voice_mode)
-    return await run_background(
-        _fetch_chatterbox_tts_voice_options_sync,
-        base_url=_text(settings.get("base_url")),
-        voice_mode=_text(settings.get("voice_mode")) or DEFAULT_CHATTERBOX_TTS_VOICE_MODE,
-    )
-
-
 async def _wyoming_synthesize(
     text: str,
     *,
@@ -2025,100 +1806,6 @@ def _synthesize_openai_compatible_tts_wav_sync(
         raise RuntimeError("OpenAI-compatible TTS returned no audio.")
     if not _looks_like_wav_bytes(wav_bytes):
         raise RuntimeError("OpenAI-compatible TTS did not return WAV audio.")
-    return wav_bytes
-
-
-def _optional_chatterbox_float(value: Any, label: str, *, minimum: float, maximum: float) -> Optional[float]:
-    raw = _text(value)
-    if not raw:
-        return None
-    try:
-        parsed = float(raw)
-    except Exception as exc:
-        raise RuntimeError(f"Chatterbox {label} must be a number.") from exc
-    if parsed < minimum or parsed > maximum:
-        raise RuntimeError(f"Chatterbox {label} must be between {minimum:g} and {maximum:g}.")
-    return parsed
-
-
-def _optional_chatterbox_seed(value: Any) -> Optional[int]:
-    raw = _text(value)
-    if not raw:
-        return None
-    try:
-        parsed = int(float(raw))
-    except Exception as exc:
-        raise RuntimeError("Chatterbox seed must be a non-negative integer.") from exc
-    if parsed < 0:
-        raise RuntimeError("Chatterbox seed must be a non-negative integer.")
-    return parsed
-
-
-def _synthesize_chatterbox_tts_wav_sync(
-    text: str,
-    *,
-    voice: str,
-    base_url: str,
-    voice_mode: str,
-    chunk_size: Any,
-    temperature: Any = None,
-    exaggeration: Any = None,
-    cfg_weight: Any = None,
-    seed: Any = None,
-    speed_factor: Any = None,
-    language: Any = None,
-) -> bytes:
-    prompt = _text(text)
-    if not prompt:
-        return b""
-
-    endpoint = _chatterbox_tts_endpoint(base_url)
-    if not endpoint:
-        raise RuntimeError("Chatterbox TTS base URL is required.")
-
-    selected_voice_mode = normalize_chatterbox_voice_mode(voice_mode)
-    selected_voice = _text(voice)
-    payload: Dict[str, Any] = {
-        "text": prompt,
-        "voice_mode": selected_voice_mode,
-        "output_format": "wav",
-        "split_text": True,
-        "chunk_size": normalize_chatterbox_chunk_size(chunk_size),
-        "stream": False,
-    }
-    if selected_voice:
-        if selected_voice_mode == "clone":
-            payload["reference_audio_filename"] = selected_voice
-        else:
-            payload["predefined_voice_id"] = selected_voice
-
-    optional_values = {
-        "temperature": _optional_chatterbox_float(temperature, "temperature", minimum=0.0, maximum=1.5),
-        "exaggeration": _optional_chatterbox_float(exaggeration, "exaggeration", minimum=0.25, maximum=2.0),
-        "cfg_weight": _optional_chatterbox_float(cfg_weight, "CFG weight", minimum=0.2, maximum=1.0),
-        "seed": _optional_chatterbox_seed(seed),
-        "speed_factor": _optional_chatterbox_float(speed_factor, "speed factor", minimum=0.25, maximum=4.0),
-    }
-    for key, value in optional_values.items():
-        if value is not None:
-            payload[key] = value
-    selected_language = _text(language)
-    if selected_language:
-        payload["language"] = selected_language
-
-    response = requests.post(
-        endpoint,
-        json=payload,
-        headers={"Content-Type": "application/json", "Accept": "audio/wav"},
-        timeout=_chatterbox_tts_timeout_s(),
-    )
-    if response.status_code >= 400:
-        raise RuntimeError(f"Chatterbox TTS request failed: {_response_error_text(response)}")
-    wav_bytes = bytes(response.content or b"")
-    if not wav_bytes:
-        raise RuntimeError("Chatterbox TTS returned no audio.")
-    if not _looks_like_wav_bytes(wav_bytes):
-        raise RuntimeError("Chatterbox TTS did not return WAV audio.")
     return wav_bytes
 
 
@@ -2420,15 +2107,6 @@ async def synthesize_tts_wav(
     wyoming_voice: str = "",
     openai_base_url: Optional[str] = None,
     openai_api_key: Optional[str] = None,
-    chatterbox_base_url: Optional[str] = None,
-    chatterbox_voice_mode: Any = None,
-    chatterbox_chunk_size: Any = None,
-    chatterbox_temperature: Any = None,
-    chatterbox_exaggeration: Any = None,
-    chatterbox_cfg_weight: Any = None,
-    chatterbox_seed: Any = None,
-    chatterbox_speed_factor: Any = None,
-    chatterbox_language: Any = None,
     acceleration: Any = None,
     kokoro_output_gain: Any = None,
     pocket_tts_output_gain: Any = None,
@@ -2449,67 +2127,43 @@ async def synthesize_tts_wav(
             if not spud_link_allow_local_fallback("tts", redis_conn=redis_client):
                 raise
 
-    if selected_backend == "kokoro":
-        audio_bytes, audio_format = await run_tts(
-            _synthesize_kokoro_sync,
-            prompt,
-            _text(model) or DEFAULT_KOKORO_MODEL,
-            _text(voice) or DEFAULT_KOKORO_VOICE,
-            acceleration,
-            kokoro_output_gain,
-        )
-        return pcm_to_wav(audio_bytes, audio_format)
-
     if selected_backend == "pocket_tts":
+        speech_settings = get_speech_settings()
+        reference_audio = _text(clone_audio) or _text(speech_settings.get("tts_clone_audio"))
+        if not reference_audio:
+            raise RuntimeError("Pocket TTS needs a shared reference voice sample. Upload one in Speech settings.")
         audio_bytes, audio_format = await run_tts(
             _synthesize_pocket_tts_sync,
             prompt,
             _text(model) or DEFAULT_POCKET_TTS_MODEL,
-            _text(voice) or DEFAULT_POCKET_TTS_VOICE,
+            reference_audio,
             pocket_tts_output_gain,
         )
         return pcm_to_wav(audio_bytes, audio_format)
 
-    if selected_backend == "piper":
-        audio_bytes, audio_format = await run_tts(
-            _synthesize_piper_sync,
-            prompt,
-            _text(model) or DEFAULT_PIPER_MODEL,
-        )
-        return pcm_to_wav(audio_bytes, audio_format)
-
-    if selected_backend in {"qwen3_tts", "omnivoice", "chatterbox_local"}:
+    if selected_backend in {"qwen3_tts", "omnivoice"}:
         speech_settings = get_speech_settings()
         prefix = {
             "qwen3_tts": "qwen_tts",
             "omnivoice": "omnivoice_tts",
-            "chatterbox_local": "chatterbox_local_tts",
         }[selected_backend]
         audio_bytes, audio_format = await run_tts(
             synthesize_managed_tts_pcm,
             prompt,
             backend=selected_backend,
             model=_text(model),
-            clone_audio=(clone_audio if clone_audio is not None else speech_settings.get(f"{prefix}_clone_audio")),
-            clone_text=(clone_text if clone_text is not None else speech_settings.get(f"{prefix}_clone_text")),
+            clone_audio=(clone_audio if clone_audio is not None else speech_settings.get("tts_clone_audio")),
+            clone_text=(clone_text if clone_text is not None else speech_settings.get("tts_clone_text")),
             language=(
                 managed_language if managed_language is not None else speech_settings.get(f"{prefix}_language")
             ),
             instruct=(
                 managed_instruct if managed_instruct is not None else speech_settings.get(f"{prefix}_instruct")
             ),
-            temperature=(
-                chatterbox_temperature
-                if chatterbox_temperature is not None
-                else speech_settings.get("chatterbox_tts_temperature")
-            ) if selected_backend == "chatterbox_local" else "",
+            temperature="",
             exaggeration="",
             cfg_weight="",
-            seed=(
-                chatterbox_seed
-                if chatterbox_seed is not None
-                else speech_settings.get("chatterbox_tts_seed")
-            ) if selected_backend == "chatterbox_local" else "",
+            seed="",
             acceleration=acceleration if acceleration is not None else speech_settings.get("acceleration"),
         )
         return pcm_to_wav(audio_bytes, audio_format)
@@ -2526,33 +2180,6 @@ async def synthesize_tts_wav(
             voice=_text(voice) or DEFAULT_OPENAI_COMPATIBLE_TTS_VOICE,
             base_url=resolved_base_url,
             api_key=resolved_api_key,
-        )
-
-    if selected_backend == "chatterbox":
-        chatterbox_settings = _resolve_chatterbox_tts_settings(
-            base_url=chatterbox_base_url,
-            voice_mode=chatterbox_voice_mode,
-            chunk_size=chatterbox_chunk_size,
-            temperature=chatterbox_temperature,
-            exaggeration=chatterbox_exaggeration,
-            cfg_weight=chatterbox_cfg_weight,
-            seed=chatterbox_seed,
-            speed_factor=chatterbox_speed_factor,
-            language=chatterbox_language,
-        )
-        return await run_tts(
-            _synthesize_chatterbox_tts_wav_sync,
-            prompt,
-            voice=_text(voice),
-            base_url=_text(chatterbox_settings.get("base_url")),
-            voice_mode=_text(chatterbox_settings.get("voice_mode")) or DEFAULT_CHATTERBOX_TTS_VOICE_MODE,
-            chunk_size=chatterbox_settings.get("chunk_size"),
-            temperature=chatterbox_settings.get("temperature"),
-            exaggeration=chatterbox_settings.get("exaggeration"),
-            cfg_weight=chatterbox_settings.get("cfg_weight"),
-            seed=chatterbox_settings.get("seed"),
-            speed_factor=chatterbox_settings.get("speed_factor"),
-            language=chatterbox_settings.get("language"),
         )
 
     audio_bytes, audio_format = await _wyoming_synthesize(
@@ -2575,15 +2202,6 @@ async def synthesize_preview_wav(
     wyoming_voice: str = "",
     openai_base_url: Optional[str] = None,
     openai_api_key: Optional[str] = None,
-    chatterbox_base_url: Optional[str] = None,
-    chatterbox_voice_mode: Any = None,
-    chatterbox_chunk_size: Any = None,
-    chatterbox_temperature: Any = None,
-    chatterbox_exaggeration: Any = None,
-    chatterbox_cfg_weight: Any = None,
-    chatterbox_seed: Any = None,
-    chatterbox_speed_factor: Any = None,
-    chatterbox_language: Any = None,
     acceleration: Any = None,
     kokoro_output_gain: Any = None,
     pocket_tts_output_gain: Any = None,
@@ -2602,15 +2220,6 @@ async def synthesize_preview_wav(
         wyoming_voice=wyoming_voice,
         openai_base_url=openai_base_url,
         openai_api_key=openai_api_key,
-        chatterbox_base_url=chatterbox_base_url,
-        chatterbox_voice_mode=chatterbox_voice_mode,
-        chatterbox_chunk_size=chatterbox_chunk_size,
-        chatterbox_temperature=chatterbox_temperature,
-        chatterbox_exaggeration=chatterbox_exaggeration,
-        chatterbox_cfg_weight=chatterbox_cfg_weight,
-        chatterbox_seed=chatterbox_seed,
-        chatterbox_speed_factor=chatterbox_speed_factor,
-        chatterbox_language=chatterbox_language,
         acceleration=acceleration,
         kokoro_output_gain=kokoro_output_gain,
         pocket_tts_output_gain=pocket_tts_output_gain,
@@ -3007,15 +2616,6 @@ async def speak_announcement_targets(
     wyoming_voice: str = "",
     openai_base_url: Optional[str] = None,
     openai_api_key: Optional[str] = None,
-    chatterbox_base_url: Optional[str] = None,
-    chatterbox_voice_mode: Any = None,
-    chatterbox_chunk_size: Any = None,
-    chatterbox_temperature: Any = None,
-    chatterbox_exaggeration: Any = None,
-    chatterbox_cfg_weight: Any = None,
-    chatterbox_seed: Any = None,
-    chatterbox_speed_factor: Any = None,
-    chatterbox_language: Any = None,
     acceleration: Any = None,
     kokoro_output_gain: Any = None,
     pocket_tts_output_gain: Any = None,
@@ -3076,21 +2676,10 @@ async def speak_announcement_targets(
         wyoming_voice = _text(shared_speech.get("wyoming_tts_voice"))
         openai_base_url = shared_speech.get("openai_tts_base_url")
         openai_api_key = shared_speech.get("openai_tts_api_key")
-        chatterbox_base_url = shared_speech.get("chatterbox_tts_base_url")
-        chatterbox_voice_mode = shared_speech.get("chatterbox_tts_voice_mode")
-        chatterbox_chunk_size = shared_speech.get("chatterbox_tts_chunk_size")
-        chatterbox_temperature = shared_speech.get("chatterbox_tts_temperature")
-        chatterbox_exaggeration = shared_speech.get("chatterbox_tts_exaggeration")
-        chatterbox_cfg_weight = shared_speech.get("chatterbox_tts_cfg_weight")
-        chatterbox_seed = shared_speech.get("chatterbox_tts_seed")
-        chatterbox_speed_factor = shared_speech.get("chatterbox_tts_speed_factor")
-        chatterbox_language = shared_speech.get("chatterbox_tts_language")
-        kokoro_output_gain = shared_speech.get("kokoro_output_gain")
         pocket_tts_output_gain = shared_speech.get("pocket_tts_output_gain")
         profile_prefix = {
             "qwen3_tts": "qwen_tts",
             "omnivoice": "omnivoice_tts",
-            "chatterbox_local": "chatterbox_local_tts",
         }.get(selected_backend, "")
     else:
         model = _text(model) or _text(shared_speech.get("announcement_tts_model"))
@@ -3100,29 +2689,19 @@ async def speak_announcement_targets(
         wyoming_voice = _text(wyoming_voice) or _text(shared_speech.get("announcement_wyoming_tts_voice"))
         openai_base_url = openai_base_url if openai_base_url is not None else shared_speech.get("announcement_openai_tts_base_url")
         openai_api_key = openai_api_key if openai_api_key is not None else shared_speech.get("announcement_openai_tts_api_key")
-        chatterbox_base_url = chatterbox_base_url if chatterbox_base_url is not None else shared_speech.get("announcement_chatterbox_tts_base_url")
-        chatterbox_voice_mode = chatterbox_voice_mode if chatterbox_voice_mode is not None else shared_speech.get("announcement_chatterbox_tts_voice_mode")
-        chatterbox_chunk_size = chatterbox_chunk_size if chatterbox_chunk_size is not None else shared_speech.get("announcement_chatterbox_tts_chunk_size")
-        chatterbox_temperature = chatterbox_temperature if chatterbox_temperature is not None else shared_speech.get("announcement_chatterbox_tts_temperature")
-        chatterbox_exaggeration = chatterbox_exaggeration if chatterbox_exaggeration is not None else shared_speech.get("announcement_chatterbox_tts_exaggeration")
-        chatterbox_cfg_weight = chatterbox_cfg_weight if chatterbox_cfg_weight is not None else shared_speech.get("announcement_chatterbox_tts_cfg_weight")
-        chatterbox_seed = chatterbox_seed if chatterbox_seed is not None else shared_speech.get("announcement_chatterbox_tts_seed")
-        chatterbox_speed_factor = chatterbox_speed_factor if chatterbox_speed_factor is not None else shared_speech.get("announcement_chatterbox_tts_speed_factor")
-        chatterbox_language = chatterbox_language if chatterbox_language is not None else shared_speech.get("announcement_chatterbox_tts_language")
-        kokoro_output_gain = kokoro_output_gain if kokoro_output_gain is not None else shared_speech.get("announcement_kokoro_output_gain")
         pocket_tts_output_gain = pocket_tts_output_gain if pocket_tts_output_gain is not None else shared_speech.get("announcement_pocket_tts_output_gain")
         profile_prefix = {
             "qwen3_tts": "announcement_qwen_tts",
             "omnivoice": "announcement_omnivoice_tts",
-            "chatterbox_local": "announcement_chatterbox_local_tts",
         }.get(selected_backend, "")
     acceleration = acceleration if acceleration is not None else shared_speech.get("acceleration")
-    if selected_backend in {"qwen3_tts", "omnivoice", "chatterbox_local"}:
-        clone_audio = clone_audio if clone_audio is not None else shared_speech.get(f"{profile_prefix}_clone_audio")
-        if selected_backend != "chatterbox_local":
-            clone_text = clone_text if clone_text is not None else shared_speech.get(f"{profile_prefix}_clone_text")
-            managed_language = managed_language if managed_language is not None else shared_speech.get(f"{profile_prefix}_language")
-            managed_instruct = managed_instruct if managed_instruct is not None else shared_speech.get(f"{profile_prefix}_instruct")
+    if selected_backend in {"pocket_tts", "qwen3_tts", "omnivoice"}:
+        shared_clone_prefix = "" if uses_direct_tts else "announcement_"
+        clone_audio = clone_audio if clone_audio is not None else shared_speech.get(f"{shared_clone_prefix}tts_clone_audio")
+        clone_text = clone_text if clone_text is not None else shared_speech.get(f"{shared_clone_prefix}tts_clone_text")
+    if selected_backend in {"qwen3_tts", "omnivoice"}:
+        managed_language = managed_language if managed_language is not None else shared_speech.get(f"{profile_prefix}_language")
+        managed_instruct = managed_instruct if managed_instruct is not None else shared_speech.get(f"{profile_prefix}_instruct")
     warnings: list[str] = []
     sent_count = 0
     result: Dict[str, Any] = {
@@ -3144,15 +2723,6 @@ async def speak_announcement_targets(
         "wyoming_voice": wyoming_voice,
         "openai_base_url": openai_base_url,
         "openai_api_key": openai_api_key,
-        "chatterbox_base_url": chatterbox_base_url,
-        "chatterbox_voice_mode": chatterbox_voice_mode,
-        "chatterbox_chunk_size": chatterbox_chunk_size,
-        "chatterbox_temperature": chatterbox_temperature,
-        "chatterbox_exaggeration": chatterbox_exaggeration,
-        "chatterbox_cfg_weight": chatterbox_cfg_weight,
-        "chatterbox_seed": chatterbox_seed,
-        "chatterbox_speed_factor": chatterbox_speed_factor,
-        "chatterbox_language": chatterbox_language,
         "acceleration": acceleration,
         "kokoro_output_gain": kokoro_output_gain,
         "pocket_tts_output_gain": pocket_tts_output_gain,

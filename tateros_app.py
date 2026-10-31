@@ -119,12 +119,6 @@ from notify.media import BLOB_PREFIX as NOTIFY_BLOB_PREFIX, load_queue_attachmen
 from notify.queue import is_expired as is_notify_expired, queue_key as notify_queue_key
 from verba_result import action_failure
 from helpers import (
-    DEFAULT_HF_TRANSFORMERS_ATTN_IMPLEMENTATION,
-    DEFAULT_HF_TRANSFORMERS_CONTEXT_TOKENS,
-    DEFAULT_HF_TRANSFORMERS_DEVICE,
-    DEFAULT_HF_TRANSFORMERS_DEVICE_MAP,
-    DEFAULT_HF_TRANSFORMERS_DTYPE,
-    DEFAULT_HF_TRANSFORMERS_TRUST_REMOTE_CODE,
     DEFAULT_HYDRA_LLM_THINKING_ENABLED,
     DEFAULT_LLAMA_CPP_FLASH_ATTN,
     DEFAULT_LLAMA_CPP_CONTEXT_TOKENS,
@@ -137,21 +131,11 @@ from helpers import (
     DEFAULT_LLAMA_CPP_OFFLOAD_KQV,
     DEFAULT_LLAMA_CPP_SLOT_COUNT,
     DEFAULT_LLAMA_CPP_VISION_CONTEXT_TOKENS,
-    DEFAULT_MLX_LM_LAZY_LOAD,
-    DEFAULT_MLX_LM_TRUST_REMOTE_CODE,
-    HYDRA_HF_TRANSFORMERS_ATTN_IMPLEMENTATION_KEY,
-    HYDRA_HF_TRANSFORMERS_CONTEXT_TOKENS_KEY,
-    HYDRA_HF_TRANSFORMERS_DEVICE_KEY,
-    HYDRA_HF_TRANSFORMERS_DEVICE_MAP_KEY,
-    HYDRA_HF_TRANSFORMERS_DTYPE_KEY,
-    HYDRA_HF_TRANSFORMERS_TRUST_REMOTE_CODE_KEY,
     HYDRA_LLM_BASE_SERVERS_KEY,
     HYDRA_LLM_THINKING_ENABLED_KEY,
-    HYDRA_LLM_PROVIDER_HF_TRANSFORMERS,
     HYDRA_LLM_PROVIDER_KEY,
     HYDRA_LLM_PROVIDER_LLAMA_CPP,
     HYDRA_LLM_PROVIDER_LLAMA_CPP_REMOTE,
-    HYDRA_LLM_PROVIDER_MLX_LM,
     HYDRA_LLM_PROVIDER_OPENAI_COMPATIBLE,
     HYDRA_LLM_PROVIDER_SPUD_LINK,
     HYDRA_LLAMA_CPP_CONTEXT_TOKENS_KEY,
@@ -167,22 +151,13 @@ from helpers import (
     HYDRA_LLAMA_CPP_SLOT_COUNT_KEY,
     HYDRA_LLAMA_CPP_VISION_SLOT_KEY,
     HYDRA_LLAMA_CPP_VISION_CONTEXT_TOKENS_KEY,
-    HYDRA_MLX_ENGINE_KV_BITS_KEY,
-    HYDRA_MLX_ENGINE_KV_GROUP_SIZE_KEY,
-    HYDRA_MLX_ENGINE_PREFILL_STEP_SIZE_KEY,
-    HYDRA_MLX_ENGINE_QUANTIZED_KV_START_KEY,
-    HYDRA_MLX_LM_CONTEXT_TOKENS_KEY,
-    HYDRA_MLX_LM_LAZY_LOAD_KEY,
-    HYDRA_MLX_LM_TRUST_REMOTE_CODE_KEY,
     LLAMA_CPP_SPECULATIVE_METHODS,
     HfLlmDownloadCancelled,
     LocalLlmQueueFullError,
     LocalLlmQueueTimeoutError,
     LocalLlmRequestSupersededError,
     decrypt_current_redis_snapshot,
-    download_hf_transformers_llm_model,
     download_llama_cpp_llm_model,
-    download_mlx_lm_llm_model,
     encrypt_current_redis_snapshot,
     ensure_redis_encryption_key,
     get_llama_cpp_runtime_diagnostics,
@@ -199,9 +174,7 @@ from helpers import (
     get_vision_call_runtime_summary,
     get_llm_client_from_env,
     llm_request_context,
-    preload_hf_transformers_llm_model,
     preload_llama_cpp_llm_model,
-    preload_mlx_lm_llm_model,
     migrate_current_redis_to_internal,
     redis_blob_client as shared_redis_blob_client,
     redis_client as shared_redis_client,
@@ -233,12 +206,11 @@ from speech_settings import (
     get_announcement_tts_ui_payload,
     get_speech_settings as get_shared_speech_settings,
     get_speech_ui_payload,
-    save_managed_tts_clone_audio_path,
-    save_managed_tts_clone_text,
+    save_tts_clone_audio_path,
+    save_tts_clone_text,
     save_speech_settings as save_shared_speech_settings,
 )
 from managed_tts import (
-    DEFAULT_CHATTERBOX_LOCAL_TTS_MODEL as MANAGED_DEFAULT_CHATTERBOX_LOCAL_TTS_MODEL,
     DEFAULT_OMNIVOICE_TTS_MODEL as MANAGED_DEFAULT_OMNIVOICE_TTS_MODEL,
     DEFAULT_QWEN_TTS_MODEL as MANAGED_DEFAULT_QWEN_TTS_MODEL,
     clone_audio_info,
@@ -253,7 +225,6 @@ from managed_tts import (
 )
 from speech_tts import (
     clear_tts_model_caches as clear_announcement_tts_model_caches,
-    fetch_chatterbox_tts_voice_options,
     fetch_openai_compatible_tts_model_options,
     fetch_openai_compatible_tts_voice_options,
     fetch_wyoming_tts_voice_options,
@@ -579,6 +550,7 @@ bootstrap_state: Dict[str, Any] = {
     "restore_summary": {},
     "autostart_enabled": True,
 }
+startup_bootstrap_task: Optional[asyncio.Task[Any]] = None
 redis_maintenance_lock = threading.RLock()
 
 
@@ -1238,8 +1210,6 @@ def _hf_llm_warmup_snapshot() -> Dict[str, Any]:
 def _hf_llm_warmup_on_save_enabled() -> bool:
     token = os.getenv("TATER_LOCAL_LLM_WARMUP_ON_SAVE")
     if token is None:
-        token = os.getenv("TATER_HF_TRANSFORMERS_WARMUP_ON_SAVE")
-    if token is None:
         return False
     token = str(token or "true").strip().lower()
     return token in {"1", "true", "yes", "on", "enabled"}
@@ -1294,7 +1264,7 @@ def _hf_llm_warmup_target(value: Any) -> Dict[str, Any]:
         provider = _normalize_hydra_llm_provider(value.get("provider"))
         model = str(value.get("model") or "").strip()
     else:
-        provider = HYDRA_LLM_PROVIDER_HF_TRANSFORMERS
+        provider = HYDRA_LLM_PROVIDER_LLAMA_CPP
         model = str(value or "").strip()
     if not model or not _is_local_hydra_llm_provider(provider):
         return {}
@@ -1865,50 +1835,27 @@ def _run_hf_llm_warmup(
             if _hf_llm_warmup_cancel_requested(provider, model):
                 raise HfLlmDownloadCancelled("Local model download cancelled.")
             if load_models:
-                if provider == HYDRA_LLM_PROVIDER_LLAMA_CPP:
-                    loaded = preload_llama_cpp_llm_model(
-                        model,
-                        progress_callback=_hf_llm_warmup_progress_callback(provider, model),
-                        vision=requested_media_kind == "vision",
-                        media_kind=requested_media_kind,
+                loaded = preload_llama_cpp_llm_model(
+                    model,
+                    progress_callback=_hf_llm_warmup_progress_callback(provider, model),
+                    vision=requested_media_kind == "vision",
+                    media_kind=requested_media_kind,
+                )
+                unsupported = [
+                    media_kind
+                    for media_kind in media_kinds
+                    if not bool(loaded.get(f"supports_{media_kind}"))
+                ]
+                if unsupported:
+                    labels = ["images" if value == "vision" else value for value in unsupported]
+                    raise RuntimeError(
+                        f"The selected model does not advertise support for {', '.join(labels)} input."
                     )
-                elif provider == HYDRA_LLM_PROVIDER_MLX_LM:
-                    loaded = preload_mlx_lm_llm_model(
-                        model,
-                        progress_callback=_hf_llm_warmup_progress_callback(provider, model),
-                    )
-                else:
-                    loaded = preload_hf_transformers_llm_model(
-                        model,
-                        progress_callback=_hf_llm_warmup_progress_callback(provider, model),
-                    )
-                if provider == HYDRA_LLM_PROVIDER_LLAMA_CPP:
-                    unsupported = [
-                        media_kind
-                        for media_kind in media_kinds
-                        if not bool(loaded.get(f"supports_{media_kind}"))
-                    ]
-                    if unsupported:
-                        labels = ["images" if value == "vision" else value for value in unsupported]
-                        raise RuntimeError(
-                            f"The selected model does not advertise support for {', '.join(labels)} input."
-                        )
             else:
-                if provider == HYDRA_LLM_PROVIDER_LLAMA_CPP:
-                    loaded = download_llama_cpp_llm_model(
-                        model,
-                        progress_callback=_hf_llm_warmup_progress_callback(provider, model),
-                    )
-                elif provider == HYDRA_LLM_PROVIDER_MLX_LM:
-                    loaded = download_mlx_lm_llm_model(
-                        model,
-                        progress_callback=_hf_llm_warmup_progress_callback(provider, model),
-                    )
-                else:
-                    loaded = download_hf_transformers_llm_model(
-                        model,
-                        progress_callback=_hf_llm_warmup_progress_callback(provider, model),
-                    )
+                loaded = download_llama_cpp_llm_model(
+                    model,
+                    progress_callback=_hf_llm_warmup_progress_callback(provider, model),
+                )
             row.update(_hf_llm_warmup_item_snapshot(provider, model))
             row["status"] = "loaded" if load_models else "downloaded"
             row["provider"] = provider
@@ -2169,7 +2116,7 @@ def _start_local_llm_warmup_for_startup(*, reason: str) -> Dict[str, Any]:
 
 
 def _hf_browser_token() -> Optional[str]:
-    for key in ("TATER_HF_MODEL_BROWSER_TOKEN", "TATER_MLX_LM_TOKEN", "TATER_HF_TRANSFORMERS_TOKEN"):
+    for key in ("TATER_HF_MODEL_BROWSER_TOKEN",):
         token = str(os.getenv(key) or "").strip()
         if token:
             return token
@@ -2200,8 +2147,6 @@ def _hf_browser_integration_status() -> Dict[str, Any]:
     env_override = False
     for key in (
         "TATER_HF_MODEL_BROWSER_TOKEN",
-        "TATER_MLX_LM_TOKEN",
-        "TATER_HF_TRANSFORMERS_TOKEN",
         "HF_TOKEN",
         "HUGGINGFACE_HUB_TOKEN",
         "HUGGING_FACE_HUB_TOKEN",
@@ -2730,14 +2675,9 @@ def _hf_browser_tater_pick_summary(row: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _hf_browser_provider_for_model(model: Any, fallback: str = HYDRA_LLM_PROVIDER_HF_TRANSFORMERS) -> str:
-    for provider_token in (HYDRA_LLM_PROVIDER_LLAMA_CPP, HYDRA_LLM_PROVIDER_MLX_LM, HYDRA_LLM_PROVIDER_HF_TRANSFORMERS):
-        try:
-            if _hf_browser_provider_matches(model, provider_token):
-                return provider_token
-        except Exception:
-            continue
-    return _normalize_hydra_llm_provider(fallback)
+def _hf_browser_provider_for_model(model: Any, fallback: str = HYDRA_LLM_PROVIDER_LLAMA_CPP) -> str:
+    _ = model, fallback
+    return HYDRA_LLM_PROVIDER_LLAMA_CPP
 
 
 def _hf_browser_tater_pick_models_from_hub(*, query: str, task: str, limit: int, provider: str) -> List[Dict[str, Any]]:
@@ -2826,32 +2766,18 @@ def _hf_browser_tater_pick_models(*, query: str, task: str, limit: int, provider
 
 
 def _hf_browser_provider_app_filter(provider: str, task: str = "text-generation") -> str:
-    provider_token = _normalize_hydra_llm_provider(provider)
-    task_token = _normalize_hf_browser_task(task)
-    if provider_token == HYDRA_LLM_PROVIDER_LLAMA_CPP:
-        return "llama.cpp"
-    if provider_token == HYDRA_LLM_PROVIDER_MLX_LM:
-        if task_token == "image-text-to-text":
-            return ""
-        return "mlx-lm"
-    return ""
+    _ = provider, task
+    return "llama.cpp"
 
 
 def _hf_browser_provider_library(provider: str) -> str:
-    provider_token = _normalize_hydra_llm_provider(provider)
-    if provider_token in {HYDRA_LLM_PROVIDER_LLAMA_CPP, HYDRA_LLM_PROVIDER_MLX_LM}:
-        return ""
-    return "transformers"
+    _ = provider
+    return ""
 
 
 def _hf_browser_provider_pipeline_filter(provider: str, task: str = "text-generation") -> str:
-    provider_token = _normalize_hydra_llm_provider(provider)
-    task_token = _normalize_hf_browser_task(task)
-    if provider_token == HYDRA_LLM_PROVIDER_LLAMA_CPP:
-        return ""
-    if task_token == "text-generation" and provider_token == HYDRA_LLM_PROVIDER_MLX_LM:
-        return ""
-    return task_token
+    _ = provider, task
+    return ""
 
 
 def _hf_browser_text_generation_tokens() -> Tuple[str, ...]:
@@ -2951,7 +2877,7 @@ def _hf_browser_is_video_model(model: Any) -> bool:
 
 
 def _hf_browser_provider_matches(model: Any, provider: str) -> bool:
-    provider_token = _normalize_hydra_llm_provider(provider)
+    _ = provider
     library = str(_hf_browser_object_value(model, "library_name") or "").strip().lower()
     tags = " ".join(
         str(item or "").strip().lower()
@@ -2965,29 +2891,16 @@ def _hf_browser_provider_matches(model: Any, provider: str) -> bool:
         if str(_hf_browser_object_value(item, "rfilename") or _hf_browser_object_value(item, "path") or "").strip()
     )
     model_id = str(_hf_browser_object_value(model, "modelId") or _hf_browser_object_value(model, "id") or "").strip().lower()
-    provider_haystack = f"{model_id} {library} {tags} {files}"
-    if provider_token == HYDRA_LLM_PROVIDER_LLAMA_CPP:
-        return (
-            "llama.cpp" in provider_haystack
-            or "llama-cpp" in provider_haystack
-            or "llamacpp" in provider_haystack
-            or library == "gguf"
-            or "gguf" in tags
-            or ".gguf" in files
-            or "gguf" in model_id
-        )
-    if provider_token == HYDRA_LLM_PROVIDER_MLX_LM:
-        return (
-            "mlx-lm" in provider_haystack
-            or "mlx_lm" in provider_haystack
-            or "mlx-vlm" in provider_haystack
-            or "mlx_vlm" in provider_haystack
-            or library == "mlx"
-            or "mlx" in tags
-            or "mlx" in files
-            or "mlx" in model_id
-        )
-    return library in {"", "transformers"} and ".gguf" not in files
+    haystack = f"{model_id} {library} {tags} {files}"
+    return (
+        "llama.cpp" in haystack
+        or "llama-cpp" in haystack
+        or "llamacpp" in haystack
+        or library == "gguf"
+        or "gguf" in tags
+        or ".gguf" in files
+        or "gguf" in model_id
+    )
 
 
 def _hf_browser_file_quant(path: str) -> str:
@@ -3077,25 +2990,14 @@ def _hf_browser_model_summary(model: Any, *, provider: str) -> Dict[str, Any]:
     supports_vision = _hf_browser_is_vision_model(model) or "mmproj" in lower_files
     supports_audio = _hf_browser_is_audio_model(model)
     supports_video = _hf_browser_is_video_model(model)
-    if provider_token == HYDRA_LLM_PROVIDER_LLAMA_CPP:
-        compatible = (
-            "llama.cpp" in provider_haystack
-            or "llama-cpp" in provider_haystack
-            or "llamacpp" in provider_haystack
-            or "gguf" in lower_id
-            or "gguf" in lower_tags
-            or ".gguf" in lower_files
-        )
-    elif provider_token == HYDRA_LLM_PROVIDER_MLX_LM:
-        compatible = (
-            "mlx-lm" in provider_haystack
-            or "mlx_lm" in provider_haystack
-            or "mlx-vlm" in provider_haystack
-            or "mlx_vlm" in provider_haystack
-            or "mlx" in provider_haystack
-        )
-    else:
-        compatible = ".gguf" not in lower_files
+    compatible = (
+        "llama.cpp" in provider_haystack
+        or "llama-cpp" in provider_haystack
+        or "llamacpp" in provider_haystack
+        or "gguf" in lower_id
+        or "gguf" in lower_tags
+        or ".gguf" in lower_files
+    )
     model_size_label = _hf_browser_model_size_label(model_id, tags, files, model, card_data)
     summary = {
         "id": model_id,
@@ -3188,26 +3090,11 @@ def _hf_browser_effective_model_id(provider: str, repo_id: str, filename: str = 
 def _hf_browser_download_provider(
     provider: Any,
     *,
-    repo_id: Any = "",
-    model_id: Any = "",
-    filename: Any = "",
+    repo_id: str = "",
+    model_id: str = "",
+    filename: str = "",
 ) -> str:
-    """Resolve browser labels and file hints to a canonical local provider."""
-    provider_token = _normalize_hydra_llm_provider(provider)
-    if _is_local_hydra_llm_provider(provider_token):
-        return provider_token
-
-    hint = " ".join(
-        str(value or "").strip().lower()
-        for value in (provider, repo_id, model_id, filename)
-    )
-    if any(marker in hint for marker in ("llama.cpp", "llama_cpp", "llama-cpp", "gguf", ".gguf")):
-        return HYDRA_LLM_PROVIDER_LLAMA_CPP
-    if any(marker in hint for marker in ("mlx lm", "mlx_lm", "mlx-lm", "mlx-vlm", "mlx_vlm")):
-        return HYDRA_LLM_PROVIDER_MLX_LM
-    if any(marker in hint for marker in ("transformers", "hugging face", "huggingface", "safetensors")):
-        return HYDRA_LLM_PROVIDER_HF_TRANSFORMERS
-    return provider_token
+    return HYDRA_LLM_PROVIDER_LLAMA_CPP
 
 
 def _local_llm_model_registry_path() -> Path:
@@ -3218,21 +3105,10 @@ def _local_llm_model_registry_path() -> Path:
 
 
 def _local_llm_model_root(provider: str) -> Path:
-    provider_token = _normalize_hydra_llm_provider(provider)
-    env_key = {
-        HYDRA_LLM_PROVIDER_HF_TRANSFORMERS: "TATER_HF_TRANSFORMERS_MODEL_ROOT",
-        HYDRA_LLM_PROVIDER_LLAMA_CPP: "TATER_LLAMA_CPP_MODEL_ROOT",
-        HYDRA_LLM_PROVIDER_MLX_LM: "TATER_MLX_LM_MODEL_ROOT",
-    }.get(provider_token, "")
-    raw = str(os.getenv(env_key) or "").strip() if env_key else ""
+    raw = str(os.getenv("TATER_LLAMA_CPP_MODEL_ROOT") or "").strip()
     if raw:
         return Path(raw).expanduser().resolve()
-    folder = {
-        HYDRA_LLM_PROVIDER_HF_TRANSFORMERS: "huggingface",
-        HYDRA_LLM_PROVIDER_LLAMA_CPP: "llama-cpp",
-        HYDRA_LLM_PROVIDER_MLX_LM: "mlx",
-    }.get(provider_token, "huggingface")
-    return agent_lab_path("models", "llm", folder)
+    return agent_lab_path("models", "llm", "llama-cpp")
 
 
 def _local_llm_context_value(value: Any, *, maximum: int = 1_048_576) -> int:
@@ -3466,58 +3342,25 @@ def _local_llm_provider_cache_rows(provider: str) -> List[Dict[str, Any]]:
         if not snapshots:
             continue
         latest_snapshot = max(snapshots, key=lambda path: path.stat().st_mtime if path.exists() else 0.0)
-        if provider_token == HYDRA_LLM_PROVIDER_LLAMA_CPP:
-            gguf_files = sorted(
-                path for path in latest_snapshot.rglob("*.gguf") if "mmproj" not in path.name.lower()
-            )
-            for gguf in gguf_files:
-                try:
-                    rel = gguf.relative_to(latest_snapshot).as_posix()
-                except Exception:
-                    rel = gguf.name
-                model_id = f"{repo_id}::{rel}"
-                mmproj_path = _local_llm_mmproj_for_gguf(gguf)
-                try:
-                    mmproj_rel = mmproj_path.relative_to(latest_snapshot).as_posix() if mmproj_path else ""
-                except Exception:
-                    mmproj_rel = mmproj_path.name if mmproj_path else ""
-                max_context, context_source = _local_llm_detect_max_context(
-                    provider_token,
-                    model_path=str(gguf),
-                    model_root=str(root),
-                    repo_id=repo_id,
-                )
-                rows.append(
-                    {
-                        "provider": provider_token,
-                        "provider_label": _hydra_llm_provider_label(provider_token),
-                        "model": model_id,
-                        "repo_id": repo_id,
-                        "filename": rel,
-                        "model_path": str(gguf),
-                        "model_root": str(root),
-                        "status": "ready",
-                        "source": "cache-scan",
-                        "downloaded_ts": float(gguf.stat().st_mtime if gguf.exists() else time.time()),
-                        "max_context_tokens": max_context,
-                        "context_source": context_source,
-                        "supports_vision": bool(mmproj_path),
-                        "supports_audio": any(
-                            token in f"{repo_id} {rel}".lower()
-                            for token in ("music-flamingo", "musicflamingo", "ultravox", "voxtral", "audio", "qwen3-asr", "omni")
-                        ),
-                        "supports_video": bool(mmproj_path) and not any(
-                            token in f"{repo_id} {rel}".lower()
-                            for token in ("music-flamingo", "musicflamingo", "ultravox", "voxtral", "qwen3-asr")
-                        ),
-                        "mmproj_filename": mmproj_rel,
-                        "mmproj_path": str(mmproj_path) if mmproj_path else "",
-                    }
-                )
-        else:
+        if provider_token != HYDRA_LLM_PROVIDER_LLAMA_CPP:
+            continue
+        gguf_files = sorted(
+            path for path in latest_snapshot.rglob("*.gguf") if "mmproj" not in path.name.lower()
+        )
+        for gguf in gguf_files:
+            try:
+                rel = gguf.relative_to(latest_snapshot).as_posix()
+            except Exception:
+                rel = gguf.name
+            model_id = f"{repo_id}::{rel}"
+            mmproj_path = _local_llm_mmproj_for_gguf(gguf)
+            try:
+                mmproj_rel = mmproj_path.relative_to(latest_snapshot).as_posix() if mmproj_path else ""
+            except Exception:
+                mmproj_rel = mmproj_path.name if mmproj_path else ""
             max_context, context_source = _local_llm_detect_max_context(
                 provider_token,
-                model_path=str(latest_snapshot),
+                model_path=str(gguf),
                 model_root=str(root),
                 repo_id=repo_id,
             )
@@ -3525,20 +3368,27 @@ def _local_llm_provider_cache_rows(provider: str) -> List[Dict[str, Any]]:
                 {
                     "provider": provider_token,
                     "provider_label": _hydra_llm_provider_label(provider_token),
-                    "model": repo_id,
+                    "model": model_id,
                     "repo_id": repo_id,
-                    "filename": "",
-                    "model_path": str(latest_snapshot),
+                    "filename": rel,
+                    "model_path": str(gguf),
                     "model_root": str(root),
                     "status": "ready",
                     "source": "cache-scan",
-                    "downloaded_ts": float(latest_snapshot.stat().st_mtime if latest_snapshot.exists() else time.time()),
+                    "downloaded_ts": float(gguf.stat().st_mtime if gguf.exists() else time.time()),
                     "max_context_tokens": max_context,
                     "context_source": context_source,
-                    "supports_vision": bool(
-                        provider_token != HYDRA_LLM_PROVIDER_MLX_LM
-                        and _local_llm_json_files_support_vision(latest_snapshot)
+                    "supports_vision": bool(mmproj_path),
+                    "supports_audio": any(
+                        token in f"{repo_id} {rel}".lower()
+                        for token in ("music-flamingo", "musicflamingo", "ultravox", "voxtral", "audio", "qwen3-asr", "omni")
                     ),
+                    "supports_video": bool(mmproj_path) and not any(
+                        token in f"{repo_id} {rel}".lower()
+                        for token in ("music-flamingo", "musicflamingo", "ultravox", "voxtral", "qwen3-asr")
+                    ),
+                    "mmproj_filename": mmproj_rel,
+                    "mmproj_path": str(mmproj_path) if mmproj_path else "",
                 }
             )
     return rows
@@ -3679,9 +3529,7 @@ def _normalize_local_llm_model_row(row: Dict[str, Any]) -> Dict[str, Any]:
     capabilities_observed = bool(row.get("capabilities_observed"))
     mmproj_filename = str(row.get("mmproj_filename") or "").strip()
     mmproj_path = str(row.get("mmproj_path") or "").strip()
-    if provider == HYDRA_LLM_PROVIDER_MLX_LM:
-        supports_vision = False
-    elif provider == HYDRA_LLM_PROVIDER_LLAMA_CPP:
+    if provider == HYDRA_LLM_PROVIDER_LLAMA_CPP:
         path_obj = Path(str(row.get("model_path") or "")).expanduser()
         if path_obj.exists():
             detected_mmproj = _local_llm_mmproj_for_gguf(path_obj)
@@ -3690,9 +3538,6 @@ def _normalize_local_llm_model_row(row: Dict[str, Any]) -> Dict[str, Any]:
                 mmproj_path = str(detected_mmproj)
                 if not mmproj_filename:
                     mmproj_filename = detected_mmproj.name
-    elif not supports_vision:
-        path_obj = Path(str(row.get("model_path") or "")).expanduser()
-        supports_vision = bool(path_obj.exists() and _local_llm_json_files_support_vision(path_obj))
     identifier = f"{model} {repo_id} {filename}".lower()
     if provider == HYDRA_LLM_PROVIDER_LLAMA_CPP and not capabilities_observed and not supports_audio:
         supports_audio = any(
@@ -3778,9 +3623,7 @@ def _local_llm_model_row_score(row: Dict[str, Any]) -> Tuple[int, int, int, floa
 def _local_llm_models_payload(provider: str = "") -> Dict[str, Any]:
     provider_filter = _normalize_hydra_llm_provider(provider) if str(provider or "").strip() else ""
     rows = [_normalize_local_llm_model_row(row) for row in _read_local_llm_model_registry()]
-    rows.extend(_local_llm_provider_cache_rows(HYDRA_LLM_PROVIDER_HF_TRANSFORMERS))
     rows.extend(_local_llm_provider_cache_rows(HYDRA_LLM_PROVIDER_LLAMA_CPP))
-    rows.extend(_local_llm_provider_cache_rows(HYDRA_LLM_PROVIDER_MLX_LM))
     for row in rows:
         if (
             _normalize_hydra_llm_provider(row.get("provider")) == HYDRA_LLM_PROVIDER_LLAMA_CPP
@@ -3825,7 +3668,11 @@ def _local_llm_models_payload(provider: str = "") -> Dict[str, Any]:
     by_provider: Dict[str, List[Dict[str, Any]]] = {}
     for row in models:
         by_provider.setdefault(str(row.get("provider") or ""), []).append(row)
-    return {"models": models, "by_provider": by_provider, "updated_ts": time.time()}
+    return {
+        "models": models,
+        "by_provider": by_provider,
+        "updated_ts": time.time(),
+    }
 
 
 def _local_llm_chat_template_model_info(provider: str, model: str) -> Dict[str, Any]:
@@ -4241,14 +4088,6 @@ def _warm_speech_model_item(item: Dict[str, str]) -> str:
                     None,
                 )
                 return f"loaded STT {token} and warmed CUDA decode"
-        elif token == "mlx_whisper":
-            silence = b"\x00\x00" * int(16000 * 0.5)
-            voice_pipeline._transcribe_mlx_whisper_wake_sync(
-                silence,
-                {"rate": 16000, "width": 2, "channels": 1},
-                "en",
-            )
-            return f"loaded STT {token} and warmed deterministic wake decode"
         elif token == "parakeet_onnx":
             silence = b"\x00\x00" * int(16000 * 1.0)
             voice_pipeline._transcribe_parakeet_onnx_sync(
@@ -4280,15 +4119,9 @@ def _warm_speech_model_item(item: Dict[str, str]) -> str:
             return "skipped remote Wyoming TTS"
         if token == "openai_compatible":
             return "skipped remote OpenAI-compatible TTS"
-        if token == "chatterbox":
-            return "skipped remote Chatterbox TTS"
-        if token == "kokoro":
-            voice_pipeline._load_kokoro_pipeline(model or voice_pipeline.DEFAULT_KOKORO_MODEL)
-        elif token == "piper":
-            voice_pipeline._load_piper_voice_model(model or voice_pipeline.DEFAULT_PIPER_MODEL)
-        elif token == "pocket_tts":
+        if token == "pocket_tts":
             voice_pipeline._load_pocket_tts_model(model or voice_pipeline.DEFAULT_POCKET_TTS_MODEL)
-        elif token in {"qwen3_tts", "omnivoice", "chatterbox_local"}:
+        elif token in {"qwen3_tts", "omnivoice"}:
             loaded = warm_managed_tts_model(
                 backend=token,
                 model=model,
@@ -4548,8 +4381,6 @@ def _build_hydra_llm_endpoint(host: Any, port: Any) -> str:
 
 def _normalize_hydra_llm_provider(value: Any) -> str:
     token = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
-    if token in {"hf", "huggingface", "hugging_face", "transformers", "hf_transformers", "local_transformers"}:
-        return HYDRA_LLM_PROVIDER_HF_TRANSFORMERS
     if token in {
         "llama_cpp_remote",
         "llama.cpp_remote",
@@ -4562,19 +4393,13 @@ def _normalize_hydra_llm_provider(value: Any) -> str:
         return HYDRA_LLM_PROVIDER_LLAMA_CPP_REMOTE
     if token in {"llama", "llamacpp", "llama_cpp", "llama.cpp", "gguf"}:
         return HYDRA_LLM_PROVIDER_LLAMA_CPP
-    if token in {"mlx", "mlx_lm", "mlx-lm", "apple_mlx", "apple_silicon", "mlxlm"}:
-        return HYDRA_LLM_PROVIDER_MLX_LM
     if token in {"spud", "spudlink", "spud_link", "spud_hub", "spudlet", "tater_native", "tater_spud_link"}:
         return HYDRA_LLM_PROVIDER_SPUD_LINK
     return HYDRA_LLM_PROVIDER_OPENAI_COMPATIBLE
 
 
 def _is_local_hydra_llm_provider(provider: Any) -> bool:
-    return _normalize_hydra_llm_provider(provider) in {
-        HYDRA_LLM_PROVIDER_HF_TRANSFORMERS,
-        HYDRA_LLM_PROVIDER_LLAMA_CPP,
-        HYDRA_LLM_PROVIDER_MLX_LM,
-    }
+    return _normalize_hydra_llm_provider(provider) == HYDRA_LLM_PROVIDER_LLAMA_CPP
 
 
 def _is_llama_cpp_hydra_llm_provider(provider: Any) -> bool:
@@ -4586,14 +4411,10 @@ def _is_llama_cpp_hydra_llm_provider(provider: Any) -> bool:
 
 def _hydra_llm_provider_label(provider: Any) -> str:
     token = _normalize_hydra_llm_provider(provider)
-    if token == HYDRA_LLM_PROVIDER_HF_TRANSFORMERS:
-        return "Hugging Face Transformers"
     if token == HYDRA_LLM_PROVIDER_LLAMA_CPP:
         return "llama.cpp Local"
     if token == HYDRA_LLM_PROVIDER_LLAMA_CPP_REMOTE:
         return "llama.cpp Remote"
-    if token == HYDRA_LLM_PROVIDER_MLX_LM:
-        return "MLX LM"
     if token == HYDRA_LLM_PROVIDER_SPUD_LINK:
         return "Spud Link"
     return "OpenAI-Compatible API"
@@ -10385,12 +10206,10 @@ class AppSettingsRequest(BaseModel):
     speech_tts_backend: Optional[str] = None
     speech_tts_model: Optional[str] = None
     speech_tts_voice: Optional[str] = None
-    speech_kokoro_output_gain: Optional[float] = None
     speech_pocket_tts_output_gain: Optional[float] = None
-    speech_qwen_tts_clone_text: Optional[str] = None
+    speech_tts_clone_text: Optional[str] = None
     speech_qwen_tts_language: Optional[str] = None
     speech_qwen_tts_instruct: Optional[str] = None
-    speech_omnivoice_tts_clone_text: Optional[str] = None
     speech_omnivoice_tts_language: Optional[str] = None
     speech_omnivoice_tts_instruct: Optional[str] = None
     speech_wyoming_tts_host: Optional[str] = None
@@ -10398,25 +10217,13 @@ class AppSettingsRequest(BaseModel):
     speech_wyoming_tts_voice: Optional[str] = None
     speech_openai_tts_base_url: Optional[str] = None
     speech_openai_tts_api_key: Optional[str] = None
-    speech_chatterbox_tts_base_url: Optional[str] = None
-    speech_chatterbox_tts_voice_mode: Optional[str] = None
-    speech_chatterbox_tts_chunk_size: Optional[Any] = None
-    speech_chatterbox_tts_temperature: Optional[Any] = None
-    speech_chatterbox_tts_exaggeration: Optional[Any] = None
-    speech_chatterbox_tts_cfg_weight: Optional[Any] = None
-    speech_chatterbox_tts_seed: Optional[Any] = None
-    speech_chatterbox_tts_speed_factor: Optional[Any] = None
-    speech_chatterbox_tts_language: Optional[str] = None
-    speech_chatterbox_tts_streaming_enabled: Optional[bool] = None
     speech_announcement_tts_backend: Optional[str] = None
     speech_announcement_tts_model: Optional[str] = None
     speech_announcement_tts_voice: Optional[str] = None
-    speech_announcement_kokoro_output_gain: Optional[float] = None
     speech_announcement_pocket_tts_output_gain: Optional[float] = None
-    speech_announcement_qwen_tts_clone_text: Optional[str] = None
+    speech_announcement_tts_clone_text: Optional[str] = None
     speech_announcement_qwen_tts_language: Optional[str] = None
     speech_announcement_qwen_tts_instruct: Optional[str] = None
-    speech_announcement_omnivoice_tts_clone_text: Optional[str] = None
     speech_announcement_omnivoice_tts_language: Optional[str] = None
     speech_announcement_omnivoice_tts_instruct: Optional[str] = None
     speech_satellite_ducking_target_percent: Optional[int] = None
@@ -10427,15 +10234,6 @@ class AppSettingsRequest(BaseModel):
     speech_announcement_wyoming_tts_voice: Optional[str] = None
     speech_announcement_openai_tts_base_url: Optional[str] = None
     speech_announcement_openai_tts_api_key: Optional[str] = None
-    speech_announcement_chatterbox_tts_base_url: Optional[str] = None
-    speech_announcement_chatterbox_tts_voice_mode: Optional[str] = None
-    speech_announcement_chatterbox_tts_chunk_size: Optional[Any] = None
-    speech_announcement_chatterbox_tts_temperature: Optional[Any] = None
-    speech_announcement_chatterbox_tts_exaggeration: Optional[Any] = None
-    speech_announcement_chatterbox_tts_cfg_weight: Optional[Any] = None
-    speech_announcement_chatterbox_tts_seed: Optional[Any] = None
-    speech_announcement_chatterbox_tts_speed_factor: Optional[Any] = None
-    speech_announcement_chatterbox_tts_language: Optional[str] = None
     esphome_settings: Optional[Dict[str, Any]] = None
     emoji_enable_on_reaction_add: Optional[bool] = None
     emoji_enable_auto_reaction_on_reply: Optional[bool] = None
@@ -10450,12 +10248,6 @@ class AppSettingsRequest(BaseModel):
     hydra_llm_api_key: Optional[str] = None
     hydra_llm_provider: Optional[str] = None
     hydra_llm_thinking_enabled: Optional[bool] = None
-    hydra_hf_transformers_context_tokens: Optional[Any] = None
-    hydra_hf_transformers_device: Optional[str] = None
-    hydra_hf_transformers_dtype: Optional[str] = None
-    hydra_hf_transformers_device_map: Optional[str] = None
-    hydra_hf_transformers_attn_implementation: Optional[str] = None
-    hydra_hf_transformers_trust_remote_code: Optional[bool] = None
     hydra_llama_cpp_context_tokens: Optional[Any] = None
     hydra_llama_cpp_vision_context_tokens: Optional[Any] = None
     hydra_llama_cpp_mtp_enabled: Optional[bool] = None
@@ -10469,13 +10261,6 @@ class AppSettingsRequest(BaseModel):
     hydra_llama_cpp_slot_count: Optional[Any] = None
     hydra_llama_cpp_base_slot: Optional[Any] = None
     hydra_llama_cpp_vision_slot: Optional[Any] = None
-    hydra_mlx_lm_context_tokens: Optional[Any] = None
-    hydra_mlx_lm_trust_remote_code: Optional[bool] = None
-    hydra_mlx_lm_lazy_load: Optional[bool] = None
-    hydra_mlx_engine_prefill_step_size: Optional[Any] = None
-    hydra_mlx_engine_kv_bits: Optional[Any] = None
-    hydra_mlx_engine_kv_group_size: Optional[Any] = None
-    hydra_mlx_engine_quantized_kv_start: Optional[Any] = None
     spudex_llm_provider: Optional[str] = None
     spudex_llm_host: Optional[str] = None
     spudex_llm_model: Optional[str] = None
@@ -10662,7 +10447,6 @@ class SpeechTtsPreviewRequest(BaseModel):
     backend: Optional[str] = None
     model: Optional[str] = None
     voice: Optional[str] = None
-    kokoro_output_gain: Optional[float] = None
     pocket_tts_output_gain: Optional[float] = None
     clone_text: Optional[str] = None
     managed_language: Optional[str] = None
@@ -10673,15 +10457,6 @@ class SpeechTtsPreviewRequest(BaseModel):
     wyoming_voice: Optional[str] = None
     openai_base_url: Optional[str] = None
     openai_api_key: Optional[str] = None
-    chatterbox_base_url: Optional[str] = None
-    chatterbox_voice_mode: Optional[str] = None
-    chatterbox_chunk_size: Optional[Any] = None
-    chatterbox_temperature: Optional[Any] = None
-    chatterbox_exaggeration: Optional[Any] = None
-    chatterbox_cfg_weight: Optional[Any] = None
-    chatterbox_seed: Optional[Any] = None
-    chatterbox_speed_factor: Optional[Any] = None
-    chatterbox_language: Optional[str] = None
     text: Optional[str] = None
 
 
@@ -10699,11 +10474,6 @@ class OpenAiCompatibleTtsVoicesRequest(BaseModel):
 class OpenAiCompatibleTtsModelsRequest(BaseModel):
     base_url: Optional[str] = None
     api_key: Optional[str] = None
-
-
-class ChatterboxTtsVoicesRequest(BaseModel):
-    base_url: Optional[str] = None
-    voice_mode: Optional[str] = None
 
 
 class RedisSetupRequest(BaseModel):
@@ -10860,34 +10630,23 @@ def external_audio_live_mp3_stream(
     )
 
 
-@app.on_event("startup")
-async def _startup_event() -> None:
-    set_main_loop(asyncio.get_running_loop())
-    native_satellite_module.bind_runtime_loop()
+def _early_web_ui_startup_enabled() -> bool:
+    return str(os.getenv("TATER_EARLY_WEB_UI_ON_STARTUP") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+        "enabled",
+    }
+
+
+async def _complete_startup_bootstrap() -> None:
     try:
         await asyncio.to_thread(cleanup_stale_llama_cpp_servers)
     except Exception as exc:
         logger.warning("[startup] stale llama.cpp cleanup failed: %s", exc, exc_info=True)
-    restore_enabled = str(os.getenv("HTMLUI_RESTORE_ENABLED_SURFACES_ON_STARTUP", "true")).strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
-    autostart_enabled = str(os.getenv("HTMLUI_AUTOSTART_ENABLED_SURFACES_ON_STARTUP", "true")).strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
-    bootstrap_state["restore_enabled"] = restore_enabled
-    bootstrap_state["autostart_enabled"] = autostart_enabled
-    bootstrap_state["restore_in_progress"] = False
-    bootstrap_state["restore_complete"] = False
-    bootstrap_state["restore_error"] = ""
-    bootstrap_state["restore_summary"] = {}
 
-    redis_ready, redis_error = _redis_reachable_for_startup()
+    redis_ready, redis_error = await asyncio.to_thread(_redis_reachable_for_startup)
     if not redis_ready:
         bootstrap_state["restore_error"] = redis_error or "Redis is unavailable."
         bootstrap_state["restore_in_progress"] = False
@@ -10898,31 +10657,31 @@ async def _startup_event() -> None:
         return
 
     bind_integration_runtime_loop()
-    verba_registry_module.ensure_verbas_loaded()
+    await asyncio.to_thread(verba_registry_module.ensure_verbas_loaded)
 
     try:
         logger.info("[startup] runtime executor settings applied: %s", configure_runtime_executors())
-        if restore_enabled:
+        if bool(bootstrap_state.get("restore_enabled")):
             bootstrap_state["restore_in_progress"] = True
-            summary = _restore_enabled_surfaces()
+            summary = await asyncio.to_thread(_restore_enabled_surfaces)
             bootstrap_state["restore_summary"] = summary
             logger.info("[startup-restore] summary: %s", summary)
         else:
             logger.info("[startup-restore] skipped (HTMLUI_RESTORE_ENABLED_SURFACES_ON_STARTUP=false)")
         start_integration_runtime(redis_client, manage_device_registry_cache=False)
-        local_warmup = _start_local_llm_warmup_for_startup(reason="startup")
+        local_warmup = await asyncio.to_thread(_start_local_llm_warmup_for_startup, reason="startup")
         logger.info("[local-llm-warmup] startup scheduled: %s", local_warmup)
         if face_id_runtime.is_enabled(redis_client):
             logger.info("[face-id] startup load scheduled: %s", face_id_runtime.start_model_load(redis_client))
         await esphome_home_module.startup()
         if _speech_model_warmup_on_startup_enabled():
             warmup = _start_speech_model_warmup(get_shared_speech_settings(), reason="startup")
-            warmup = _wait_for_speech_model_warmup()
+            warmup = await asyncio.to_thread(_wait_for_speech_model_warmup)
             logger.info("[speech-warmup] startup scheduled: %s", warmup)
         else:
             logger.info("[speech-warmup] startup warmup skipped (TATER_SPEECH_WARMUP_ON_STARTUP=false)")
-        if autostart_enabled:
-            _autostart_enabled_surfaces()
+        if bool(bootstrap_state.get("autostart_enabled")):
+            await asyncio.to_thread(_autostart_enabled_surfaces)
         else:
             logger.info("[startup-autostart] skipped (HTMLUI_AUTOSTART_ENABLED_SURFACES_ON_STARTUP=false)")
         _start_dashboard_brief_scheduler()
@@ -10933,6 +10692,51 @@ async def _startup_event() -> None:
         bootstrap_state["restore_in_progress"] = False
         bootstrap_state["restore_complete"] = True
     logger.info("TaterOS backend started")
+
+
+async def _run_background_startup_bootstrap() -> None:
+    try:
+        await _complete_startup_bootstrap()
+    except asyncio.CancelledError:
+        logger.info("[startup] background bootstrap cancelled")
+        raise
+    except Exception as exc:
+        bootstrap_state["restore_error"] = str(exc) or type(exc).__name__
+        bootstrap_state["restore_in_progress"] = False
+        bootstrap_state["restore_complete"] = True
+        logger.error("[startup] background bootstrap failed: %s", exc, exc_info=True)
+
+
+def _release_startup_bootstrap_task(task: asyncio.Task[Any]) -> None:
+    global startup_bootstrap_task
+    if startup_bootstrap_task is task:
+        startup_bootstrap_task = None
+
+
+@app.on_event("startup")
+async def _startup_event() -> None:
+    global startup_bootstrap_task
+    set_main_loop(asyncio.get_running_loop())
+    native_satellite_module.bind_runtime_loop()
+    bootstrap_state["restore_enabled"] = str(
+        os.getenv("HTMLUI_RESTORE_ENABLED_SURFACES_ON_STARTUP", "true")
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    bootstrap_state["autostart_enabled"] = str(
+        os.getenv("HTMLUI_AUTOSTART_ENABLED_SURFACES_ON_STARTUP", "true")
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    bootstrap_state["restore_in_progress"] = False
+    bootstrap_state["restore_complete"] = False
+    bootstrap_state["restore_error"] = ""
+    bootstrap_state["restore_summary"] = {}
+
+    if _early_web_ui_startup_enabled():
+        task = asyncio.create_task(_run_background_startup_bootstrap(), name="tater-startup-bootstrap")
+        startup_bootstrap_task = task
+        task.add_done_callback(_release_startup_bootstrap_task)
+        logger.info("[startup] web UI released while runtime bootstrap continues in the background")
+        return
+
+    await _complete_startup_bootstrap()
 
 
 async def _run_shutdown_step(name: str, func: Callable[[], Any], *, timeout: float = 10.0) -> bool:
@@ -10961,9 +10765,19 @@ async def _run_shutdown_step(name: str, func: Callable[[], Any], *, timeout: flo
 
 @app.on_event("shutdown")
 async def _shutdown_event() -> None:
+    global startup_bootstrap_task
     logger.info("TaterOS backend stopping")
     loop = asyncio.get_running_loop()
     try:
+        bootstrap_task = startup_bootstrap_task
+        if bootstrap_task is not None and not bootstrap_task.done():
+            with hf_llm_warmup_lock:
+                hf_llm_warmup_state["cancel_requested"] = True
+            bootstrap_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
+                await asyncio.wait_for(bootstrap_task, timeout=5.0)
+        startup_bootstrap_task = None
+
         from spudex.runner import shutdown_spudex_runtime
 
         await _run_shutdown_step("system task scheduler", _stop_dashboard_brief_scheduler, timeout=5.0)
@@ -11545,55 +11359,8 @@ def _runtime_managed_model_row(
     }
 
 
-def _runtime_kokoro_model_label(key: Tuple[Any, ...]) -> Tuple[str, str, str, str]:
-    parts = [str(item or "").strip() for item in key]
-    if parts and parts[0] == "torch":
-        repo = parts[1] if len(parts) > 1 else "Kokoro"
-        lang = parts[2] if len(parts) > 2 else ""
-        device = parts[3] if len(parts) > 3 else ""
-        label = repo
-        if lang:
-            label = f"{label} ({lang})"
-        return label, device, "torch", repo
-    variant = parts[1] if len(parts) > 1 else "v1.0"
-    quality = parts[2] if len(parts) > 2 else "q8"
-    provider = parts[3] if len(parts) > 3 else ""
-    return f"Kokoro {variant}:{quality}", provider, provider or "onnx", ""
-
-
 def _runtime_tts_cache_rows(module: Any, *, scope_label: str, provider_prefix: str) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
-
-    with contextlib.suppress(Exception):
-        lock = getattr(module, "_kokoro_pipeline_lock", None)
-        cache = getattr(module, "_kokoro_pipeline_cache", {})
-        with lock:
-            kokoro_items = list(cache.items())
-        for key, pipeline in kokoro_items:
-            key_tuple = tuple(key if isinstance(key, tuple) else (key,))
-            model_label, device, engine_label, repo_id = _runtime_kokoro_model_label(key_tuple)
-            root_name = "kokoro_torch" if str(engine_label).lower() == "torch" else "kokoro"
-            model_root = ""
-            with contextlib.suppress(Exception):
-                model_root = str(module._tts_backend_model_root(root_name))
-            estimated = _runtime_model_estimated_bytes(pipeline, model_root)
-            detail_parts = [f"Engine {engine_label}"]
-            if repo_id:
-                detail_parts.append(repo_id)
-            rows.append(
-                _runtime_managed_model_row(
-                    category="tts",
-                    kind_label="TTS",
-                    provider=f"{provider_prefix}_kokoro",
-                    provider_label=f"{scope_label} • Kokoro",
-                    model=model_label,
-                    device=device,
-                    model_root=model_root,
-                    estimated_bytes=estimated,
-                    memory_kind=_runtime_model_memory_kind_from_device(device),
-                    details=detail_parts,
-                )
-            )
 
     with contextlib.suppress(Exception):
         lock = getattr(module, "_pocket_tts_model_lock", None)
@@ -11619,30 +11386,6 @@ def _runtime_tts_cache_rows(module: Any, *, scope_label: str, provider_prefix: s
                 )
             )
 
-    with contextlib.suppress(Exception):
-        lock = getattr(module, "_piper_voice_lock", None)
-        cache = getattr(module, "_piper_voice_cache", {})
-        with lock:
-            piper_items = list(cache.items())
-        for model_path, voice_obj in piper_items:
-            path = str(model_path or "").strip()
-            config_path = f"{path}.json" if path and not path.endswith(".json") else ""
-            model_label = Path(path).name.replace(".onnx", "") if path else "Piper"
-            model_root = str(Path(path).parent) if path else ""
-            estimated = _runtime_model_estimated_bytes(voice_obj, path, config_path)
-            rows.append(
-                _runtime_managed_model_row(
-                    category="tts",
-                    kind_label="TTS",
-                    provider=f"{provider_prefix}_piper",
-                    provider_label=f"{scope_label} • Piper",
-                    model=model_label,
-                    model_path=path,
-                    model_root=model_root,
-                    estimated_bytes=estimated,
-                    memory_kind="ram",
-                )
-            )
     return rows
 
 
@@ -11782,19 +11525,17 @@ def _runtime_managed_tts_worker_rows() -> List[Dict[str, Any]]:
     selected_roles: Dict[Tuple[str, str], List[str]] = {}
     for prefix, role in (("", "Direct TTS"), ("announcement_", "Announcement TTS")):
         backend = normalize_managed_tts_backend(settings.get(f"{prefix}tts_backend"))
-        if backend not in {"qwen3_tts", "omnivoice", "chatterbox_local"}:
+        if backend not in {"qwen3_tts", "omnivoice"}:
             continue
         model = str(settings.get(f"{prefix}tts_model") or "").strip() or {
             "qwen3_tts": MANAGED_DEFAULT_QWEN_TTS_MODEL,
             "omnivoice": MANAGED_DEFAULT_OMNIVOICE_TTS_MODEL,
-            "chatterbox_local": MANAGED_DEFAULT_CHATTERBOX_LOCAL_TTS_MODEL,
         }[backend]
         selected_roles.setdefault((backend, model), []).append(role)
 
     labels = {
         "qwen3_tts": "Qwen3-TTS",
         "omnivoice": "OmniVoice",
-        "chatterbox_local": "Chatterbox (Built-in)",
     }
     rows: List[Dict[str, Any]] = []
     for worker_row in snapshot.get("models", []):
@@ -18271,23 +18012,15 @@ async def spud_link_tts_speech(payload: SpudLinkTtsRequest, request: Request) ->
             backend=str(current_speech.get("tts_backend") or "").strip(),
             model=str(current_speech.get("tts_model") or "").strip(),
             voice=str(current_speech.get("tts_voice") or "").strip(),
-            kokoro_output_gain=current_speech.get("kokoro_output_gain"),
             pocket_tts_output_gain=current_speech.get("pocket_tts_output_gain"),
+            clone_audio=current_speech.get("tts_clone_audio"),
+            clone_text=current_speech.get("tts_clone_text"),
             acceleration=str(current_speech.get("acceleration") or "").strip(),
             wyoming_host=str(current_speech.get("wyoming_tts_host") or "").strip(),
             wyoming_port=str(current_speech.get("wyoming_tts_port") or "").strip(),
             wyoming_voice=str(current_speech.get("wyoming_tts_voice") or "").strip(),
             openai_base_url=str(current_speech.get("openai_tts_base_url") or "").strip(),
             openai_api_key=str(current_speech.get("openai_tts_api_key") or "").strip(),
-            chatterbox_base_url=str(current_speech.get("chatterbox_tts_base_url") or "").strip(),
-            chatterbox_voice_mode=str(current_speech.get("chatterbox_tts_voice_mode") or "").strip(),
-            chatterbox_chunk_size=current_speech.get("chatterbox_tts_chunk_size"),
-            chatterbox_temperature=current_speech.get("chatterbox_tts_temperature"),
-            chatterbox_exaggeration=current_speech.get("chatterbox_tts_exaggeration"),
-            chatterbox_cfg_weight=current_speech.get("chatterbox_tts_cfg_weight"),
-            chatterbox_seed=current_speech.get("chatterbox_tts_seed"),
-            chatterbox_speed_factor=current_speech.get("chatterbox_tts_speed_factor"),
-            chatterbox_language=str(current_speech.get("chatterbox_tts_language") or "").strip(),
         )
     except HTTPException:
         raise
@@ -19631,7 +19364,7 @@ def get_voice_firmware_web_artifact(artifact_id: str, relative_path: str) -> Fil
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     media_type = "application/json" if path.suffix.lower() == ".json" else "application/octet-stream"
-    return FileResponse(path, media_type=media_type)
+    return FileResponse(path, media_type=media_type, headers={"Cache-Control": "no-store"})
 
 
 @app.post("/api/cores/{core_key}/start")
@@ -21077,39 +20810,15 @@ def get_settings() -> Dict[str, Any]:
     speech_settings = get_shared_speech_settings()
     speech_ui = get_speech_ui_payload(speech_settings)
     try:
-        qwen_tts_clone_info = clone_audio_info("qwen3_tts", speech_settings.get("qwen_tts_clone_audio"))
+        tts_clone_info = clone_audio_info("pocket_tts", speech_settings.get("tts_clone_audio"))
     except ValueError:
-        qwen_tts_clone_info = {"configured": False, "name": "", "size": 0}
+        tts_clone_info = {"configured": False, "name": "", "size": 0}
     try:
-        omnivoice_tts_clone_info = clone_audio_info(
-            "omnivoice", speech_settings.get("omnivoice_tts_clone_audio")
+        announcement_tts_clone_info = clone_audio_info(
+            "pocket_tts", speech_settings.get("announcement_tts_clone_audio")
         )
     except ValueError:
-        omnivoice_tts_clone_info = {"configured": False, "name": "", "size": 0}
-    try:
-        chatterbox_local_tts_clone_info = clone_audio_info(
-            "chatterbox_local", speech_settings.get("chatterbox_local_tts_clone_audio")
-        )
-    except ValueError:
-        chatterbox_local_tts_clone_info = {"configured": False, "name": "", "size": 0}
-    try:
-        announcement_qwen_tts_clone_info = clone_audio_info(
-            "qwen3_tts", speech_settings.get("announcement_qwen_tts_clone_audio")
-        )
-    except ValueError:
-        announcement_qwen_tts_clone_info = {"configured": False, "name": "", "size": 0}
-    try:
-        announcement_omnivoice_tts_clone_info = clone_audio_info(
-            "omnivoice", speech_settings.get("announcement_omnivoice_tts_clone_audio")
-        )
-    except ValueError:
-        announcement_omnivoice_tts_clone_info = {"configured": False, "name": "", "size": 0}
-    try:
-        announcement_chatterbox_local_tts_clone_info = clone_audio_info(
-            "chatterbox_local", speech_settings.get("announcement_chatterbox_local_tts_clone_audio")
-        )
-    except ValueError:
-        announcement_chatterbox_local_tts_clone_info = {"configured": False, "name": "", "size": 0}
+        announcement_tts_clone_info = {"configured": False, "name": "", "size": 0}
     esphome_fields = _esphome_settings_fields()
     esphome_settings_item = esphome_home_module.settings_item_form() if hasattr(esphome_home_module, "settings_item_form") else {}
     esphome_sections = (
@@ -21189,7 +20898,12 @@ def get_settings() -> Dict[str, Any]:
     hydra_beast_mode_enabled = _as_bool_flag(redis_client.get(HYDRA_BEAST_MODE_ENABLED_KEY), default=False)
     hydra_role_model_values: Dict[str, str] = {}
     for role in HYDRA_BEAST_CONFIG_ROLE_IDS:
-        role_provider = _normalize_hydra_llm_provider(redis_client.get(_hydra_role_llm_key(role, "provider")))
+        raw_role_provider = str(redis_client.get(_hydra_role_llm_key(role, "provider")) or "").strip()
+        role_provider = (
+            "base"
+            if not raw_role_provider or raw_role_provider.lower().replace("-", "_").replace(" ", "_") in {"base", "same_as_base", "use_base"}
+            else _normalize_hydra_llm_provider(raw_role_provider)
+        )
         role_host = str(redis_client.get(_hydra_role_llm_key(role, "host")) or "").strip()
         role_port = str(redis_client.get(_hydra_role_llm_key(role, "port")) or "").strip()
         role_model = str(redis_client.get(_hydra_role_llm_key(role, "model")) or "").strip()
@@ -21218,12 +20932,6 @@ def get_settings() -> Dict[str, Any]:
         "hydra_llm_model": "",
         "hydra_llm_api_key": "",
         "hydra_llm_thinking_enabled": bool(DEFAULT_HYDRA_LLM_THINKING_ENABLED),
-        "hydra_hf_transformers_context_tokens": str(DEFAULT_HF_TRANSFORMERS_CONTEXT_TOKENS),
-        "hydra_hf_transformers_device": DEFAULT_HF_TRANSFORMERS_DEVICE,
-        "hydra_hf_transformers_dtype": DEFAULT_HF_TRANSFORMERS_DTYPE,
-        "hydra_hf_transformers_device_map": DEFAULT_HF_TRANSFORMERS_DEVICE_MAP,
-        "hydra_hf_transformers_attn_implementation": DEFAULT_HF_TRANSFORMERS_ATTN_IMPLEMENTATION,
-        "hydra_hf_transformers_trust_remote_code": bool(DEFAULT_HF_TRANSFORMERS_TRUST_REMOTE_CODE),
         "hydra_llama_cpp_context_tokens": str(DEFAULT_LLAMA_CPP_CONTEXT_TOKENS),
         "hydra_llama_cpp_vision_context_tokens": str(DEFAULT_LLAMA_CPP_VISION_CONTEXT_TOKENS),
         "hydra_llama_cpp_mtp_enabled": bool(DEFAULT_LLAMA_CPP_MTP_ENABLED),
@@ -21237,13 +20945,6 @@ def get_settings() -> Dict[str, Any]:
         "hydra_llama_cpp_slot_count": str(DEFAULT_LLAMA_CPP_SLOT_COUNT),
         "hydra_llama_cpp_base_slot": "",
         "hydra_llama_cpp_vision_slot": "",
-        "hydra_mlx_lm_context_tokens": "",
-        "hydra_mlx_lm_trust_remote_code": bool(DEFAULT_MLX_LM_TRUST_REMOTE_CODE),
-        "hydra_mlx_lm_lazy_load": bool(DEFAULT_MLX_LM_LAZY_LOAD),
-        "hydra_mlx_engine_prefill_step_size": "",
-        "hydra_mlx_engine_kv_bits": "",
-        "hydra_mlx_engine_kv_group_size": "",
-        "hydra_mlx_engine_quantized_kv_start": "",
         "hydra_beast_mode_enabled": False,
         "hydra_max_ledger_items": int(DEFAULT_MAX_LEDGER_ITEMS),
         "hydra_astraeus_plan_review_enabled": bool(DEFAULT_ASTRAEUS_PLAN_REVIEW_ENABLED),
@@ -21316,83 +21017,46 @@ def get_settings() -> Dict[str, Any]:
         "speech_tts_backend": str(speech_settings.get("tts_backend") or ""),
         "speech_tts_model": str(speech_settings.get("tts_model") or ""),
         "speech_tts_voice": str(speech_settings.get("tts_voice") or ""),
-        "speech_kokoro_output_gain": str(speech_settings.get("kokoro_output_gain") or ""),
         "speech_pocket_tts_output_gain": str(speech_settings.get("pocket_tts_output_gain") or ""),
-        "speech_qwen_tts_clone_text": str(speech_settings.get("qwen_tts_clone_text") or ""),
-        "speech_qwen_tts_language": str(speech_settings.get("qwen_tts_language") or "English"),
+        "speech_tts_clone_text": str(speech_settings.get("tts_clone_text") or ""),
+        "speech_tts_clone_audio": tts_clone_info,
+        "speech_tts_clone_audio_url": "/api/settings/speech/clone-audio"
+        if tts_clone_info.get("configured")
+        else "",
+        "speech_qwen_tts_language": str(speech_settings.get("qwen_tts_language") or "Auto"),
         "speech_qwen_tts_instruct": str(speech_settings.get("qwen_tts_instruct") or ""),
-        "speech_qwen_tts_clone_audio": qwen_tts_clone_info,
-        "speech_qwen_tts_clone_audio_url": "/api/settings/speech/clone-audio/qwen3_tts"
-        if qwen_tts_clone_info.get("configured")
-        else "",
-        "speech_omnivoice_tts_clone_text": str(speech_settings.get("omnivoice_tts_clone_text") or ""),
-        "speech_omnivoice_tts_language": str(speech_settings.get("omnivoice_tts_language") or "English"),
+        "speech_omnivoice_tts_language": str(speech_settings.get("omnivoice_tts_language") or "Auto"),
         "speech_omnivoice_tts_instruct": str(speech_settings.get("omnivoice_tts_instruct") or ""),
-        "speech_omnivoice_tts_clone_audio": omnivoice_tts_clone_info,
-        "speech_omnivoice_tts_clone_audio_url": "/api/settings/speech/clone-audio/omnivoice"
-        if omnivoice_tts_clone_info.get("configured")
-        else "",
-        "speech_chatterbox_local_tts_clone_audio": chatterbox_local_tts_clone_info,
-        "speech_chatterbox_local_tts_clone_audio_url": "/api/settings/speech/clone-audio/chatterbox_local"
-        if chatterbox_local_tts_clone_info.get("configured")
-        else "",
         "speech_wyoming_tts_host": str(speech_settings.get("wyoming_tts_host") or ""),
         "speech_wyoming_tts_port": str(speech_settings.get("wyoming_tts_port") or ""),
         "speech_wyoming_tts_voice": str(speech_settings.get("wyoming_tts_voice") or ""),
         "speech_openai_tts_base_url": str(speech_settings.get("openai_tts_base_url") or ""),
         "speech_openai_tts_api_key": str(speech_settings.get("openai_tts_api_key") or ""),
-        "speech_chatterbox_tts_base_url": str(speech_settings.get("chatterbox_tts_base_url") or ""),
-        "speech_chatterbox_tts_voice_mode": str(speech_settings.get("chatterbox_tts_voice_mode") or ""),
-        "speech_chatterbox_tts_chunk_size": str(speech_settings.get("chatterbox_tts_chunk_size") or ""),
-        "speech_chatterbox_tts_temperature": str(speech_settings.get("chatterbox_tts_temperature") or ""),
-        "speech_chatterbox_tts_exaggeration": str(speech_settings.get("chatterbox_tts_exaggeration") or ""),
-        "speech_chatterbox_tts_cfg_weight": str(speech_settings.get("chatterbox_tts_cfg_weight") or ""),
-        "speech_chatterbox_tts_seed": str(speech_settings.get("chatterbox_tts_seed") or ""),
-        "speech_chatterbox_tts_speed_factor": str(speech_settings.get("chatterbox_tts_speed_factor") or ""),
-        "speech_chatterbox_tts_language": str(speech_settings.get("chatterbox_tts_language") or ""),
-        "speech_chatterbox_tts_streaming_enabled": _as_bool_flag(
-            speech_settings.get("chatterbox_tts_streaming_enabled"),
-            default=False,
-        ),
         "speech_announcement_tts_backend": str(speech_settings.get("announcement_tts_backend") or ""),
         "speech_announcement_tts_model": str(speech_settings.get("announcement_tts_model") or ""),
         "speech_announcement_tts_voice": str(speech_settings.get("announcement_tts_voice") or ""),
-        "speech_announcement_kokoro_output_gain": str(
-            speech_settings.get("announcement_kokoro_output_gain") or ""
-        ),
         "speech_announcement_pocket_tts_output_gain": str(
             speech_settings.get("announcement_pocket_tts_output_gain") or ""
         ),
-        "speech_announcement_qwen_tts_clone_text": str(
-            speech_settings.get("announcement_qwen_tts_clone_text") or ""
+        "speech_announcement_tts_clone_text": str(
+            speech_settings.get("announcement_tts_clone_text") or ""
         ),
+        "speech_announcement_tts_clone_audio": announcement_tts_clone_info,
+        "speech_announcement_tts_clone_audio_url": "/api/settings/speech/clone-audio?scope=announcement"
+        if announcement_tts_clone_info.get("configured")
+        else "",
         "speech_announcement_qwen_tts_language": str(
-            speech_settings.get("announcement_qwen_tts_language") or "English"
+            speech_settings.get("announcement_qwen_tts_language") or "Auto"
         ),
         "speech_announcement_qwen_tts_instruct": str(
             speech_settings.get("announcement_qwen_tts_instruct") or ""
         ),
-        "speech_announcement_qwen_tts_clone_audio": announcement_qwen_tts_clone_info,
-        "speech_announcement_qwen_tts_clone_audio_url": "/api/settings/speech/clone-audio/qwen3_tts?scope=announcement"
-        if announcement_qwen_tts_clone_info.get("configured")
-        else "",
-        "speech_announcement_omnivoice_tts_clone_text": str(
-            speech_settings.get("announcement_omnivoice_tts_clone_text") or ""
-        ),
         "speech_announcement_omnivoice_tts_language": str(
-            speech_settings.get("announcement_omnivoice_tts_language") or "English"
+            speech_settings.get("announcement_omnivoice_tts_language") or "Auto"
         ),
         "speech_announcement_omnivoice_tts_instruct": str(
             speech_settings.get("announcement_omnivoice_tts_instruct") or ""
         ),
-        "speech_announcement_omnivoice_tts_clone_audio": announcement_omnivoice_tts_clone_info,
-        "speech_announcement_omnivoice_tts_clone_audio_url": "/api/settings/speech/clone-audio/omnivoice?scope=announcement"
-        if announcement_omnivoice_tts_clone_info.get("configured")
-        else "",
-        "speech_announcement_chatterbox_local_tts_clone_audio": announcement_chatterbox_local_tts_clone_info,
-        "speech_announcement_chatterbox_local_tts_clone_audio_url": "/api/settings/speech/clone-audio/chatterbox_local?scope=announcement"
-        if announcement_chatterbox_local_tts_clone_info.get("configured")
-        else "",
         "speech_satellite_ducking_target_percent": int(
             speech_settings.get("satellite_ducking_target_percent")
             if speech_settings.get("satellite_ducking_target_percent") is not None
@@ -21413,15 +21077,6 @@ def get_settings() -> Dict[str, Any]:
         "speech_announcement_wyoming_tts_voice": str(speech_settings.get("announcement_wyoming_tts_voice") or ""),
         "speech_announcement_openai_tts_base_url": str(speech_settings.get("announcement_openai_tts_base_url") or ""),
         "speech_announcement_openai_tts_api_key": str(speech_settings.get("announcement_openai_tts_api_key") or ""),
-        "speech_announcement_chatterbox_tts_base_url": str(speech_settings.get("announcement_chatterbox_tts_base_url") or ""),
-        "speech_announcement_chatterbox_tts_voice_mode": str(speech_settings.get("announcement_chatterbox_tts_voice_mode") or ""),
-        "speech_announcement_chatterbox_tts_chunk_size": str(speech_settings.get("announcement_chatterbox_tts_chunk_size") or ""),
-        "speech_announcement_chatterbox_tts_temperature": str(speech_settings.get("announcement_chatterbox_tts_temperature") or ""),
-        "speech_announcement_chatterbox_tts_exaggeration": str(speech_settings.get("announcement_chatterbox_tts_exaggeration") or ""),
-        "speech_announcement_chatterbox_tts_cfg_weight": str(speech_settings.get("announcement_chatterbox_tts_cfg_weight") or ""),
-        "speech_announcement_chatterbox_tts_seed": str(speech_settings.get("announcement_chatterbox_tts_seed") or ""),
-        "speech_announcement_chatterbox_tts_speed_factor": str(speech_settings.get("announcement_chatterbox_tts_speed_factor") or ""),
-        "speech_announcement_chatterbox_tts_language": str(speech_settings.get("announcement_chatterbox_tts_language") or ""),
         "speech_model_warmup": _speech_model_warmup_snapshot(),
         "hf_llm_warmup": _hf_llm_warmup_snapshot(),
         "hydra_llm_recovery_notice": str(redis_client.get(HYDRA_LLM_RECOVERY_NOTICE_KEY) or ""),
@@ -21439,40 +21094,6 @@ def get_settings() -> Dict[str, Any]:
             HYDRA_LLM_THINKING_ENABLED_KEY,
             ("TATER_HYDRA_LLM_THINKING_ENABLED", "TATER_LLM_THINKING_ENABLED"),
             DEFAULT_HYDRA_LLM_THINKING_ENABLED,
-        ),
-        "hydra_hf_transformers_context_tokens": _read_local_llm_context_setting(
-            HYDRA_HF_TRANSFORMERS_CONTEXT_TOKENS_KEY,
-            ("TATER_HF_TRANSFORMERS_MAX_INPUT_TOKENS",),
-            DEFAULT_HF_TRANSFORMERS_CONTEXT_TOKENS,
-        ),
-        "hydra_hf_transformers_device": _read_text_choice_setting(
-            HYDRA_HF_TRANSFORMERS_DEVICE_KEY,
-            ("TATER_HF_TRANSFORMERS_DEVICE",),
-            DEFAULT_HF_TRANSFORMERS_DEVICE,
-            allowed=("auto", "cuda", "mps", "cpu"),
-        ),
-        "hydra_hf_transformers_dtype": _read_text_choice_setting(
-            HYDRA_HF_TRANSFORMERS_DTYPE_KEY,
-            ("TATER_HF_TRANSFORMERS_DTYPE",),
-            DEFAULT_HF_TRANSFORMERS_DTYPE,
-            allowed=("auto", "float16", "bfloat16", "float32"),
-        ),
-        "hydra_hf_transformers_device_map": _read_text_choice_setting(
-            HYDRA_HF_TRANSFORMERS_DEVICE_MAP_KEY,
-            ("TATER_HF_TRANSFORMERS_DEVICE_MAP",),
-            DEFAULT_HF_TRANSFORMERS_DEVICE_MAP,
-            allowed=("default", "disabled", "auto", "balanced"),
-        ),
-        "hydra_hf_transformers_attn_implementation": _read_text_choice_setting(
-            HYDRA_HF_TRANSFORMERS_ATTN_IMPLEMENTATION_KEY,
-            ("TATER_HF_TRANSFORMERS_ATTN_IMPLEMENTATION",),
-            DEFAULT_HF_TRANSFORMERS_ATTN_IMPLEMENTATION,
-            allowed=("", "auto", "sdpa", "flash_attention_2", "eager"),
-        ),
-        "hydra_hf_transformers_trust_remote_code": _read_bool_setting(
-            HYDRA_HF_TRANSFORMERS_TRUST_REMOTE_CODE_KEY,
-            ("TATER_HF_TRANSFORMERS_TRUST_REMOTE_CODE",),
-            DEFAULT_HF_TRANSFORMERS_TRUST_REMOTE_CODE,
         ),
         "hydra_llama_cpp_context_tokens": _read_local_llm_context_setting(
             HYDRA_LLAMA_CPP_CONTEXT_TOKENS_KEY,
@@ -21552,47 +21173,6 @@ def get_settings() -> Dict[str, Any]:
             maximum=31,
             allow_zero=True,
         ),
-        "hydra_mlx_lm_context_tokens": _read_local_llm_context_setting(
-            HYDRA_MLX_LM_CONTEXT_TOKENS_KEY,
-            ("TATER_MLX_LM_MAX_KV_SIZE",),
-            None,
-            minimum=128,
-        ),
-        "hydra_mlx_lm_trust_remote_code": _read_bool_setting(
-            HYDRA_MLX_LM_TRUST_REMOTE_CODE_KEY,
-            ("TATER_MLX_LM_TRUST_REMOTE_CODE",),
-            DEFAULT_MLX_LM_TRUST_REMOTE_CODE,
-        ),
-        "hydra_mlx_lm_lazy_load": _read_bool_setting(
-            HYDRA_MLX_LM_LAZY_LOAD_KEY,
-            ("TATER_MLX_LM_LAZY",),
-            DEFAULT_MLX_LM_LAZY_LOAD,
-        ),
-        "hydra_mlx_engine_prefill_step_size": _read_optional_int_setting(
-            HYDRA_MLX_ENGINE_PREFILL_STEP_SIZE_KEY,
-            ("TATER_MLX_ENGINE_PREFILL_STEP_SIZE",),
-            minimum=1,
-            maximum=32768,
-        ),
-        "hydra_mlx_engine_kv_bits": _read_text_choice_setting(
-            HYDRA_MLX_ENGINE_KV_BITS_KEY,
-            ("TATER_MLX_ENGINE_KV_BITS",),
-            "",
-            allowed=("", "2", "3", "4", "6", "8"),
-        ),
-        "hydra_mlx_engine_kv_group_size": _read_text_choice_setting(
-            HYDRA_MLX_ENGINE_KV_GROUP_SIZE_KEY,
-            ("TATER_MLX_ENGINE_KV_GROUP_SIZE",),
-            "",
-            allowed=("", "32", "64", "128"),
-        ),
-        "hydra_mlx_engine_quantized_kv_start": _read_optional_int_setting(
-            HYDRA_MLX_ENGINE_QUANTIZED_KV_START_KEY,
-            ("TATER_MLX_ENGINE_QUANTIZED_KV_START",),
-            minimum=0,
-            maximum=1_048_576,
-            allow_zero=True,
-        ),
         "spudex_llm_provider": _normalize_hydra_llm_provider(spudex_settings.get("llm_provider") or ""),
         "spudex_llm_host": str(spudex_settings.get("llm_host") or ""),
         "spudex_llm_model": str(spudex_settings.get("llm_model") or ""),
@@ -21644,44 +21224,31 @@ def _managed_tts_profile_scope(value: Any) -> str:
     return "announcement" if str(value or "").strip().lower() == "announcement" else "direct"
 
 
-def _managed_tts_profile_field(backend: str, scope: str, suffix: str) -> str:
-    prefix = (
-        "qwen_tts"
-        if backend == "qwen3_tts"
-        else "omnivoice_tts"
-        if backend == "omnivoice"
-        else "chatterbox_local_tts"
-        if backend == "chatterbox_local"
-        else ""
-    )
-    if not prefix:
-        return ""
-    field = f"{prefix}_{suffix}"
-    return f"announcement_{field}" if scope == "announcement" else field
-
-
+@app.get("/api/settings/speech/clone-audio")
 @app.get("/api/settings/speech/clone-audio/{backend}")
-def get_speech_clone_audio(backend: str, scope: str = "direct") -> Response:
-    token = normalize_managed_tts_backend(backend)
+def get_speech_clone_audio(backend: str = "pocket_tts", scope: str = "direct") -> Response:
+    token = normalize_managed_tts_backend(backend or "pocket_tts")
     profile_scope = _managed_tts_profile_scope(scope)
     current = get_shared_speech_settings()
-    field = _managed_tts_profile_field(token, profile_scope, "clone_audio")
-    if not field:
+    if token not in {"pocket_tts", "qwen3_tts", "omnivoice"}:
         raise HTTPException(status_code=404, detail="Unknown clone-audio backend.")
+    field = "announcement_tts_clone_audio" if profile_scope == "announcement" else "tts_clone_audio"
     try:
         path = validate_clone_audio_path(token, current.get(field))
     except ValueError as exc:
         raise HTTPException(status_code=404, detail="Clone audio is not configured.") from exc
     if not path:
         raise HTTPException(status_code=404, detail="Clone audio is not configured.")
-    return FileResponse(path, filename=Path(path).name)
+    media_type = mimetypes.guess_type(path)[0] or "application/octet-stream"
+    return FileResponse(path, media_type=media_type)
 
 
+@app.post("/api/settings/speech/clone-audio")
 @app.post("/api/settings/speech/clone-audio/{backend}")
-async def upload_speech_clone_audio(backend: str, request: Request, scope: str = "direct") -> Dict[str, Any]:
-    token = normalize_managed_tts_backend(backend)
+async def upload_speech_clone_audio(request: Request, backend: str = "pocket_tts", scope: str = "direct") -> Dict[str, Any]:
+    token = normalize_managed_tts_backend(backend or "pocket_tts")
     profile_scope = _managed_tts_profile_scope(scope)
-    if token not in {"qwen3_tts", "omnivoice", "chatterbox_local"}:
+    if token not in {"pocket_tts", "qwen3_tts", "omnivoice"}:
         raise HTTPException(status_code=404, detail="Unknown clone-audio backend.")
     filename = str(request.headers.get("x-filename") or "reference.wav").strip()
     try:
@@ -21693,9 +21260,8 @@ async def upload_speech_clone_audio(backend: str, request: Request, scope: str =
     payload = await request.body()
     try:
         path = store_clone_audio(token, filename=filename, data=payload, profile=profile_scope)
-        save_managed_tts_clone_audio_path(token, path, profile=profile_scope)
-        if token != "chatterbox_local":
-            save_managed_tts_clone_text(token, "", profile=profile_scope)
+        save_tts_clone_audio_path(path, profile=profile_scope)
+        save_tts_clone_text("", profile=profile_scope)
         info = clone_audio_info(token, path)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -21706,33 +21272,25 @@ async def upload_speech_clone_audio(backend: str, request: Request, scope: str =
         "note": "",
         "error": "",
     }
-    if token == "chatterbox_local":
+    try:
+        audio_bytes, audio_format = await asyncio.to_thread(decode_clone_audio_pcm, token, path)
+        transcript, stt_backend, backend_note = await _transcribe_pcm_audio_with_selected_stt(
+            audio_bytes,
+            audio_format,
+            selector=f"tts_clone_{profile_scope}",
+        )
         transcription.update(
             {
-                "status": "not_required",
-                "note": "Built-in Chatterbox conditions directly on the reference audio.",
+                "status": "ready" if transcript else "unavailable",
+                "backend": stt_backend,
+                "note": backend_note or ("" if transcript else "No speech was detected in the reference audio."),
             }
         )
-    else:
-        try:
-            audio_bytes, audio_format = await asyncio.to_thread(decode_clone_audio_pcm, token, path)
-            transcript, stt_backend, backend_note = await _transcribe_pcm_audio_with_selected_stt(
-                audio_bytes,
-                audio_format,
-                selector=f"tts_clone_{profile_scope}_{token}",
-            )
-            transcription.update(
-                {
-                    "status": "ready" if transcript else "unavailable",
-                    "backend": stt_backend,
-                    "note": backend_note or ("" if transcript else "No speech was detected in the reference audio."),
-                }
-            )
-            if transcript:
-                save_managed_tts_clone_text(token, transcript, profile=profile_scope)
-        except Exception as exc:
-            transcription["error"] = str(exc) or "Automatic transcription was unavailable."
-            logger.warning("[managed-tts] clone transcript unavailable backend=%s error=%s", token, exc)
+        if transcript:
+            save_tts_clone_text(transcript, profile=profile_scope)
+    except Exception as exc:
+        transcription["error"] = str(exc) or "Automatic transcription was unavailable."
+        logger.warning("[managed-tts] clone transcript unavailable backend=%s error=%s", token, exc)
     clear_managed_tts_workers()
     return {
         "ok": True,
@@ -21741,22 +21299,22 @@ async def upload_speech_clone_audio(backend: str, request: Request, scope: str =
         "audio": info,
         "clone_text": transcript,
         "transcription": transcription,
-        "url": f"/api/settings/speech/clone-audio/{token}?scope={profile_scope}",
+        "url": f"/api/settings/speech/clone-audio?scope={profile_scope}",
     }
 
 
+@app.delete("/api/settings/speech/clone-audio")
 @app.delete("/api/settings/speech/clone-audio/{backend}")
-def delete_speech_clone_audio(backend: str, scope: str = "direct") -> Dict[str, Any]:
-    token = normalize_managed_tts_backend(backend)
+def delete_speech_clone_audio(backend: str = "pocket_tts", scope: str = "direct") -> Dict[str, Any]:
+    token = normalize_managed_tts_backend(backend or "pocket_tts")
     profile_scope = _managed_tts_profile_scope(scope)
     current = get_shared_speech_settings()
-    field = _managed_tts_profile_field(token, profile_scope, "clone_audio")
-    if not field:
+    if token not in {"pocket_tts", "qwen3_tts", "omnivoice"}:
         raise HTTPException(status_code=404, detail="Unknown clone-audio backend.")
+    field = "announcement_tts_clone_audio" if profile_scope == "announcement" else "tts_clone_audio"
     remove_clone_audio(token, current.get(field), profile=profile_scope)
-    save_managed_tts_clone_audio_path(token, "", profile=profile_scope)
-    if token != "chatterbox_local":
-        save_managed_tts_clone_text(token, "", profile=profile_scope)
+    save_tts_clone_audio_path("", profile=profile_scope)
+    save_tts_clone_text("", profile=profile_scope)
     clear_managed_tts_workers()
     return {
         "ok": True,
@@ -21778,11 +21336,6 @@ async def preview_speech_tts(payload: SpeechTtsPreviewRequest) -> Response:
             backend=str(payload.backend or current_speech.get("tts_backend") or "").strip(),
             model=str(payload.model or current_speech.get("tts_model") or "").strip(),
             voice=str(payload.voice or current_speech.get("tts_voice") or "").strip(),
-            kokoro_output_gain=(
-                payload.kokoro_output_gain
-                if payload.kokoro_output_gain is not None
-                else current_speech.get("kokoro_output_gain")
-            ),
             pocket_tts_output_gain=(
                 payload.pocket_tts_output_gain
                 if payload.pocket_tts_output_gain is not None
@@ -21802,64 +21355,11 @@ async def preview_speech_tts(payload: SpeechTtsPreviewRequest) -> Response:
                 if payload.openai_api_key is not None
                 else str(current_speech.get("openai_tts_api_key") or "").strip()
             ),
-            chatterbox_base_url=(
-                str(payload.chatterbox_base_url).strip()
-                if payload.chatterbox_base_url is not None
-                else str(current_speech.get("chatterbox_tts_base_url") or "").strip()
-            ),
-            chatterbox_voice_mode=(
-                str(payload.chatterbox_voice_mode).strip()
-                if payload.chatterbox_voice_mode is not None
-                else str(current_speech.get("chatterbox_tts_voice_mode") or "").strip()
-            ),
-            chatterbox_chunk_size=(
-                payload.chatterbox_chunk_size
-                if payload.chatterbox_chunk_size is not None
-                else current_speech.get("chatterbox_tts_chunk_size")
-            ),
-            chatterbox_temperature=(
-                payload.chatterbox_temperature
-                if payload.chatterbox_temperature is not None
-                else current_speech.get("chatterbox_tts_temperature")
-            ),
-            chatterbox_exaggeration=(
-                payload.chatterbox_exaggeration
-                if payload.chatterbox_exaggeration is not None
-                else current_speech.get("chatterbox_tts_exaggeration")
-            ),
-            chatterbox_cfg_weight=(
-                payload.chatterbox_cfg_weight
-                if payload.chatterbox_cfg_weight is not None
-                else current_speech.get("chatterbox_tts_cfg_weight")
-            ),
-            chatterbox_seed=(
-                payload.chatterbox_seed
-                if payload.chatterbox_seed is not None
-                else current_speech.get("chatterbox_tts_seed")
-            ),
-            chatterbox_speed_factor=(
-                payload.chatterbox_speed_factor
-                if payload.chatterbox_speed_factor is not None
-                else current_speech.get("chatterbox_tts_speed_factor")
-            ),
-            chatterbox_language=(
-                str(payload.chatterbox_language).strip()
-                if payload.chatterbox_language is not None
-                else str(current_speech.get("chatterbox_tts_language") or "").strip()
-            ),
-            clone_audio=(
-                current_speech.get("qwen_tts_clone_audio")
-                if normalize_managed_tts_backend(payload.backend or current_speech.get("tts_backend")) == "qwen3_tts"
-                else current_speech.get("omnivoice_tts_clone_audio")
-            ),
+            clone_audio=current_speech.get("tts_clone_audio"),
             clone_text=(
                 payload.clone_text
                 if payload.clone_text is not None
-                else current_speech.get(
-                    "qwen_tts_clone_text"
-                    if normalize_managed_tts_backend(payload.backend or current_speech.get("tts_backend")) == "qwen3_tts"
-                    else "omnivoice_tts_clone_text"
-                )
+                else current_speech.get("tts_clone_text")
             ),
             managed_language=(
                 payload.managed_language
@@ -22108,28 +21608,6 @@ async def get_speech_openai_compatible_tts_voices(payload: OpenAiCompatibleTtsVo
         raise HTTPException(status_code=400, detail=str(exc) or "Failed to fetch OpenAI-compatible TTS voices.") from exc
 
 
-@app.post("/api/settings/speech/chatterbox-tts-voices")
-async def get_speech_chatterbox_tts_voices(payload: ChatterboxTtsVoicesRequest) -> Dict[str, Any]:
-    current_speech = get_shared_speech_settings()
-    try:
-        return await fetch_chatterbox_tts_voice_options(
-            base_url=(
-                str(payload.base_url).strip()
-                if payload.base_url is not None
-                else str(current_speech.get("chatterbox_tts_base_url") or "").strip()
-            ),
-            voice_mode=(
-                str(payload.voice_mode).strip()
-                if payload.voice_mode is not None
-                else str(current_speech.get("chatterbox_tts_voice_mode") or "").strip()
-            ),
-        )
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=str(exc) or "Failed to fetch Chatterbox TTS voices.") from exc
-
-
 @app.post("/api/settings/speech/openai-compatible-tts-models")
 async def get_speech_openai_compatible_tts_models(payload: OpenAiCompatibleTtsModelsRequest) -> Dict[str, Any]:
     current_speech = get_shared_speech_settings()
@@ -22159,7 +21637,10 @@ def get_speech_model_warmup() -> Dict[str, Any]:
 
 @app.get("/api/settings/hf-llm/warmup")
 def get_hf_llm_warmup() -> Dict[str, Any]:
-    return _hf_llm_warmup_snapshot()
+    snapshot = _hf_llm_warmup_snapshot()
+    snapshot["startup_bootstrap_pending"] = not bool(bootstrap_state.get("restore_complete"))
+    snapshot["startup_bootstrap_error"] = str(bootstrap_state.get("restore_error") or "")
+    return snapshot
 
 
 @app.post("/api/settings/hf-llm/warmup/cancel")
@@ -22286,7 +21767,7 @@ def save_local_llm_chat_template(request: LlamaCppChatTemplateRequest) -> Dict[s
 
 @app.get("/api/settings/huggingface/models")
 def get_huggingface_models(
-    provider: str = "hf_transformers",
+    provider: str = "llama_cpp",
     view: str = "trending",
     query: str = "",
     task: str = "text-generation",
@@ -22295,7 +21776,7 @@ def get_huggingface_models(
 ) -> Dict[str, Any]:
     provider_token = _normalize_hydra_llm_provider(provider)
     if not _is_local_hydra_llm_provider(provider_token):
-        provider_token = HYDRA_LLM_PROVIDER_HF_TRANSFORMERS
+        provider_token = HYDRA_LLM_PROVIDER_LLAMA_CPP
     view_token = str(view or "trending").strip().lower().replace("_", "-")
     task_token = _normalize_hf_browser_task(task)
     clean_limit = max(4, min(48, int(limit or 24)))
@@ -22384,14 +21865,14 @@ def get_huggingface_models(
 @app.get("/api/settings/huggingface/model")
 def get_huggingface_model_detail(
     repo_id: str,
-    provider: str = "hf_transformers",
+    provider: str = "llama_cpp",
 ) -> Dict[str, Any]:
     repo = str(repo_id or "").strip()
     if not repo or "/" not in repo:
         raise HTTPException(status_code=400, detail="repo_id must look like owner/repo")
     provider_token = _normalize_hydra_llm_provider(provider)
     if not _is_local_hydra_llm_provider(provider_token):
-        provider_token = HYDRA_LLM_PROVIDER_HF_TRANSFORMERS
+        provider_token = HYDRA_LLM_PROVIDER_LLAMA_CPP
     integration_status = _hf_browser_integration_status()
     try:
         from huggingface_hub import HfApi  # type: ignore
@@ -22479,7 +21960,7 @@ def start_huggingface_model_download(request: HfModelDownloadRequest) -> Dict[st
     targets = _dedupe_hf_llm_warmup_targets(targets)
     result = _start_hf_llm_warmup(
         targets,
-        reason="huggingface-browser",
+        reason="models-browser",
         load_models=False,
     )
     result["queued_count"] = len(targets)
@@ -23101,7 +22582,7 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         ):
             raise HTTPException(
                 status_code=400,
-                detail=f"{label} {_hydra_llm_provider_label(provider_token)} model must be downloaded from the Hugging Face tab before saving.",
+                detail=f"{label} {_hydra_llm_provider_label(provider_token)} model must be downloaded from the Models tab before saving.",
             )
         return resolved_model or model_token
 
@@ -23148,12 +22629,6 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         "hydra_llm_provider",
         "hydra_llm_thinking_enabled",
         "hydra_base_servers",
-        "hydra_hf_transformers_context_tokens",
-        "hydra_hf_transformers_device",
-        "hydra_hf_transformers_dtype",
-        "hydra_hf_transformers_device_map",
-        "hydra_hf_transformers_attn_implementation",
-        "hydra_hf_transformers_trust_remote_code",
         "hydra_llama_cpp_context_tokens",
         "hydra_llama_cpp_mtp_enabled",
         "hydra_llama_cpp_speculative_method",
@@ -23165,13 +22640,6 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         "hydra_llama_cpp_offload_kqv",
         "hydra_llama_cpp_slot_count",
         "hydra_llama_cpp_base_slot",
-        "hydra_mlx_lm_context_tokens",
-        "hydra_mlx_lm_trust_remote_code",
-        "hydra_mlx_lm_lazy_load",
-        "hydra_mlx_engine_prefill_step_size",
-        "hydra_mlx_engine_kv_bits",
-        "hydra_mlx_engine_kv_group_size",
-        "hydra_mlx_engine_quantized_kv_start",
     }
     spudex_model_keys = {"spudex_llm_provider", "spudex_llm_host", "spudex_llm_model"}
     tater_open_webui_model_keys = {
@@ -23283,43 +22751,10 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         else []
     )
 
-    _save_local_llm_context_setting(
-        "hydra_hf_transformers_context_tokens",
-        HYDRA_HF_TRANSFORMERS_CONTEXT_TOKENS_KEY,
-    )
     _save_bool_setting(
         "hydra_llm_thinking_enabled",
         HYDRA_LLM_THINKING_ENABLED_KEY,
         default=DEFAULT_HYDRA_LLM_THINKING_ENABLED,
-    )
-    _save_text_choice_setting(
-        "hydra_hf_transformers_device",
-        HYDRA_HF_TRANSFORMERS_DEVICE_KEY,
-        allowed=("auto", "cuda", "mps", "cpu"),
-        default=DEFAULT_HF_TRANSFORMERS_DEVICE,
-    )
-    _save_text_choice_setting(
-        "hydra_hf_transformers_dtype",
-        HYDRA_HF_TRANSFORMERS_DTYPE_KEY,
-        allowed=("auto", "float16", "bfloat16", "float32"),
-        default=DEFAULT_HF_TRANSFORMERS_DTYPE,
-    )
-    _save_text_choice_setting(
-        "hydra_hf_transformers_device_map",
-        HYDRA_HF_TRANSFORMERS_DEVICE_MAP_KEY,
-        allowed=("default", "disabled", "auto", "balanced"),
-        default=DEFAULT_HF_TRANSFORMERS_DEVICE_MAP,
-    )
-    _save_text_choice_setting(
-        "hydra_hf_transformers_attn_implementation",
-        HYDRA_HF_TRANSFORMERS_ATTN_IMPLEMENTATION_KEY,
-        allowed=("", "auto", "sdpa", "flash_attention_2", "eager"),
-        default=DEFAULT_HF_TRANSFORMERS_ATTN_IMPLEMENTATION,
-    )
-    _save_bool_setting(
-        "hydra_hf_transformers_trust_remote_code",
-        HYDRA_HF_TRANSFORMERS_TRUST_REMOTE_CODE_KEY,
-        default=DEFAULT_HF_TRANSFORMERS_TRUST_REMOTE_CODE,
     )
     _save_local_llm_context_setting(
         "hydra_llama_cpp_context_tokens",
@@ -23385,47 +22820,6 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
     )
     _save_llama_cpp_slot_setting("hydra_llama_cpp_base_slot", HYDRA_LLAMA_CPP_BASE_SLOT_KEY)
     _save_llama_cpp_slot_setting("hydra_llama_cpp_vision_slot", HYDRA_LLAMA_CPP_VISION_SLOT_KEY)
-    _save_local_llm_context_setting(
-        "hydra_mlx_lm_context_tokens",
-        HYDRA_MLX_LM_CONTEXT_TOKENS_KEY,
-        min_value=128,
-    )
-    _save_bool_setting(
-        "hydra_mlx_lm_trust_remote_code",
-        HYDRA_MLX_LM_TRUST_REMOTE_CODE_KEY,
-        default=DEFAULT_MLX_LM_TRUST_REMOTE_CODE,
-    )
-    _save_bool_setting(
-        "hydra_mlx_lm_lazy_load",
-        HYDRA_MLX_LM_LAZY_LOAD_KEY,
-        default=DEFAULT_MLX_LM_LAZY_LOAD,
-    )
-    _save_optional_int_setting(
-        "hydra_mlx_engine_prefill_step_size",
-        HYDRA_MLX_ENGINE_PREFILL_STEP_SIZE_KEY,
-        min_value=1,
-        max_value=32768,
-    )
-    _save_text_choice_setting(
-        "hydra_mlx_engine_kv_bits",
-        HYDRA_MLX_ENGINE_KV_BITS_KEY,
-        allowed=("", "2", "3", "4", "6", "8"),
-        default="",
-    )
-    _save_text_choice_setting(
-        "hydra_mlx_engine_kv_group_size",
-        HYDRA_MLX_ENGINE_KV_GROUP_SIZE_KEY,
-        allowed=("", "32", "64", "128"),
-        default="",
-    )
-    _save_optional_int_setting(
-        "hydra_mlx_engine_quantized_kv_start",
-        HYDRA_MLX_ENGINE_QUANTIZED_KV_START_KEY,
-        min_value=0,
-        max_value=1_048_576,
-        allow_zero=True,
-    )
-
     username = updates.get("username")
     if isinstance(username, str):
         redis_client.hset("chat_settings", "username", username.strip() or "User")
@@ -23648,12 +23042,10 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         "speech_tts_backend",
         "speech_tts_model",
         "speech_tts_voice",
-        "speech_kokoro_output_gain",
         "speech_pocket_tts_output_gain",
-        "speech_qwen_tts_clone_text",
+        "speech_tts_clone_text",
         "speech_qwen_tts_language",
         "speech_qwen_tts_instruct",
-        "speech_omnivoice_tts_clone_text",
         "speech_omnivoice_tts_language",
         "speech_omnivoice_tts_instruct",
         "speech_wyoming_tts_host",
@@ -23661,25 +23053,13 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         "speech_wyoming_tts_voice",
         "speech_openai_tts_base_url",
         "speech_openai_tts_api_key",
-        "speech_chatterbox_tts_base_url",
-        "speech_chatterbox_tts_voice_mode",
-        "speech_chatterbox_tts_chunk_size",
-        "speech_chatterbox_tts_temperature",
-        "speech_chatterbox_tts_exaggeration",
-        "speech_chatterbox_tts_cfg_weight",
-        "speech_chatterbox_tts_seed",
-        "speech_chatterbox_tts_speed_factor",
-        "speech_chatterbox_tts_language",
-        "speech_chatterbox_tts_streaming_enabled",
         "speech_announcement_tts_backend",
         "speech_announcement_tts_model",
         "speech_announcement_tts_voice",
-        "speech_announcement_kokoro_output_gain",
         "speech_announcement_pocket_tts_output_gain",
-        "speech_announcement_qwen_tts_clone_text",
+        "speech_announcement_tts_clone_text",
         "speech_announcement_qwen_tts_language",
         "speech_announcement_qwen_tts_instruct",
-        "speech_announcement_omnivoice_tts_clone_text",
         "speech_announcement_omnivoice_tts_language",
         "speech_announcement_omnivoice_tts_instruct",
         "speech_satellite_ducking_target_percent",
@@ -23690,15 +23070,6 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         "speech_announcement_wyoming_tts_voice",
         "speech_announcement_openai_tts_base_url",
         "speech_announcement_openai_tts_api_key",
-        "speech_announcement_chatterbox_tts_base_url",
-        "speech_announcement_chatterbox_tts_voice_mode",
-        "speech_announcement_chatterbox_tts_chunk_size",
-        "speech_announcement_chatterbox_tts_temperature",
-        "speech_announcement_chatterbox_tts_exaggeration",
-        "speech_announcement_chatterbox_tts_cfg_weight",
-        "speech_announcement_chatterbox_tts_seed",
-        "speech_announcement_chatterbox_tts_speed_factor",
-        "speech_announcement_chatterbox_tts_language",
     }
     tts_reload_keys = {
         "speech_acceleration",
@@ -23708,25 +23079,20 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         "speech_announcement_tts_backend",
         "speech_announcement_tts_model",
         "speech_announcement_tts_voice",
-        "speech_announcement_qwen_tts_clone_text",
+        "speech_announcement_tts_clone_text",
         "speech_announcement_qwen_tts_language",
         "speech_announcement_qwen_tts_instruct",
-        "speech_announcement_omnivoice_tts_clone_text",
         "speech_announcement_omnivoice_tts_language",
         "speech_announcement_omnivoice_tts_instruct",
-        "speech_qwen_tts_clone_text",
+        "speech_tts_clone_text",
         "speech_qwen_tts_language",
         "speech_qwen_tts_instruct",
-        "speech_omnivoice_tts_clone_text",
         "speech_omnivoice_tts_language",
         "speech_omnivoice_tts_instruct",
     }
     speech_warmup_keys = set(speech_keys) - {
-        "speech_kokoro_output_gain",
         "speech_pocket_tts_output_gain",
-        "speech_announcement_kokoro_output_gain",
         "speech_announcement_pocket_tts_output_gain",
-        "speech_chatterbox_tts_streaming_enabled",
         "speech_satellite_ducking_target_percent",
         "speech_satellite_ducking_attack_ms",
         "speech_satellite_ducking_release_ms",
@@ -23738,27 +23104,18 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         selected_announcement_backend = normalize_managed_tts_backend(
             updates.get("speech_announcement_tts_backend", current_speech.get("announcement_tts_backend") or "")
         )
-        announcement_managed_audio = {
-            "qwen3_tts": current_speech.get("announcement_qwen_tts_clone_audio"),
-            "omnivoice": current_speech.get("announcement_omnivoice_tts_clone_audio"),
-            "chatterbox_local": current_speech.get("announcement_chatterbox_local_tts_clone_audio"),
-        }
-        if selected_announcement_backend in announcement_managed_audio:
-            direct_field = {
-                "qwen3_tts": "qwen_tts_clone_audio",
-                "omnivoice": "omnivoice_tts_clone_audio",
-                "chatterbox_local": "chatterbox_local_tts_clone_audio",
-            }[selected_announcement_backend]
-            direct_path = str(current_speech.get(direct_field) or "").strip()
-            announcement_path = str(announcement_managed_audio.get(selected_announcement_backend) or "").strip()
+        announcement_clone_audio = current_speech.get("announcement_tts_clone_audio")
+        if selected_announcement_backend in {"pocket_tts", "qwen3_tts", "omnivoice"}:
+            direct_path = str(current_speech.get("tts_clone_audio") or "").strip()
+            announcement_path = str(announcement_clone_audio or "").strip()
             if direct_path and announcement_path == direct_path:
                 with contextlib.suppress(Exception):
                     validated_path = validate_clone_audio_path(selected_announcement_backend, direct_path)
                     if validated_path:
                         source_path = Path(validated_path)
-                        announcement_managed_audio[selected_announcement_backend] = store_clone_audio(
+                        announcement_clone_audio = store_clone_audio(
                             selected_announcement_backend,
-                            filename=source_path.name,
+                            filename=str(clone_audio_info(selected_announcement_backend, validated_path).get("name") or source_path.name),
                             data=source_path.read_bytes(),
                             profile="announcement",
                         )
@@ -23774,30 +23131,23 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
             tts_backend=str(updates.get("speech_tts_backend", current_speech.get("tts_backend") or "")).strip(),
             tts_model=str(updates.get("speech_tts_model", current_speech.get("tts_model") or "")).strip(),
             tts_voice=str(updates.get("speech_tts_voice", current_speech.get("tts_voice") or "")).strip(),
-            kokoro_output_gain=updates.get("speech_kokoro_output_gain", current_speech.get("kokoro_output_gain")),
             pocket_tts_output_gain=updates.get(
                 "speech_pocket_tts_output_gain",
                 current_speech.get("pocket_tts_output_gain"),
             ),
-            qwen_tts_clone_audio=current_speech.get("qwen_tts_clone_audio"),
-            qwen_tts_clone_text=str(
-                updates.get("speech_qwen_tts_clone_text", current_speech.get("qwen_tts_clone_text") or "")
+            tts_clone_audio=current_speech.get("tts_clone_audio"),
+            tts_clone_text=str(
+                updates.get("speech_tts_clone_text", current_speech.get("tts_clone_text") or "")
             ).strip(),
             qwen_tts_language=str(
-                updates.get("speech_qwen_tts_language", current_speech.get("qwen_tts_language") or "English")
+                updates.get("speech_qwen_tts_language", current_speech.get("qwen_tts_language") or "Auto")
             ).strip(),
             qwen_tts_instruct=str(
                 updates.get("speech_qwen_tts_instruct", current_speech.get("qwen_tts_instruct") or "")
             ).strip(),
-            omnivoice_tts_clone_audio=current_speech.get("omnivoice_tts_clone_audio"),
-            omnivoice_tts_clone_text=str(
-                updates.get(
-                    "speech_omnivoice_tts_clone_text", current_speech.get("omnivoice_tts_clone_text") or ""
-                )
-            ).strip(),
             omnivoice_tts_language=str(
                 updates.get(
-                    "speech_omnivoice_tts_language", current_speech.get("omnivoice_tts_language") or "English"
+                    "speech_omnivoice_tts_language", current_speech.get("omnivoice_tts_language") or "Auto"
                 )
             ).strip(),
             omnivoice_tts_instruct=str(
@@ -23805,7 +23155,6 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
                     "speech_omnivoice_tts_instruct", current_speech.get("omnivoice_tts_instruct") or ""
                 )
             ).strip(),
-            chatterbox_local_tts_clone_audio=current_speech.get("chatterbox_local_tts_clone_audio"),
             wyoming_tts_host=str(
                 updates.get("speech_wyoming_tts_host", current_speech.get("wyoming_tts_host") or "")
             ).strip(),
@@ -23821,40 +23170,6 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
             openai_tts_api_key=str(
                 updates.get("speech_openai_tts_api_key", current_speech.get("openai_tts_api_key") or "")
             ).strip(),
-            chatterbox_tts_base_url=str(
-                updates.get("speech_chatterbox_tts_base_url", current_speech.get("chatterbox_tts_base_url") or "")
-            ).strip(),
-            chatterbox_tts_voice_mode=str(
-                updates.get("speech_chatterbox_tts_voice_mode", current_speech.get("chatterbox_tts_voice_mode") or "")
-            ).strip(),
-            chatterbox_tts_chunk_size=updates.get(
-                "speech_chatterbox_tts_chunk_size",
-                current_speech.get("chatterbox_tts_chunk_size"),
-            ),
-            chatterbox_tts_temperature=updates.get(
-                "speech_chatterbox_tts_temperature",
-                current_speech.get("chatterbox_tts_temperature"),
-            ),
-            chatterbox_tts_exaggeration=updates.get(
-                "speech_chatterbox_tts_exaggeration",
-                current_speech.get("chatterbox_tts_exaggeration"),
-            ),
-            chatterbox_tts_cfg_weight=updates.get(
-                "speech_chatterbox_tts_cfg_weight",
-                current_speech.get("chatterbox_tts_cfg_weight"),
-            ),
-            chatterbox_tts_seed=updates.get("speech_chatterbox_tts_seed", current_speech.get("chatterbox_tts_seed")),
-            chatterbox_tts_speed_factor=updates.get(
-                "speech_chatterbox_tts_speed_factor",
-                current_speech.get("chatterbox_tts_speed_factor"),
-            ),
-            chatterbox_tts_language=str(
-                updates.get("speech_chatterbox_tts_language", current_speech.get("chatterbox_tts_language") or "")
-            ).strip(),
-            chatterbox_tts_streaming_enabled=updates.get(
-                "speech_chatterbox_tts_streaming_enabled",
-                current_speech.get("chatterbox_tts_streaming_enabled"),
-            ),
             announcement_tts_backend=str(
                 updates.get("speech_announcement_tts_backend", current_speech.get("announcement_tts_backend") or "")
             ).strip(),
@@ -23864,25 +23179,21 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
             announcement_tts_voice=str(
                 updates.get("speech_announcement_tts_voice", current_speech.get("announcement_tts_voice") or "")
             ).strip(),
-            announcement_kokoro_output_gain=updates.get(
-                "speech_announcement_kokoro_output_gain",
-                current_speech.get("announcement_kokoro_output_gain"),
-            ),
             announcement_pocket_tts_output_gain=updates.get(
                 "speech_announcement_pocket_tts_output_gain",
                 current_speech.get("announcement_pocket_tts_output_gain"),
             ),
-            announcement_qwen_tts_clone_audio=announcement_managed_audio.get("qwen3_tts"),
-            announcement_qwen_tts_clone_text=str(
+            announcement_tts_clone_audio=announcement_clone_audio,
+            announcement_tts_clone_text=str(
                 updates.get(
-                    "speech_announcement_qwen_tts_clone_text",
-                    current_speech.get("announcement_qwen_tts_clone_text") or "",
+                    "speech_announcement_tts_clone_text",
+                    current_speech.get("announcement_tts_clone_text") or "",
                 )
             ).strip(),
             announcement_qwen_tts_language=str(
                 updates.get(
                     "speech_announcement_qwen_tts_language",
-                    current_speech.get("announcement_qwen_tts_language") or "English",
+                    current_speech.get("announcement_qwen_tts_language") or "Auto",
                 )
             ).strip(),
             announcement_qwen_tts_instruct=str(
@@ -23891,17 +23202,10 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
                     current_speech.get("announcement_qwen_tts_instruct") or "",
                 )
             ).strip(),
-            announcement_omnivoice_tts_clone_audio=announcement_managed_audio.get("omnivoice"),
-            announcement_omnivoice_tts_clone_text=str(
-                updates.get(
-                    "speech_announcement_omnivoice_tts_clone_text",
-                    current_speech.get("announcement_omnivoice_tts_clone_text") or "",
-                )
-            ).strip(),
             announcement_omnivoice_tts_language=str(
                 updates.get(
                     "speech_announcement_omnivoice_tts_language",
-                    current_speech.get("announcement_omnivoice_tts_language") or "English",
+                    current_speech.get("announcement_omnivoice_tts_language") or "Auto",
                 )
             ).strip(),
             announcement_omnivoice_tts_instruct=str(
@@ -23910,7 +23214,6 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
                     current_speech.get("announcement_omnivoice_tts_instruct") or "",
                 )
             ).strip(),
-            announcement_chatterbox_local_tts_clone_audio=announcement_managed_audio.get("chatterbox_local"),
             satellite_ducking_target_percent=updates.get(
                 "speech_satellite_ducking_target_percent",
                 current_speech.get("satellite_ducking_target_percent"),
@@ -23951,48 +23254,6 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
                 updates.get(
                     "speech_announcement_openai_tts_api_key",
                     current_speech.get("announcement_openai_tts_api_key") or "",
-                )
-            ).strip(),
-            announcement_chatterbox_tts_base_url=str(
-                updates.get(
-                    "speech_announcement_chatterbox_tts_base_url",
-                    current_speech.get("announcement_chatterbox_tts_base_url") or "",
-                )
-            ).strip(),
-            announcement_chatterbox_tts_voice_mode=str(
-                updates.get(
-                    "speech_announcement_chatterbox_tts_voice_mode",
-                    current_speech.get("announcement_chatterbox_tts_voice_mode") or "",
-                )
-            ).strip(),
-            announcement_chatterbox_tts_chunk_size=updates.get(
-                "speech_announcement_chatterbox_tts_chunk_size",
-                current_speech.get("announcement_chatterbox_tts_chunk_size"),
-            ),
-            announcement_chatterbox_tts_temperature=updates.get(
-                "speech_announcement_chatterbox_tts_temperature",
-                current_speech.get("announcement_chatterbox_tts_temperature"),
-            ),
-            announcement_chatterbox_tts_exaggeration=updates.get(
-                "speech_announcement_chatterbox_tts_exaggeration",
-                current_speech.get("announcement_chatterbox_tts_exaggeration"),
-            ),
-            announcement_chatterbox_tts_cfg_weight=updates.get(
-                "speech_announcement_chatterbox_tts_cfg_weight",
-                current_speech.get("announcement_chatterbox_tts_cfg_weight"),
-            ),
-            announcement_chatterbox_tts_seed=updates.get(
-                "speech_announcement_chatterbox_tts_seed",
-                current_speech.get("announcement_chatterbox_tts_seed"),
-            ),
-            announcement_chatterbox_tts_speed_factor=updates.get(
-                "speech_announcement_chatterbox_tts_speed_factor",
-                current_speech.get("announcement_chatterbox_tts_speed_factor"),
-            ),
-            announcement_chatterbox_tts_language=str(
-                updates.get(
-                    "speech_announcement_chatterbox_tts_language",
-                    current_speech.get("announcement_chatterbox_tts_language") or "",
                 )
             ).strip(),
         )
@@ -24366,13 +23627,25 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         provider_payload_key = f"hydra_llm_{role}_provider"
         slot_payload_key = f"hydra_llm_{role}_llama_cpp_slot"
         raw_provider = updates.get(provider_payload_key, redis_client.get(_hydra_role_llm_key(role, "provider")) or "")
+        use_base = str(raw_provider or "").strip().lower().replace("-", "_").replace(" ", "_") in {
+            "",
+            "base",
+            "same_as_base",
+            "use_base",
+        }
         role_provider = _normalize_hydra_llm_provider(raw_provider)
         role_host = str(updates.get(f"hydra_llm_{role}_host", redis_client.get(_hydra_role_llm_key(role, "host")) or "") or "").strip()
         role_port = str(updates.get(f"hydra_llm_{role}_port", redis_client.get(_hydra_role_llm_key(role, "port")) or "") or "").strip()
         role_model = str(updates.get(f"hydra_llm_{role}_model", redis_client.get(_hydra_role_llm_key(role, "model")) or "") or "").strip()
         role_api_key = str(updates.get(f"hydra_llm_{role}_api_key", redis_client.get(_hydra_role_llm_key(role, "api_key")) or "") or "").strip()
 
-        if _is_local_hydra_llm_provider(role_provider):
+        if use_base:
+            role_provider = ""
+            role_host = ""
+            role_port = ""
+            role_model = ""
+            role_api_key = ""
+        elif _is_local_hydra_llm_provider(role_provider):
             role_model = _require_downloaded_local_model(role_provider, role_model, role.title())
             role_host = ""
             role_port = ""

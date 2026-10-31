@@ -44,7 +44,7 @@ const addingRepo = ref("");
 const error = ref("");
 const results = ref<JsonRow[]>([]);
 const selected = ref<JsonRow | null>(null);
-const selectedProvider = ref("hf_transformers");
+const selectedProvider = ref("llama_cpp");
 const selectedTask = ref("text-generation");
 const selectedFiles = ref<string[]>([]);
 const detailOpen = ref(false);
@@ -57,9 +57,7 @@ let queuedStartTimer: number | null = null;
 let searchSequence = 0;
 
 const providers = [
-  { value: "hf_transformers", label: "Transformers", help: "Full Hugging Face repositories for broad compatibility." },
-  { value: "llama_cpp", label: "llama.cpp / GGUF", help: "Quantized GGUF files. Usually the best fit for local Tater models." },
-  { value: "mlx_lm", label: "MLX LM", help: "Apple Silicon-optimized repositories for MLX." },
+  { value: "llama_cpp", label: "llama.cpp / GGUF", help: "Browse Hugging Face and download individual GGUF files for llama.cpp." },
 ];
 const tasks = [
   { value: "text-generation", label: "Text / chat" },
@@ -100,15 +98,12 @@ function modelName(model: JsonRow): string {
 }
 
 function normalizeProvider(value: unknown): string {
-  const token = String(value || "").trim().toLowerCase().replaceAll("-", "_").replaceAll(" ", "_");
-  if (["llama", "llamacpp", "llama_cpp", "llama.cpp", "gguf"].includes(token) || token.includes("gguf") || token.includes("llama.cpp")) return "llama_cpp";
-  if (["mlx", "mlx_lm", "mlxlm", "apple_mlx", "apple_silicon"].includes(token) || token.includes("mlx")) return "mlx_lm";
-  if (["hf", "huggingface", "hugging_face", "transformers", "hf_transformers", "local_transformers"].includes(token) || token.includes("transformers")) return "hf_transformers";
-  return token;
+  void value;
+  return "llama_cpp";
 }
 
 function modelProvider(model: JsonRow): string {
-  return normalizeProvider(model.provider || provider.value || "hf_transformers");
+  return normalizeProvider(model.provider || provider.value || "llama_cpp");
 }
 
 function providerLabel(value: string): string {
@@ -280,7 +275,7 @@ async function search(append = false) {
     nextCursor.value = String(response.next_cursor || "");
     integration.value = response.integration && typeof response.integration === "object" ? response.integration as JsonRow : {};
   } catch (searchError) {
-    if (sequence === searchSequence) error.value = searchError instanceof Error ? searchError.message : "Hugging Face models could not be loaded.";
+    if (sequence === searchSequence) error.value = searchError instanceof Error ? searchError.message : "Models could not be loaded.";
   } finally {
     if (sequence === searchSequence) loading.value = false;
   }
@@ -289,7 +284,7 @@ async function search(append = false) {
 async function fetchModelDetail(model: JsonRow): Promise<JsonRow> {
   const repoId = modelRepo(model);
   const providerValue = modelProvider(model);
-  if (!repoId) throw new Error("This model does not include a Hugging Face repository id.");
+  if (!repoId) throw new Error("This model does not include a repository id.");
   return getJson<JsonRow>(`${props.endpoints.modelsHuggingFaceDetail}?${new URLSearchParams({ repo_id: repoId, provider: providerValue })}`);
 }
 
@@ -546,9 +541,8 @@ onBeforeUnmount(() => {
     <div v-if="error" class="tv-notice error" aria-live="polite">{{ error }}</div>
 
     <article class="tm-form-card tm-hf-guide">
-      <header><div><span class="tv-eyebrow">Hugging Face model library</span><h3>Choose models and Tater handles the queue</h3></div><ol class="tm-hf-steps" aria-label="Download steps"><li><span>1</span><strong>Runtime</strong></li><li><span>2</span><strong>Choose</strong></li><li><span>3</span><strong>Auto-download</strong></li></ol></header>
+      <header><div><span class="tv-eyebrow">Local model library</span><h3>Find GGUF models on Hugging Face</h3><p>{{ providers[0].help }}</p></div><ol class="tm-hf-steps" aria-label="Download steps"><li><span>1</span><strong>Find</strong></li><li><span>2</span><strong>Choose</strong></li><li><span>3</span><strong>Download</strong></li></ol></header>
       <div class="tm-hf-filters">
-        <label class="tm-field"><span class="tm-field-label">Runtime</span><select v-model="provider" @change="search()"><option v-for="option in providers" :key="option.value" :value="option.value">{{ option.label }}</option></select></label>
         <label class="tm-field"><span class="tm-field-label">Capability</span><select v-model="task" @change="search()"><option v-for="option in tasks" :key="option.value" :value="option.value">{{ option.label }}</option></select></label>
         <form class="tm-hf-search" @submit.prevent="search()"><label class="tm-field"><span class="tm-field-label">Search Hugging Face</span><input v-model="query" type="search" placeholder="Model name or creator" /></label><button class="tv-button primary" type="submit" :disabled="loading">{{ loading ? "Searching…" : "Search" }}</button></form>
       </div>
@@ -560,25 +554,24 @@ onBeforeUnmount(() => {
       <div class="tm-model-grid" :aria-busy="loading">
         <article v-for="model in results" :key="String(model.repo_id || model.id)" class="tm-model-card" :class="{ selected: modelIsSelected(model), pick: model.tater_pick, installed: installedCount(model) > 0, 'target-installed': directTargetInstalled(model) }">
           <div class="tm-model-card-head"><div class="tm-model-badges"><span class="tm-model-kind">{{ model.tater_pick_label || model.pipeline_tag || taskLabel(task) }}</span><span v-if="installedLabel(model)" class="tm-model-installed-badge">✓ {{ installedLabel(model) }}</span></div><button class="tm-model-select" :class="{ selected: modelIsSelected(model), installed: directTargetInstalled(model) }" type="button" :aria-pressed="modelIsSelected(model)" :disabled="Boolean(addingRepo) || directTargetInstalled(model)" @click="toggleModel(model)"><span aria-hidden="true">{{ directTargetInstalled(model) || modelIsSelected(model) ? "✓" : "↓" }}</span>{{ addingRepo === modelRepo(model) ? "Checking…" : directTargetInstalled(model) ? "Installed" : modelIsSelected(model) ? "Queued" : "Download" }}</button></div>
-          <button class="tm-model-card-preview" type="button" @click="openModel(model)"><strong>{{ modelName(model) }}</strong><small>{{ model.author || modelRepo(model).split('/')[0] }} · {{ providerLabel(modelProvider(model)) }}</small><span v-if="model.tater_pick_note" class="tm-model-pick-note">{{ model.tater_pick_note }}</span><div class="tm-model-meta"><span v-if="model.size_label || model.model_size">{{ model.size_label || model.model_size }}</span><span v-if="model.supports_vision">Vision</span><span v-if="model.supports_audio">Audio</span><span v-if="model.supports_video">Video</span><span>{{ formatCount(model.downloads) }} downloads</span><span v-if="model.likes">{{ formatCount(model.likes) }} likes</span></div></button>
-          <div class="tm-model-card-actions"><button class="tv-button" type="button" @click="openModel(model)">Details &amp; files</button><a class="tv-button" :href="hubUrl(modelRepo(model))" target="_blank" rel="noopener noreferrer">Open Hub</a></div>
+          <button class="tm-model-card-preview" type="button" @click="openModel(model)"><strong>{{ modelName(model) }}</strong><small>{{ model.author || modelRepo(model).split('/')[0] }} · {{ providerLabel(modelProvider(model)) }}</small><span v-if="model.tater_pick_note" class="tm-model-pick-note">{{ model.tater_pick_note }}</span><div class="tm-model-meta"><span v-if="model.size_label || model.model_size">{{ model.size_label || model.model_size }}</span><span v-if="model.quant">{{ model.quant }}</span><span v-if="model.supports_vision">Vision</span><span v-if="model.supports_audio">Audio</span><span v-if="model.supports_video">Video</span><span v-if="modelProvider(model) === 'llama_cpp'">{{ formatCount(model.downloads) }} downloads</span><span v-if="modelProvider(model) === 'llama_cpp' && model.likes">{{ formatCount(model.likes) }} likes</span></div></button>
+          <div class="tm-model-card-actions"><button class="tv-button" type="button" @click="openModel(model)">Details & files</button><a class="tv-button" :href="hubUrl(modelRepo(model))" target="_blank" rel="noopener noreferrer">Open Hub</a></div>
         </article>
         <div v-if="!loading && !results.length" class="tv-notice">No compatible models matched this search. Try another capability, runtime, or search phrase.</div>
       </div>
       <button v-if="nextCursor" class="tv-button tm-load-more" type="button" :disabled="loading" @click="search(true)">{{ loading ? "Loading…" : "Load more models" }}</button>
     </section>
 
-    <article class="tm-form-card"><header><div><h3>Installed local models</h3><p>These models are ready to select in Tater's LLM, Vision, Audio, and Video settings.</p></div><button class="tv-button" type="button" @click="refreshLocalModels">Refresh</button></header><div class="tm-installed-list"><div v-for="model in installed" :key="`${model.provider}:${model.model}`"><div><strong>{{ model.model }}</strong><span>{{ model.provider_label || model.provider }}<template v-if="model.supports_vision"> · Vision</template><template v-if="model.supports_audio"> · Audio</template><template v-if="model.supports_video"> · Video</template></span></div><button class="tv-button danger" type="button" @click="deleteModel(model)">Delete</button></div><div v-if="!installed.length" class="tv-notice">No local models are installed yet.</div></div></article>
+    <article class="tm-form-card"><header><div><h3>Installed local models</h3><p>Only these downloaded models appear in Tater's LLM, Vision, Audio, and Video selectors.</p></div><button class="tv-button" type="button" @click="refreshLocalModels">Refresh</button></header><div class="tm-installed-list"><div v-for="model in installed" :key="`${model.provider}:${model.model}`"><div><strong>{{ model.label || model.model }}</strong><span>{{ model.provider_label || model.provider }}<template v-if="model.quant"> · {{ model.quant }}</template><template v-if="model.supports_vision"> · Vision</template><template v-if="model.supports_audio"> · Audio</template><template v-if="model.supports_video"> · Video</template></span></div><button class="tv-button danger" type="button" @click="deleteModel(model)">Delete</button></div><div v-if="!installed.length" class="tv-notice">No local models are installed yet.</div></div></article>
 
     <PopupTransition :open="detailOpen" backdrop-class="tv-modal-backdrop tset-modal" @close="closeDetail">
       <section class="tv-modal tm-hf-detail-modal" role="dialog" aria-modal="true" aria-labelledby="tm-hf-detail-title">
         <header class="tv-modal-header"><div><span class="tv-eyebrow">Model details</span><h2 id="tm-hf-detail-title">{{ detailLoading ? "Loading model…" : modelName(detailModel) }}</h2><p v-if="!detailLoading">{{ providerLabel(selectedProvider) }} · {{ taskLabel(selectedTask) }}</p></div><button class="tv-button" type="button" @click="closeDetail">Close</button></header>
-        <div v-if="detailLoading" class="tv-notice">Reading model files from Hugging Face…</div>
+        <div v-if="detailLoading" class="tv-notice">Reading model details…</div>
         <template v-else-if="selected">
           <div class="tm-hf-detail-summary"><p>{{ detailModel.description || "Review the available files and add this model to your download list." }}</p><a class="tv-button" :href="hubUrl(modelRepo(detailModel))" target="_blank" rel="noopener noreferrer">Open on Hugging Face</a></div>
-          <section v-if="selectedProvider === 'llama_cpp'" class="tm-hf-file-section"><div><h3>Choose one or more GGUF files</h3><p>Select every quantization you want, then add them to the download center together. Files already on this Tater are disabled.</p></div><div v-if="!ggufFiles.length" class="tv-notice error">No downloadable GGUF files were found in this repository.</div><div v-else class="tm-hf-file-list"><button v-for="file in ggufFiles" :key="String(file.name || file.path)" type="button" class="tm-hf-file-choice" :class="{ selected: selectedFiles.includes(String(file.name || file.path)), installed: fileInstalled(file) }" :aria-pressed="selectedFiles.includes(String(file.name || file.path))" :disabled="fileInstalled(file)" @click="toggleSelectedFile(String(file.name || file.path))"><span>{{ file.name || file.path }}</span><small>{{ file.quant || "GGUF" }}<template v-if="file.size_label"> · {{ file.size_label }}</template><template v-if="fileInstalled(file)"> · Already installed</template></small><i aria-hidden="true">{{ fileInstalled(file) ? "✓" : selectedFiles.includes(String(file.name || file.path)) ? "✓" : "" }}</i></button></div><div v-if="mmprojFiles.length" class="tm-status-card"><div><strong>Vision projector included</strong><span>{{ selected.preferred_mmproj || "Tater will match it automatically." }}</span></div></div></section>
-          <section v-else class="tm-hf-file-section"><div><h3>Repository download</h3><p>{{ selectedProvider === 'mlx_lm' ? "The full MLX repository, including tokenizer and config files, will be downloaded together." : "The full Transformers repository and its required files will be downloaded together." }}</p></div><div class="tm-hf-repo-files"><span v-for="file in files.slice(0, 14)" :key="String(file.name || file.path)">{{ file.name || file.path }}</span><small v-if="files.length > 14">+ {{ files.length - 14 }} more files</small></div></section>
-          <footer class="tm-hf-detail-footer"><div><strong>{{ detailRepositoryInstalled ? "This model is already installed" : selectedProvider === 'llama_cpp' ? `${selectedFiles.length} file${selectedFiles.length === 1 ? '' : 's'} selected` : detailQueued ? "Already queued" : "Ready to download" }}</strong><span v-if="selectedProvider === 'llama_cpp'">{{ selectedFiles.length ? "Selected files will download one at a time." : "Choose one or more available GGUF files above." }}</span><span v-else>{{ detailRepositoryInstalled ? "Tater will not download it again." : "The complete repository will download automatically." }}</span></div><button class="tv-button primary" type="button" :disabled="detailRepositoryInstalled || (selectedProvider === 'llama_cpp' && !selectedFiles.length)" @click="queueFromDetail">{{ detailRepositoryInstalled ? "Installed" : detailQueued ? "Update queue" : selectedProvider === 'llama_cpp' && selectedFiles.length > 1 ? `Download ${selectedFiles.length} files` : "Download model" }}</button></footer>
+          <section class="tm-hf-file-section"><div><h3>Choose one or more GGUF files</h3><p>Select every quantization you want, then add them to the download center together. Files already on this Tater are disabled.</p></div><div v-if="!ggufFiles.length" class="tv-notice error">No downloadable GGUF files were found in this repository.</div><div v-else class="tm-hf-file-list"><button v-for="file in ggufFiles" :key="String(file.name || file.path)" type="button" class="tm-hf-file-choice" :class="{ selected: selectedFiles.includes(String(file.name || file.path)), installed: fileInstalled(file) }" :aria-pressed="selectedFiles.includes(String(file.name || file.path))" :disabled="fileInstalled(file)" @click="toggleSelectedFile(String(file.name || file.path))"><span>{{ file.name || file.path }}</span><small>{{ file.quant || "GGUF" }}<template v-if="file.size_label"> · {{ file.size_label }}</template><template v-if="fileInstalled(file)"> · Already installed</template></small><i aria-hidden="true">{{ fileInstalled(file) ? "✓" : selectedFiles.includes(String(file.name || file.path)) ? "✓" : "" }}</i></button></div><div v-if="mmprojFiles.length" class="tm-status-card"><div><strong>Vision projector included</strong><span>{{ selected.preferred_mmproj || "Tater will match it automatically." }}</span></div></div></section>
+          <footer class="tm-hf-detail-footer"><div><strong>{{ detailRepositoryInstalled ? "This model is already installed" : `${selectedFiles.length} file${selectedFiles.length === 1 ? '' : 's'} selected` }}</strong><span>{{ selectedFiles.length ? "Selected files will download one at a time." : "Choose one or more available GGUF files above." }}</span></div><button class="tv-button primary" type="button" :disabled="detailRepositoryInstalled || !selectedFiles.length" @click="queueFromDetail">{{ detailRepositoryInstalled ? "Installed" : detailQueued ? "Update queue" : selectedFiles.length > 1 ? `Download ${selectedFiles.length} files` : "Download model" }}</button></footer>
         </template>
       </section>
     </PopupTransition>

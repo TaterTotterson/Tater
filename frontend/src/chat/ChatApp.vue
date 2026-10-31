@@ -66,7 +66,7 @@ const speedLine = computed(() => {
   const mainTps = tpsCompletion > 0 ? tpsCompletion : tpsTotal;
   if (!(elapsed > 0 && totalTokens > 0 && mainTps > 0)) return "";
   const basis = String(stats.speed_basis || "");
-  const mainLabel = ["llama_cpp_timing", "mlx_lm_timing"].includes(basis)
+  const mainLabel = basis === "llama_cpp_timing"
     ? "decode"
     : basis === "local_generate"
       ? "generated"

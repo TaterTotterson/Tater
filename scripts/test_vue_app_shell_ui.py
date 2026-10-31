@@ -88,6 +88,25 @@ class VueAppShellTests(unittest.TestCase):
         self.assertIn("initialAuthState: appShellAuthState(state.auth)", app_js)
         self.assertIn("authenticate: authenticateWebui", app_js)
 
+    def test_startup_model_progress_is_owned_by_the_shell(self) -> None:
+        shell = (REPO_ROOT / "frontend" / "src" / "shell" / "AppShell.vue").read_text(encoding="utf-8")
+        progress = (
+            REPO_ROOT / "frontend" / "src" / "settings" / "components" / "models" / "LocalModelApplyProgress.vue"
+        ).read_text(encoding="utf-8")
+        app_js = (REPO_ROOT / "tateros_static" / "app.js").read_text(encoding="utf-8")
+        backend = (REPO_ROOT / "tateros_app.py").read_text(encoding="utf-8")
+
+        self.assertIn('import LocalModelApplyProgress from "../settings/components/models/LocalModelApplyProgress.vue"', shell)
+        self.assertIn("pollStartupModelWarmup", shell)
+        self.assertIn("startup_bootstrap_pending", shell)
+        self.assertIn("<LocalModelApplyProgress", shell)
+        self.assertIn('modelWarmupEndpoint: withBasePath("/api/settings/hf-llm/warmup")', app_js)
+        self.assertIn("Starting local intelligence", progress)
+        self.assertIn("Open Tater", progress)
+        self.assertIn('os.getenv("TATER_EARLY_WEB_UI_ON_STARTUP")', backend)
+        self.assertIn('name="tater-startup-bootstrap"', backend)
+        self.assertIn('snapshot["startup_bootstrap_pending"]', backend)
+
     def test_collapsing_sidebar_releases_its_layout_column_immediately(self) -> None:
         styles = (REPO_ROOT / "frontend" / "src" / "base.css").read_text(encoding="utf-8")
 

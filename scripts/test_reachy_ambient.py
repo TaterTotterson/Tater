@@ -72,7 +72,7 @@ def test_observation_queues_comment_through_native_satellite(monkeypatch) -> Non
         voice_pipeline,
         "_shared_speech_voice_settings",
         lambda: {
-            "VOICE_TTS_BACKEND": "chatterbox",
+            "VOICE_TTS_BACKEND": "openai_compatible",
             "VOICE_TTS_VOICE": "configured-voice.wav",
         },
     )
@@ -97,7 +97,7 @@ def test_observation_queues_comment_through_native_satellite(monkeypatch) -> Non
     ]
     assert synthesis_values == [
         {
-            "VOICE_TTS_BACKEND": "chatterbox",
+            "VOICE_TTS_BACKEND": "openai_compatible",
             "VOICE_TTS_VOICE": "configured-voice.wav",
         }
     ]
@@ -141,17 +141,17 @@ def test_standalone_synthesis_resolves_the_configured_tts_backend(monkeypatch) -
         backends,
         "_tts_selection_from_values",
         lambda _values: {
-            "backend": "chatterbox",
+            "backend": "openai_compatible",
+            "model": "tts-1",
             "voice": "david.mp3",
-            "chatterbox_base_url": "http://tater.local:8004",
-            "chatterbox_voice_mode": "clone",
-            "chatterbox_chunk_size": 120,
+            "openai_base_url": "http://tater.local:8004",
+            "openai_api_key": "test-key",
         },
     )
 
     def resolve(values: dict) -> tuple[str, str]:
         resolved_values.append(values)
-        return "chatterbox", ""
+        return "openai_compatible", ""
 
     async def synthesize(_function, prompt: str, **kwargs):
         synthesis_calls.append((prompt, kwargs))
@@ -165,7 +165,7 @@ def test_standalone_synthesis_resolves_the_configured_tts_backend(monkeypatch) -
     monkeypatch.setattr(backends, "_native_wyoming_synthesize", reject_wyoming)
 
     values = {
-        "VOICE_TTS_BACKEND": "chatterbox",
+        "VOICE_TTS_BACKEND": "openai_compatible",
         "VOICE_TTS_VOICE": "david.mp3",
     }
     audio, audio_format, backend, note = asyncio.run(
@@ -177,22 +177,16 @@ def test_standalone_synthesis_resolves_the_configured_tts_backend(monkeypatch) -
         (
             "Reachy voice test.",
             {
+                "model": "tts-1",
                 "voice": "david.mp3",
                 "base_url": "http://tater.local:8004",
-                "voice_mode": "clone",
-                "chunk_size": 120,
-                "temperature": None,
-                "exaggeration": None,
-                "cfg_weight": None,
-                "seed": None,
-                "speed_factor": None,
-                "language": None,
+                "api_key": "test-key",
             },
         )
     ]
     assert audio == b"configured-voice-audio"
     assert audio_format == {"rate": 24000, "width": 2, "channels": 1}
-    assert backend == "chatterbox"
+    assert backend == "openai_compatible"
     assert note == ""
 
 

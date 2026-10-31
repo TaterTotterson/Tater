@@ -1125,6 +1125,7 @@ def _native_client_to_runtime_row(selector: str, row: Dict[str, Any]) -> Dict[st
     wake_engine = status.get("wake_engine") if isinstance(status.get("wake_engine"), dict) else {}
     reset = status.get("reset") if isinstance(status.get("reset"), dict) else {}
     transport = status.get("transport") if isinstance(status.get("transport"), dict) else {}
+    usb_ethernet = status.get("usb_ethernet") if isinstance(status.get("usb_ethernet"), dict) else {}
     audio_transport = voice.get("audio_transport") if isinstance(voice.get("audio_transport"), dict) else {}
     xmos_firmware = status.get("xmos_firmware") if isinstance(status.get("xmos_firmware"), dict) else {}
     state = esphome_runtime.text(status.get("state")) or esphome_runtime.text(voice.get("state")) or "idle"
@@ -1133,6 +1134,23 @@ def _native_client_to_runtime_row(selector: str, row: Dict[str, Any]) -> Dict[st
     firmware_target = esphome_runtime.text(row.get("firmware_target")) or board
     firmware_version = esphome_runtime.text(row.get("firmware_version"))
     name = esphome_runtime.text(row.get("device_name")) or esphome_runtime.text(row.get("device_id")) or selector
+    usb_ethernet_state = esphome_runtime.lower(usb_ethernet.get("state"))
+    connection_transport = esphome_runtime.lower(usb_ethernet.get("transport"))
+    if connection_transport not in {"ethernet", "wifi"}:
+        connection_transport = "ethernet" if bool(usb_ethernet.get("active")) else "wifi"
+    connection_degraded = bool(row.get("connected")) and usb_ethernet_state in {"recovering", "rescue"}
+    if not bool(row.get("connected")):
+        connection_note = "Satellite is offline."
+    elif usb_ethernet_state == "rescue":
+        reason = esphome_runtime.text(usb_ethernet.get("reason")).replace("-", " ") or "wired connection unhealthy"
+        connection_note = f"Connected by Wi-Fi rescue; Ethernet {reason}."
+    elif usb_ethernet_state == "recovering":
+        connection_note = "Connected by Ethernet; repairing the wired connection."
+    elif connection_transport == "ethernet":
+        interface = esphome_runtime.text(usb_ethernet.get("interface"))
+        connection_note = f"Connected by Ethernet{f' on {interface}' if interface else ''}."
+    else:
+        connection_note = "Connected by Wi-Fi."
 
     wake_mode = _native_wake_mode(wake_engine, live_settings)
     wake_mode_label = _native_wake_mode_label(wake_mode)
@@ -1180,6 +1198,7 @@ def _native_client_to_runtime_row(selector: str, row: Dict[str, Any]) -> Dict[st
         _native_detail_row("native_last_message", "Last Message", row.get("last_message_type")),
     ]
     diagnostic_rows = [
+        _native_detail_row("native_network_transport", "Network", connection_note.removesuffix(".")),
         _native_detail_row("native_wake_mode", "Wake Mode", wake_mode_label),
         _native_detail_row("native_wake_engine", "Wake Engine", wake_engine_status),
         _native_detail_row("native_active_wake_model", "Active Wake Model", active_wake_model),
@@ -1430,6 +1449,9 @@ def _native_client_to_runtime_row(selector: str, row: Dict[str, Any]) -> Dict[st
     return {
         "selector": selector,
         "connected": bool(row.get("connected")),
+        "connection_transport": connection_transport if bool(row.get("connected")) else "offline",
+        "connection_degraded": connection_degraded,
+        "connection_note": connection_note,
         "last_error": esphome_runtime.text(row.get("last_error")),
         "last_disconnect_ts": float(row.get("last_disconnect_ts") or 0.0),
         "host": host,

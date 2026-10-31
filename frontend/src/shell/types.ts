@@ -40,6 +40,7 @@ export interface AppShellMountOptions {
   initialAuthState: AppShellAuthState;
   authenticate: (request: AppShellAuthRequest) => Promise<AppShellAuthState>;
   runtimeOptions: RuntimeStatusMountOptions;
+  modelWarmupEndpoint?: string;
   loadView: (view: AppView, options?: { refresh?: boolean }) => Promise<ShellViewDescriptor>;
   onViewChange?: (view: AppView) => void;
   onSidebarChange?: (collapsed: boolean) => void;

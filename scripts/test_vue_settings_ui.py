@@ -9,6 +9,17 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
 class VueSettingsTests(unittest.TestCase):
+    def test_models_workspace_uses_compact_tab_context(self) -> None:
+        source = (
+            REPO_ROOT / "frontend" / "src" / "settings" / "components" / "ModelsSettings.vue"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('<nav class="tv-tabs tmodels-tabs"', source)
+        self.assertIn('<header class="tmodels-context">', source)
+        self.assertNotIn("Model workspace", source)
+        self.assertNotIn("Models, routing, and local runtimes", source)
+        self.assertNotIn("Every Models area is reactive", source)
+
     def test_settings_are_owned_by_the_shared_vue_shell(self) -> None:
         app_js = (REPO_ROOT / "tateros_static" / "app.js").read_text(encoding="utf-8")
         shell = (REPO_ROOT / "frontend" / "src" / "shell" / "AppShell.vue").read_text(encoding="utf-8")
@@ -298,7 +309,10 @@ class VueSettingsTests(unittest.TestCase):
         self.assertIn("ModelsSettingsPanel", settings_app)
         self.assertIn("activeTab === 'models'", settings_app)
         self.assertIn("Save & Apply LLM Settings", models)
+        self.assertIn("Save Listening Settings", models)
         self.assertIn("Save Speech Settings", models)
+        self.assertLess(models.index('{ id: "routing", label: "LLM"'), models.index('{ id: "listening", label: "Listening"'))
+        self.assertLess(models.index('{ id: "listening", label: "Listening"'), models.index('{ id: "speech", label: "Speech"'))
         self.assertEqual(models.count("Apply To All Satellites"), 1)
         self.assertIn("Save & Apply Vision Settings", models)
         self.assertIn("Save & Apply Audio and Video", models)
@@ -312,6 +326,7 @@ class VueSettingsTests(unittest.TestCase):
         for component in (
             "HuggingFaceModels",
             "LlmModels",
+            "ListeningModels",
             "SpeechModels",
             "WakeWordModels",
             "MediaModelCard",
@@ -331,24 +346,44 @@ class VueSettingsTests(unittest.TestCase):
         llm = (
             REPO_ROOT / "frontend" / "src" / "settings" / "components" / "models" / "LlmModels.vue"
         ).read_text(encoding="utf-8")
-        self.assertIn("Prompt cache slot", llm)
-        self.assertIn(":max=\"Math.max(0, Number(draft.hydra_llama_cpp_slot_count || 1) - 1)\"", llm)
+        self.assertNotIn("Prompt cache slot", llm)
+        self.assertNotIn(":max=\"Math.max(0, Number(draft.hydra_llama_cpp_slot_count || 1) - 1)\"", llm)
         self.assertNotIn('v-if="llamaConfigured"', llm)
-        self.assertNotIn("tm-llm-slot-capacity-card", llm)
-        self.assertIn("function slotCapacityHelp(providerValue: unknown): string", llm)
-        self.assertIn("remote llama.cpp server's --parallel value", llm)
-        self.assertIn('v-if="llama(draft.spudex_llm_provider)"', llm)
-        self.assertGreaterEqual(llm.count('<span class="tm-field-label">Available slots</span>'), 4)
-        self.assertIn("automatic slot {{ automaticRoleSlot(role.id) }}", llm)
-        self.assertIn("A number pins it to that exact slot.", llm)
+        self.assertNotIn("tm-llm-server-slots-card", llm)
+        self.assertIn("tm-llm-context-slot-settings", llm)
+        self.assertIn('v-if="usesLlamaCpp" class="tm-form-card tm-llm-runtime-card"', llm)
+        self.assertNotIn("const slotModeHelp = computed", llm)
+        self.assertIn("Context slot mode", llm)
+        self.assertGreater(llm.index("Context slot mode"), llm.index('class="tm-form-card tm-llm-runtime-card"'))
+        self.assertNotIn("<h3>Prompt cache mode</h3>", llm)
+        self.assertIn("Single shared slot", llm)
+        self.assertIn("Per-head slots", llm)
+        self.assertIn("Four logical slots · shared KV pool", llm)
+        self.assertIn("function setLlamaSlotMode(mode: string)", llm)
+        self.assertNotIn('<span class="tm-field-label">llama.cpp server slots</span>', llm)
+        self.assertNotIn("automaticRoleSlot", llm)
+        self.assertNotIn("One shared role slot", llm)
+        self.assertNotIn("The built-in runtime keeps host-RAM prompt snapshots disabled", llm)
+        self.assertIn("Exact shared token limit", llm)
+        self.assertIn("total unified KV pool", llm)
+        self.assertIn("active heads can use more while other slots are idle", llm)
+        self.assertIn("tm-llm-context-pool-note", llm)
+        self.assertIn("Use Base model", llm)
+        self.assertIn("Share the model with a stable role slot", llm)
+        self.assertIn("function roleUsesBase(role: string): boolean", llm)
         self.assertIn("Base model pool", llm)
-        self.assertIn("Base routes share requests", llm)
-        self.assertIn("normal Base calls rotate through the pool", llm)
-        self.assertIn("Hydra roles stay assigned to a consistent pool member", llm)
+        self.assertNotIn("Base routes share requests", llm)
+        self.assertNotIn("normal Base calls rotate through the pool", llm)
+        self.assertNotIn("Hydra roles stay assigned to a consistent pool member", llm)
         self.assertIn("Add round-robin route", llm)
         self.assertIn("Model thinking", llm)
-        self.assertIn('v-if="index === 0" class="tm-llm-switch tm-llm-thinking-switch"', llm)
-        self.assertIn("This shared setting also applies to additional Base routes", llm)
+        self.assertIn('v-if="index === 0" class="tm-llm-thinking-card"', llm)
+        self.assertIn('class="tm-llm-switch tm-llm-thinking-switch"', llm)
+        self.assertGreater(llm.index("Model thinking"), llm.index('class="tm-llm-connection-card"'))
+        self.assertIn("Not recommended for Tater", llm)
+        self.assertIn("already separates planning, response, and verification", llm)
+        self.assertIn("increases response time, and consumes more context", llm)
+        self.assertIn("This shared setting applies to every Base route", llm)
         self.assertIn('v-model="draft.hydra_llm_thinking_enabled"', llm)
         self.assertIn('"hydra_llm_thinking_enabled"', models)
         self.assertIn('draft.hydra_llm_thinking_enabled = false', models)
@@ -405,6 +440,9 @@ class VueSettingsTests(unittest.TestCase):
         self.assertIn('"active_before": active_before', backend)
 
     def test_speech_workspace_is_provider_focused_and_tater_themed(self) -> None:
+        listening = (
+            REPO_ROOT / "frontend" / "src" / "settings" / "components" / "models" / "ListeningModels.vue"
+        ).read_text(encoding="utf-8")
         speech = (
             REPO_ROOT / "frontend" / "src" / "settings" / "components" / "models" / "SpeechModels.vue"
         ).read_text(encoding="utf-8")
@@ -413,19 +451,26 @@ class VueSettingsTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         styles = (REPO_ROOT / "frontend" / "src" / "tater-ui.css").read_text(encoding="utf-8")
 
-        for area in ("listening", "replies", "announcements", "playback"):
+        for area in ("replies", "announcements", "playback"):
             self.assertIn(f"area === '{area}'", speech)
+        self.assertNotIn("Listening & STT", speech)
+        self.assertNotIn("area === 'listening'", speech)
         self.assertIn("tm-speech-workspace", speech)
-        self.assertIn("tm-speech-provider-grid", speech)
-        self.assertIn("visibleVoiceSections", speech)
-        self.assertIn("function setStt", speech)
+        self.assertIn("tm-listening-workspace", listening)
+        self.assertIn("tm-speech-provider-grid", listening)
+        self.assertIn("visibleVoiceSections", listening)
+        self.assertIn("function setStt", listening)
+        self.assertIn("Listening controls", listening)
         self.assertIn('const inheritsReplyVoice = announcement && ["same_as_direct", "direct"].includes(backend)', speech)
         self.assertIn('const prefix = inheritsReplyVoice ? "speech_" : requestedPrefix', speech)
 
         self.assertIn('same_as_direct: { mark: "↔"', profile)
         self.assertIn("inheritsDirect", profile)
         self.assertIn("tm-speech-inherit-card", profile)
-        self.assertIn("tm-speech-advanced", profile)
+        self.assertIn("tm-voice-sample-player", profile)
+        self.assertIn("Shared across all local voice cloners", profile)
+        self.assertNotIn("kokoro:", profile)
+        self.assertNotIn("piper:", profile)
         self.assertIn("Discover models & voices", profile)
         self.assertNotIn('<select v-model="draft[backendKey]"', profile)
 
@@ -545,9 +590,14 @@ class VueSettingsTests(unittest.TestCase):
         self.assertIn("width: clamp(142px, 16vw, 210px)", styles)
         self.assertIn("filter: drop-shadow", styles)
         self.assertIn("settingsDisplayProfile", satellites)
-        self.assertIn("Weather &amp; room temperatures", satellites)
+        self.assertIn("Weather &amp; climate", satellites)
         self.assertIn("groupSettingsFields", satellites)
         self.assertIn("tvoice-settings-overview", satellites)
+        self.assertIn("item.connection_transport === 'ethernet'", satellites)
+        self.assertIn("item.connection_degraded", satellites)
+        self.assertIn('"Wi-Fi rescue"', satellites)
+        self.assertIn("tvoice-connection-icon", styles)
+        self.assertIn(".tvoice-connection-pill.degraded", styles)
         self.assertIn("hasSafeRunAction", satellites)
         self.assertIn('action !== "voice_native_satellite_setup_mode"', satellites)
         self.assertNotIn("tvoice-setup-mode", satellites)

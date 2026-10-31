@@ -514,6 +514,13 @@ def satellite_item_forms(status: Dict[str, Any]) -> List[Dict[str, Any]]:
         meta = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
         source = esphome_runtime.text(row.get("source")) or "unknown"
         native_device = source in {"tater_native", "native_satellite"} or selector.startswith("native:")
+        connection_transport = esphome_runtime.lower(client_row.get("connection_transport"))
+        if connection_transport not in {"ethernet", "wifi"}:
+            connection_transport = "wifi" if connected else "offline"
+        connection_degraded = bool(client_row.get("connection_degraded"))
+        connection_note = esphome_runtime.text(client_row.get("connection_note"))
+        if not connection_note:
+            connection_note = "Connected by Wi-Fi." if connected else "Satellite is offline."
         host = esphome_runtime.lower(row.get("host")) or ("" if native_device else esphome_runtime.satellite_host_from_selector(selector))
         name = esphome_runtime.text(row.get("name")) or host or selector
         area_name = _satellite_area_name(row)
@@ -818,6 +825,9 @@ def satellite_item_forms(status: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "subtitle": subtitle,
                 "detail": " • ".join(detail_parts),
                 "connected": connected,
+                "connection_transport": connection_transport,
+                "connection_degraded": connection_degraded,
+                "connection_note": connection_note,
                 "native_firmware": native_device,
                 "board": board,
                 "model": model,

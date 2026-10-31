@@ -31,6 +31,70 @@ def run_setup_functions(body: str, *, environ: dict[str, str]) -> subprocess.Com
 
 
 class SetupTaterVenvTests(unittest.TestCase):
+    def test_cleanup_removes_retired_model_engine_dependencies_and_runtimes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            runtime_dir = root / "runtime"
+            agent_root = root / "agent_lab"
+            mlx_engine = runtime_dir / "mlx-engine"
+            chatterbox_root = agent_root / "models" / "tts" / "chatterbox-local"
+            chatterbox_runtime = chatterbox_root / "runtime"
+            chatterbox_clone = chatterbox_root / "clone"
+            mlx_engine.mkdir(parents=True)
+            chatterbox_runtime.mkdir(parents=True)
+            chatterbox_clone.mkdir(parents=True)
+            (chatterbox_clone / "reference.wav").write_bytes(b"voice reference")
+
+            fake_python = root / "python"
+            fake_python.write_text(
+                "#!/bin/sh\n"
+                "if [ \"$1 $2 $3\" = '-m pip show' ]; then\n"
+                "  case \"$4\" in\n"
+                "    mlx|mlx-audio|mlx-lm|mlx-metal|mlx-vlm|mlx-whisper|outlines|outlines-core) exit 0 ;;\n"
+                "    *) exit 1 ;;\n"
+                "  esac\n"
+                "fi\n"
+                "if [ \"$1 $2 $3\" = '-m pip uninstall' ]; then\n"
+                "  printf '%s\\n' \"$*\" > \"${TEST_LOG}\"\n"
+                "  exit 0\n"
+                "fi\n"
+                "exit 1\n",
+                encoding="utf-8",
+            )
+            fake_python.chmod(0o755)
+            log_path = root / "pip.log"
+
+            completed = run_setup_functions(
+                r"""
+                RUNTIME_DIR="${TEST_ROOT}/runtime"
+                AGENT_ROOT="${TEST_ROOT}/agent_lab"
+                cleanup_legacy_runtime "${TEST_PYTHON}"
+                """,
+                environ={
+                    "TEST_LOG": str(log_path),
+                    "TEST_PYTHON": str(fake_python),
+                    "TEST_ROOT": temp_dir,
+                },
+            )
+            uninstall_command = log_path.read_text(encoding="utf-8") if log_path.exists() else ""
+
+            self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
+            for package in (
+                "mlx",
+                "mlx-audio",
+                "mlx-lm",
+                "mlx-metal",
+                "mlx-vlm",
+                "mlx-whisper",
+                "outlines",
+                "outlines-core",
+            ):
+                self.assertIn(package, uninstall_command)
+            self.assertNotIn("transformers", uninstall_command)
+            self.assertFalse(mlx_engine.exists())
+            self.assertFalse(chatterbox_runtime.exists())
+            self.assertTrue((chatterbox_clone / "reference.wav").exists())
+
     def test_google_cast_dependency_is_pinned_for_every_runtime_profile(self) -> None:
         for filename in ("requirements.txt", "requirements-edge.txt"):
             requirements = (ROOT / filename).read_text(encoding="utf-8")

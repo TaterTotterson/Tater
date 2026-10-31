@@ -26,18 +26,17 @@ logger = logging.getLogger("managed_tts")
 
 QWEN_TTS_BACKEND = "qwen3_tts"
 OMNIVOICE_TTS_BACKEND = "omnivoice"
-CHATTERBOX_LOCAL_TTS_BACKEND = "chatterbox_local"
-MANAGED_TTS_BACKENDS = {QWEN_TTS_BACKEND, OMNIVOICE_TTS_BACKEND, CHATTERBOX_LOCAL_TTS_BACKEND}
+POCKET_TTS_BACKEND = "pocket_tts"
+MANAGED_TTS_BACKENDS = {QWEN_TTS_BACKEND, OMNIVOICE_TTS_BACKEND}
+VOICE_CLONE_BACKENDS = {POCKET_TTS_BACKEND, QWEN_TTS_BACKEND, OMNIVOICE_TTS_BACKEND}
 
 DEFAULT_QWEN_TTS_MODEL = "Qwen/Qwen3-TTS-12Hz-0.6B-Base"
+QWEN_TTS_LARGE_MODEL = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
 QWEN_TTS_VOICE_DESIGN_MODEL = "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign"
 DEFAULT_OMNIVOICE_TTS_MODEL = "k2-fsa/OmniVoice"
-DEFAULT_CHATTERBOX_LOCAL_TTS_MODEL = "ResembleAI/chatterbox-turbo"
-CHATTERBOX_NANO_TTS_MODEL = "ResembleAI/chatterbox-nano"
 
 _MLX_AUDIO_COMMIT = "223afd602c6d583455bdb9f181b91fc090f4aff9"
 _OMNIVOICE_COMMIT = "28bc0889d92110491d726a9c79f26a895db5a074"
-_CHATTERBOX_COMMIT = "5de7a54aa4e5e2baadb0182dde554908b48b85c2"
 _ENV_STACK_VERSION = "tater-managed-tts-v1"
 _SYNTHESIS_TIMEOUT_SECONDS = 15 * 60.0
 _INSTALL_TIMEOUT_SECONDS = 30 * 60.0
@@ -47,18 +46,12 @@ _CLONE_AUDIO_SUFFIXES = {".wav", ".mp3", ".flac", ".m4a", ".ogg", ".opus", ".aac
 
 def normalize_managed_tts_backend(value: Any) -> str:
     token = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if token in {"pocket", "pockettts", "pocket_tts"}:
+        return POCKET_TTS_BACKEND
     if token in {"qwen", "qwen_tts", "qwen3", "qwen3tts", "qwen3_tts"}:
         return QWEN_TTS_BACKEND
     if token in {"omni", "omni_voice", "omnivoice", "omnivoice_tts"}:
         return OMNIVOICE_TTS_BACKEND
-    if token in {
-        "chatterbox_builtin",
-        "chatterbox_built_in",
-        "chatterbox_local",
-        "local_chatterbox",
-        "managed_chatterbox",
-    }:
-        return CHATTERBOX_LOCAL_TTS_BACKEND
     return token
 
 
@@ -76,7 +69,10 @@ def managed_tts_root(backend: Any) -> Path:
 
 
 def managed_tts_clone_dir(backend: Any) -> Path:
-    target = managed_tts_root(backend) / "clone"
+    token = normalize_managed_tts_backend(backend)
+    if token not in VOICE_CLONE_BACKENDS:
+        raise ValueError(f"Unsupported voice-clone backend: {token or backend}")
+    target = Path(agent_lab_path("models", "tts", "voice-samples"))
     target.mkdir(parents=True, exist_ok=True)
     return target
 
@@ -90,21 +86,43 @@ def _managed_tts_clone_stem(profile: Any) -> str:
     return "announcement-reference" if normalize_managed_tts_profile(profile) == "announcement" else "reference"
 
 
+def _clone_audio_roots(backend: Any) -> list[Path]:
+    token = normalize_managed_tts_backend(backend)
+    if token not in VOICE_CLONE_BACKENDS:
+        raise ValueError(f"Unsupported voice-clone backend: {token or backend}")
+    roots = [managed_tts_clone_dir(token).resolve()]
+    for legacy_backend in (QWEN_TTS_BACKEND, OMNIVOICE_TTS_BACKEND):
+        legacy_root = Path(agent_lab_path("models", "tts", legacy_backend.replace("_", "-"), "clone")).resolve()
+        if legacy_root not in roots:
+            roots.append(legacy_root)
+    return roots
+
+
 def validate_clone_audio_path(backend: Any, value: Any) -> str:
     raw = str(value or "").strip()
     if not raw:
         return ""
-    root = managed_tts_clone_dir(backend).resolve()
     candidate = Path(raw).expanduser().resolve()
-    try:
-        candidate.relative_to(root)
-    except ValueError as exc:
-        raise ValueError("Clone audio must be stored in Tater's managed voice directory.") from exc
+    if not any(_is_relative_to(candidate, root) for root in _clone_audio_roots(backend)):
+        raise ValueError("Clone audio must be stored in Tater's managed voice directory.")
     if not candidate.is_file():
         return ""
     if candidate.suffix.lower() not in _CLONE_AUDIO_SUFFIXES:
         return ""
     return str(candidate)
+
+
+def _is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def _clone_audio_display_name(path: Path) -> str:
+    name = path.name
+    return name.split("--", 1)[1] if "--" in name else name
 
 
 def clone_audio_info(backend: Any, value: Any) -> Dict[str, Any]:
@@ -113,7 +131,11 @@ def clone_audio_info(backend: Any, value: Any) -> Dict[str, Any]:
         return {"configured": False, "name": "", "size": 0}
     source = Path(path)
     with contextlib.suppress(OSError):
-        return {"configured": True, "name": source.name, "size": int(source.stat().st_size)}
+        return {
+            "configured": True,
+            "name": _clone_audio_display_name(source),
+            "size": int(source.stat().st_size),
+        }
     return {"configured": False, "name": "", "size": 0}
 
 
@@ -128,7 +150,10 @@ def store_clone_audio(backend: Any, *, filename: Any, data: bytes, profile: Any 
         raise ValueError("Clone audio must be WAV, MP3, FLAC, M4A, OGG, Opus, or AAC.")
     root = managed_tts_clone_dir(backend)
     stem = _managed_tts_clone_stem(profile)
-    target = root / f"{stem}{suffix}"
+    original_name = Path(str(filename or f"voice-sample{suffix}")).name
+    safe_stem = "".join(ch if ch.isalnum() or ch in {"-", "_", " ", "."} else "-" for ch in Path(original_name).stem)
+    safe_stem = "-".join(safe_stem.split()).strip("-._") or "voice-sample"
+    target = root / f"{stem}--{safe_stem[:80]}{suffix}"
     fd, temp_name = tempfile.mkstemp(prefix=f".{stem}-", suffix=suffix, dir=str(root))
     try:
         with os.fdopen(fd, "wb") as stream:
@@ -142,7 +167,7 @@ def store_clone_audio(backend: Any, *, filename: Any, data: bytes, profile: Any 
         with contextlib.suppress(OSError):
             os.unlink(temp_name)
         raise
-    for sibling in root.glob(f"{stem}.*"):
+    for sibling in list(root.glob(f"{stem}.*")) + list(root.glob(f"{stem}--*")):
         if sibling != target and sibling.is_file():
             with contextlib.suppress(OSError):
                 sibling.unlink()
@@ -154,14 +179,18 @@ def remove_clone_audio(backend: Any, value: Any = "", *, profile: Any = "direct"
     removed = False
     path = validate_clone_audio_path(backend, value)
     stem = _managed_tts_clone_stem(profile)
-    explicit_path = Path(path) if path and Path(path).name.startswith(f"{stem}.") else None
-    candidates = [explicit_path] if explicit_path is not None else list(root.glob(f"{stem}.*"))
+    explicit_path = Path(path) if path and Path(path).name.startswith((f"{stem}.", f"{stem}--")) else None
+    candidates = (
+        [explicit_path]
+        if explicit_path is not None
+        else list(root.glob(f"{stem}.*")) + list(root.glob(f"{stem}--*"))
+    )
     for candidate in candidates:
-        with contextlib.suppress(ValueError):
-            candidate.resolve().relative_to(root)
-            if candidate.is_file():
-                candidate.unlink()
-                removed = True
+        if candidate is not None and any(_is_relative_to(candidate.resolve(), allowed) for allowed in _clone_audio_roots(backend)):
+            with contextlib.suppress(OSError):
+                if candidate.is_file():
+                    candidate.unlink()
+                    removed = True
     return removed
 
 
@@ -279,7 +308,7 @@ def _stack_id(backend: str, acceleration: str) -> str:
     elif backend == OMNIVOICE_TTS_BACKEND:
         stack = f"omnivoice-{_OMNIVOICE_COMMIT}-torch-2.8.0"
     else:
-        stack = f"chatterbox-{_CHATTERBOX_COMMIT}-torch-2.6.0"
+        raise ValueError(f"Unsupported managed TTS backend: {backend}")
     return f"{_ENV_STACK_VERSION}:{backend}:{stack}:{acceleration or 'auto'}"
 
 
@@ -331,7 +360,6 @@ def _torch_index(acceleration: str, torch_version: str = "") -> str:
 _environment_locks: Dict[str, threading.Lock] = {
     QWEN_TTS_BACKEND: threading.Lock(),
     OMNIVOICE_TTS_BACKEND: threading.Lock(),
-    CHATTERBOX_LOCAL_TTS_BACKEND: threading.Lock(),
 }
 
 
@@ -371,8 +399,6 @@ def ensure_managed_tts_environment(backend: Any, acceleration: Any = "auto") -> 
                     "2.9.1"
                     if token == QWEN_TTS_BACKEND
                     else "2.8.0"
-                    if token == OMNIVOICE_TTS_BACKEND
-                    else "2.6.0"
                 )
                 torch_command = [
                     str(python_bin),
@@ -389,10 +415,6 @@ def ensure_managed_tts_environment(backend: Any, acceleration: Any = "auto") -> 
                 package = {
                     QWEN_TTS_BACKEND: "qwen-tts==0.1.1",
                     OMNIVOICE_TTS_BACKEND: f"git+https://github.com/k2-fsa/OmniVoice.git@{_OMNIVOICE_COMMIT}",
-                    CHATTERBOX_LOCAL_TTS_BACKEND: (
-                        "chatterbox-tts @ "
-                        f"git+https://github.com/resemble-ai/chatterbox.git@{_CHATTERBOX_COMMIT}"
-                    ),
                 }[token]
                 _run_install(
                     [str(python_bin), "-m", "pip", "install", package, "huggingface_hub[hf_xet]", "soundfile"]
@@ -569,7 +591,6 @@ class _ManagedWorker:
 _workers: Dict[str, _ManagedWorker] = {
     QWEN_TTS_BACKEND: _ManagedWorker(QWEN_TTS_BACKEND),
     OMNIVOICE_TTS_BACKEND: _ManagedWorker(OMNIVOICE_TTS_BACKEND),
-    CHATTERBOX_LOCAL_TTS_BACKEND: _ManagedWorker(CHATTERBOX_LOCAL_TTS_BACKEND),
 }
 _managed_dispatch_lock = threading.RLock()
 
@@ -625,7 +646,6 @@ def warm_managed_tts_model(
     selected_model = str(model or "").strip() or {
         QWEN_TTS_BACKEND: DEFAULT_QWEN_TTS_MODEL,
         OMNIVOICE_TTS_BACKEND: DEFAULT_OMNIVOICE_TTS_MODEL,
-        CHATTERBOX_LOCAL_TTS_BACKEND: DEFAULT_CHATTERBOX_LOCAL_TTS_MODEL,
     }[token]
     acceleration_token = resolve_managed_tts_acceleration(acceleration)
     with _managed_dispatch_lock:
@@ -667,9 +687,8 @@ def synthesize_managed_tts_pcm(
     selected_model = str(model or "").strip() or {
         QWEN_TTS_BACKEND: DEFAULT_QWEN_TTS_MODEL,
         OMNIVOICE_TTS_BACKEND: DEFAULT_OMNIVOICE_TTS_MODEL,
-        CHATTERBOX_LOCAL_TTS_BACKEND: DEFAULT_CHATTERBOX_LOCAL_TTS_MODEL,
     }[token]
-    if token == QWEN_TTS_BACKEND and selected_model == DEFAULT_QWEN_TTS_MODEL:
+    if token == QWEN_TTS_BACKEND and selected_model != QWEN_TTS_VOICE_DESIGN_MODEL:
         if not reference_path:
             raise RuntimeError("Qwen voice cloning needs a reference audio file. Add one in Settings > Speech.")
     if token == QWEN_TTS_BACKEND and selected_model == QWEN_TTS_VOICE_DESIGN_MODEL:

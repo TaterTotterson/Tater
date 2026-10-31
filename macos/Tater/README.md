@@ -14,6 +14,7 @@ On first launch, the app prepares a private runtime in:
   python/
   venv/
   runtime/
+    llama.cpp/
   agent_lab/
     workspace/
     downloads/
@@ -29,7 +30,9 @@ On first launch, the app prepares a private runtime in:
   updates/
 ```
 
-The launcher starts Tater with `TATER_AGENT_ROOT`, `TATER_VENV_DIR`, and `TATER_RUNTIME_DIR` pointed at that folder, so normal repo-local development remains separate from the macOS app runtime.
+The launcher starts Tater with `TATER_AGENT_ROOT`, `TATER_VENV_DIR`, and `TATER_RUNTIME_DIR` pointed at that folder, so normal repo-local development remains separate from the macOS app runtime. Use **Move Tater Data…** in the menu bar to move `agent_lab` to another folder or external SSD. Tater stops, copies with visible progress, verifies file counts and sizes, starts from the new location, and only then moves the old folder to the Trash. The private Python runtime, application files, settings, and logs remain under `~/.taterassistant`.
+
+If a selected external drive is unavailable, Tater reports the missing data location instead of silently creating a fresh empty data folder. Reconnect the drive and start Tater again.
 
 If Python 3.11 is not already available, the launcher installs a standalone CPython 3.11 build under `~/.taterassistant/python/cpython-3.11` and uses that interpreter to create the private venv.
 
@@ -60,7 +63,7 @@ TATER_AGENT_ROOT="$HOME/.taterassistant/agent_lab" \
 sh setup_tater.sh macos
 ```
 
-The launcher checks the bundled AirPlay sender and receiver plus the Python FFmpeg and discovery support during its normal environment check. If a required Python component is missing or stale, it reruns setup before starting Tater.
+The launcher checks the native llama.cpp engine, the bundled AirPlay sender and receiver, plus the Python FFmpeg and discovery support during its normal environment check. If a required component is missing or stale, it reruns setup before starting Tater.
 
 Then it launches `run_ui.sh` on `127.0.0.1:8501` and opens that URL in a native `WKWebView` window. Closing the window does not stop Tater; use the menu bar item to open, stop, restart, show logs, or quit.
 

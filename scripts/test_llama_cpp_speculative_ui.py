@@ -38,9 +38,7 @@ class LlamaCppSpeculativeUiTests(unittest.TestCase):
 
         self.assertIn('class="tm-llm-provider-picker"', component)
         self.assertNotIn('<details class="tm-form-card tm-details-card"', component)
-        self.assertIn('v-if="runtimeProvider === \'hf_transformers\'"', component)
-        self.assertIn('v-else-if="runtimeProvider === \'llama_cpp\'"', component)
-        self.assertIn('v-else-if="runtimeProvider === \'mlx_lm\'"', component)
+        self.assertIn('v-if="runtimeProvider === \'llama_cpp\'"', component)
         self.assertIn("Context estimator", component)
         self.assertIn("refreshContextEstimate", component)
         self.assertIn("context-estimate-endpoint", models)
@@ -51,7 +49,7 @@ class LlamaCppSpeculativeUiTests(unittest.TestCase):
         component = (ROOT / "frontend" / "src" / "settings" / "components" / "models" / "LlmModels.vue").read_text(encoding="utf-8")
         styles = (ROOT / "frontend" / "src" / "tater-ui.css").read_text(encoding="utf-8")
 
-        for label in ("Flash attention", "GPU KV offload", "Lazy loading", "Trust remote model code"):
+        for label in ("Flash attention", "GPU KV offload"):
             self.assertIn(label, component)
         self.assertIn('class="tm-llm-switch"', component)
         self.assertIn('class="tm-llm-feature-toggle"', component)

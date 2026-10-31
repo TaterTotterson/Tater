@@ -90,11 +90,6 @@ class NativePublicBaseUrlTests(unittest.TestCase):
                     "transcoded": True,
                 },
             ),
-            mock.patch.object(
-                vp,
-                "_chatterbox_tts_request",
-                return_value=("http://chatterbox/tts", {"text": "hello"}),
-            ),
             mock.patch.object(vp, "_tts_url_ttl_s", return_value=180.0),
         ):
             tts_url = vp._store_tts_url(
@@ -103,18 +98,12 @@ class NativePublicBaseUrlTests(unittest.TestCase):
                 b"pcm",
                 {"rate": 16000, "width": 2, "channels": 1},
             )
-            chatterbox_url = vp._store_chatterbox_tts_stream_url(
-                "native:test",
-                "session",
-                "hello",
-                {},
-            )
             native_stream_url = vp._store_native_tts_stream_url(
                 "native:test",
                 "session",
                 "hello",
-                backend="piper",
-                selection={"model": "en_US-lessac-medium"},
+                backend="pocket_tts",
+                selection={"model": "default", "tts_clone_audio": "/voices/sample.wav"},
             )
             media_url = vp._store_media_url(
                 "native:test",
@@ -127,10 +116,6 @@ class NativePublicBaseUrlTests(unittest.TestCase):
         self.assertRegex(
             tts_url,
             r"^https://tater\.example\.com/tater/api/tater/satellite/v1/tts/[0-9a-f]+\.mp3$",
-        )
-        self.assertRegex(
-            chatterbox_url,
-            r"^https://tater\.example\.com/tater/api/tater/satellite/v1/tts/[0-9a-f]+\.wav$",
         )
         self.assertRegex(
             native_stream_url,

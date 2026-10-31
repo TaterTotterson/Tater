@@ -149,34 +149,6 @@ class WakeVerifierBackendTests(unittest.IsolatedAsyncioTestCase):
             selector="native:test",
         )
 
-    async def test_verifier_reports_effective_backend_fallback(self) -> None:
-        from tater_voice import voice_pipeline as vp
-
-        packet = build_packet(b"\x00\x00" * 4000, request_id=92)
-        fallback_reason = "mlx_whisper unavailable; falling back to faster_whisper"
-        with (
-            mock.patch.object(
-                native_live_settings,
-                "shared_wake_settings_snapshot",
-                return_value={"wake_word": "hey_tater"},
-            ),
-            mock.patch.object(vp, "_selected_stt_backend", return_value="mlx_whisper"),
-            mock.patch.object(
-                vp,
-                "_resolve_stt_backend",
-                return_value=("faster_whisper", fallback_reason),
-            ),
-            mock.patch.object(
-                vp,
-                "_native_transcribe_wake_audio_bytes",
-                new=mock.AsyncMock(return_value="Hey Tater"),
-            ),
-        ):
-            result = await wake_verifier.verify_packet(packet)
-
-        self.assertEqual(result["stt_engine_selected"], "mlx_whisper")
-        self.assertEqual(result["stt_engine"], "faster_whisper")
-        self.assertEqual(result["stt_fallback_reason"], fallback_reason)
 
     async def test_backend_failure_still_fails_open(self) -> None:
         from tater_voice import voice_pipeline as vp
@@ -225,24 +197,6 @@ class WakeVerifierBackendTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(call_args[0], backends._transcribe_faster_whisper_sync)
         self.assertEqual(call_args[-2:], (True, True))
 
-    async def test_local_wake_router_uses_optimized_mlx_path(self) -> None:
-        from tater_voice.voice_pipeline import backends
-
-        runner = mock.AsyncMock(return_value="Hey Tater")
-        with mock.patch.object(backends, "_run_local_stt_thread", new=runner):
-            transcript = await backends._native_transcribe_wake_audio_bytes(
-                backend="mlx_whisper",
-                audio_bytes=b"\x00\x00" * 100,
-                audio_format={"rate": 16000, "width": 2, "channels": 1},
-                language="en",
-                selector="native:test",
-            )
-
-        self.assertEqual(transcript, "Hey Tater")
-        self.assertIs(
-            runner.await_args.args[0],
-            backends._transcribe_mlx_whisper_wake_sync,
-        )
 
     async def test_local_wake_router_uses_parakeet_onnx_path(self) -> None:
         from tater_voice.voice_pipeline import backends

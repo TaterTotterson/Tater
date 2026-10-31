@@ -577,12 +577,6 @@ HYDRA_LLM_BASE_SERVERS_KEY = "tater:hydra:llm_base_servers"
 HYDRA_LLM_THINKING_ENABLED_KEY = "tater:hydra:llm:thinking_enabled"
 SPUD_LINK_SETTINGS_KEY = "tater:spudlink:settings:v1"
 SPUD_LINK_MODE_SPUDLET = "spudlet"
-HYDRA_HF_TRANSFORMERS_CONTEXT_TOKENS_KEY = "tater:hydra:llm:hf_transformers_context_tokens"
-HYDRA_HF_TRANSFORMERS_DEVICE_KEY = "tater:hydra:llm:hf_transformers_device"
-HYDRA_HF_TRANSFORMERS_DTYPE_KEY = "tater:hydra:llm:hf_transformers_dtype"
-HYDRA_HF_TRANSFORMERS_DEVICE_MAP_KEY = "tater:hydra:llm:hf_transformers_device_map"
-HYDRA_HF_TRANSFORMERS_ATTN_IMPLEMENTATION_KEY = "tater:hydra:llm:hf_transformers_attn_implementation"
-HYDRA_HF_TRANSFORMERS_TRUST_REMOTE_CODE_KEY = "tater:hydra:llm:hf_transformers_trust_remote_code"
 HYDRA_LLAMA_CPP_CONTEXT_TOKENS_KEY = "tater:hydra:llm:llama_cpp_context_tokens"
 HYDRA_LLAMA_CPP_VISION_CONTEXT_TOKENS_KEY = "tater:hydra:llm:llama_cpp_vision_context_tokens"
 HYDRA_LLAMA_CPP_MTP_ENABLED_KEY = "tater:hydra:llm:llama_cpp_mtp_enabled"
@@ -596,22 +590,7 @@ HYDRA_LLAMA_CPP_OFFLOAD_KQV_KEY = "tater:hydra:llm:llama_cpp_offload_kqv"
 HYDRA_LLAMA_CPP_SLOT_COUNT_KEY = "tater:hydra:llm:llama_cpp_slot_count"
 HYDRA_LLAMA_CPP_BASE_SLOT_KEY = "tater:hydra:llm:llama_cpp_base_slot"
 HYDRA_LLAMA_CPP_VISION_SLOT_KEY = "tater:hydra:llm:llama_cpp_vision_slot"
-HYDRA_HF_TRANSFORMERS_CHAT_TEMPLATE_OVERRIDES_KEY = "tater:hydra:llm:hf_transformers_chat_template_overrides"
 HYDRA_LLAMA_CPP_CHAT_TEMPLATE_OVERRIDES_KEY = "tater:hydra:llm:llama_cpp_chat_template_overrides"
-HYDRA_MLX_LM_CONTEXT_TOKENS_KEY = "tater:hydra:llm:mlx_lm_context_tokens"
-HYDRA_MLX_LM_TRUST_REMOTE_CODE_KEY = "tater:hydra:llm:mlx_lm_trust_remote_code"
-HYDRA_MLX_LM_LAZY_LOAD_KEY = "tater:hydra:llm:mlx_lm_lazy_load"
-HYDRA_MLX_ENGINE_PREFILL_STEP_SIZE_KEY = "tater:hydra:llm:mlx_engine_prefill_step_size"
-HYDRA_MLX_ENGINE_KV_BITS_KEY = "tater:hydra:llm:mlx_engine_kv_bits"
-HYDRA_MLX_ENGINE_KV_GROUP_SIZE_KEY = "tater:hydra:llm:mlx_engine_kv_group_size"
-HYDRA_MLX_ENGINE_QUANTIZED_KV_START_KEY = "tater:hydra:llm:mlx_engine_quantized_kv_start"
-HYDRA_MLX_LM_CHAT_TEMPLATE_OVERRIDES_KEY = "tater:hydra:llm:mlx_lm_chat_template_overrides"
-DEFAULT_HF_TRANSFORMERS_CONTEXT_TOKENS = 4096
-DEFAULT_HF_TRANSFORMERS_DEVICE = "auto"
-DEFAULT_HF_TRANSFORMERS_DTYPE = "auto"
-DEFAULT_HF_TRANSFORMERS_DEVICE_MAP = "default"
-DEFAULT_HF_TRANSFORMERS_ATTN_IMPLEMENTATION = ""
-DEFAULT_HF_TRANSFORMERS_TRUST_REMOTE_CODE = False
 DEFAULT_LLAMA_CPP_CONTEXT_TOKENS = 4096
 DEFAULT_LLAMA_CPP_VISION_CONTEXT_TOKENS = 4096
 DEFAULT_LLAMA_CPP_MTP_ENABLED = False
@@ -622,35 +601,25 @@ LLAMA_CPP_SPECULATIVE_METHODS = ("draft-mtp", "draft-dflash", "draft-dspark")
 DEFAULT_LLAMA_CPP_N_BATCH = 512
 DEFAULT_LLAMA_CPP_N_UBATCH = 0
 DEFAULT_LLAMA_CPP_CACHE_REUSE_TOKENS = 256
+DEFAULT_LLAMA_CPP_CACHE_RAM_MIB = 0
 DEFAULT_LLAMA_CPP_MTP_CONTEXT_CHECKPOINTS = 0
 DEFAULT_LLAMA_CPP_MTP_STALL_TIMEOUT_SECONDS = 120.0
 DEFAULT_LLAMA_CPP_FLASH_ATTN = False
 DEFAULT_LLAMA_CPP_OFFLOAD_KQV = True
 DEFAULT_LLAMA_CPP_SLOT_COUNT = 1
 DEFAULT_LLAMA_CPP_SLOT_ID = -1
-DEFAULT_MLX_LM_TRUST_REMOTE_CODE = False
-DEFAULT_MLX_LM_LAZY_LOAD = False
-DEFAULT_MLX_LM_CONTEXT_TOKENS = 4096
-DEFAULT_MLX_ENGINE_PREFILL_STEP_SIZE = 2048
-MEDIUM_MLX_ENGINE_PREFILL_STEP_SIZE = 4096
-FAST_MLX_ENGINE_PREFILL_STEP_SIZE = 8192
-MAX_MLX_ENGINE_PREFILL_STEP_SIZE = 32768
 DEFAULT_HYDRA_LLM_THINKING_ENABLED = False
 HYDRA_LLM_SETUP_ERROR = (
     "Hydra LLM is not configured. Open Settings > Models and set a base provider, endpoint if required, and model."
 )
 HYDRA_LLM_PROVIDER_OPENAI_COMPATIBLE = "openai_compatible"
-HYDRA_LLM_PROVIDER_HF_TRANSFORMERS = "hf_transformers"
 HYDRA_LLM_PROVIDER_LLAMA_CPP = "llama_cpp"
 HYDRA_LLM_PROVIDER_LLAMA_CPP_REMOTE = "llama_cpp_remote"
-HYDRA_LLM_PROVIDER_MLX_LM = "mlx_lm"
 HYDRA_LLM_PROVIDER_SPUD_LINK = "spud_link"
 HYDRA_LLM_PROVIDER_CHOICES = {
     HYDRA_LLM_PROVIDER_OPENAI_COMPATIBLE,
-    HYDRA_LLM_PROVIDER_HF_TRANSFORMERS,
     HYDRA_LLM_PROVIDER_LLAMA_CPP,
     HYDRA_LLM_PROVIDER_LLAMA_CPP_REMOTE,
-    HYDRA_LLM_PROVIDER_MLX_LM,
     HYDRA_LLM_PROVIDER_SPUD_LINK,
 }
 _HYDRA_BASE_RR_LOCK = threading.Lock()
@@ -679,9 +648,6 @@ _VISION_CALL_HISTORY_MAX = 5000
 _VISION_CALL_COUNTERS: Dict[str, int] = {"started": 0, "completed": 0, "failed": 0}
 _VISION_CALL_COUNTERS_REDIS_KEY = "tater:vision:runtime:counters"
 _VISION_CALL_HISTORY_REDIS_KEY = "tater:vision:runtime:history"
-_HF_LLM_MODEL_CACHE: Dict[Tuple[str, str, str, bool], Dict[str, Any]] = {}
-_HF_LLM_MODEL_CACHE_LOCK = threading.RLock()
-_HF_LLM_GENERATION_LOCKS: Dict[Tuple[str, str, str, bool], threading.RLock] = {}
 _LLAMA_CPP_MODEL_CACHE: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
 _LLAMA_CPP_MODEL_CACHE_LOCK = threading.RLock()
 _LLAMA_CPP_GENERATION_LOCKS: Dict[Tuple[Any, ...], threading.RLock] = {}
@@ -691,17 +657,6 @@ _LLAMA_CPP_ENGINE_GENERATION_LOCKS: Dict[Tuple[Any, ...], threading.RLock] = {}
 _LLAMA_CPP_PARTIAL_MODEL_DEL_PATCHED = False
 _LLAMA_CPP_VISION_FAILURE_COOLDOWNS: Dict[str, Dict[str, Any]] = {}
 _LLAMA_CPP_VISION_FAILURE_COOLDOWN_LOCK = threading.RLock()
-_MLX_LM_MODEL_CACHE: Dict[Tuple[str, str, bool, bool], Dict[str, Any]] = {}
-_MLX_LM_MODEL_CACHE_LOCK = threading.RLock()
-_MLX_LM_GENERATION_LOCKS: Dict[Tuple[str, str, bool, bool], threading.RLock] = {}
-_MLX_VLM_MODEL_CACHE: Dict[Tuple[str, bool, bool], Dict[str, Any]] = {}
-_MLX_VLM_MODEL_CACHE_LOCK = threading.RLock()
-_MLX_VLM_GENERATION_LOCKS: Dict[Tuple[str, bool, bool], threading.RLock] = {}
-_MLX_ENGINE_MODEL_CACHE: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
-_MLX_ENGINE_MODEL_CACHE_LOCK = threading.RLock()
-_MLX_ENGINE_GENERATION_LOCKS: Dict[Tuple[Any, ...], threading.RLock] = {}
-_MLX_RUNTIME_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tater-mlx-runtime")
-_MLX_RUNTIME_LOCAL = threading.local()
 _LOCAL_VISION_GENERATION_LOCK = threading.RLock()
 HFProgressCallback = Callable[[Dict[str, Any]], None]
 
@@ -1949,8 +1904,6 @@ def _build_hydra_llm_endpoint(host: Any, port: Any) -> str:
 
 def _normalize_hydra_llm_provider(value: Any) -> str:
     token = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
-    if token in {"hf", "huggingface", "hugging_face", "transformers", "hf_transformers", "local_transformers"}:
-        return HYDRA_LLM_PROVIDER_HF_TRANSFORMERS
     if token in {
         "llama_cpp_remote",
         "llama.cpp_remote",
@@ -1963,19 +1916,13 @@ def _normalize_hydra_llm_provider(value: Any) -> str:
         return HYDRA_LLM_PROVIDER_LLAMA_CPP_REMOTE
     if token in {"llama", "llamacpp", "llama_cpp", "llama.cpp", "gguf"}:
         return HYDRA_LLM_PROVIDER_LLAMA_CPP
-    if token in {"mlx", "mlx_lm", "mlx-lm", "apple_mlx", "apple_silicon", "mlxlm"}:
-        return HYDRA_LLM_PROVIDER_MLX_LM
     if token in {"spud", "spudlink", "spud_link", "spud_hub", "spudlet", "tater_native", "tater_spud_link"}:
         return HYDRA_LLM_PROVIDER_SPUD_LINK
     return HYDRA_LLM_PROVIDER_OPENAI_COMPATIBLE
 
 
 def _is_local_hydra_llm_provider(provider: Any) -> bool:
-    return _normalize_hydra_llm_provider(provider) in {
-        HYDRA_LLM_PROVIDER_HF_TRANSFORMERS,
-        HYDRA_LLM_PROVIDER_LLAMA_CPP,
-        HYDRA_LLM_PROVIDER_MLX_LM,
-    }
+    return _normalize_hydra_llm_provider(provider) == HYDRA_LLM_PROVIDER_LLAMA_CPP
 
 
 def _is_llama_cpp_hydra_llm_provider(provider: Any) -> bool:
@@ -1985,62 +1932,11 @@ def _is_llama_cpp_hydra_llm_provider(provider: Any) -> bool:
     }
 
 
-def _hf_llm_model_root() -> str:
-    raw = str(os.getenv("TATER_HF_TRANSFORMERS_MODEL_ROOT") or "").strip()
-    if raw:
-        return os.path.abspath(os.path.expanduser(raw))
-    return str(agent_lab_path("models", "llm", "huggingface"))
-
-
 def _llama_cpp_model_root() -> str:
     raw = str(os.getenv("TATER_LLAMA_CPP_MODEL_ROOT") or "").strip()
     if raw:
         return os.path.abspath(os.path.expanduser(raw))
     return str(agent_lab_path("models", "llm", "llama-cpp"))
-
-
-def _mlx_lm_model_root() -> str:
-    raw = str(os.getenv("TATER_MLX_LM_MODEL_ROOT") or "").strip()
-    if raw:
-        return os.path.abspath(os.path.expanduser(raw))
-    return str(agent_lab_path("models", "llm", "mlx"))
-
-
-def _hf_llm_device_pref() -> str:
-    token = _setting_text(
-        HYDRA_HF_TRANSFORMERS_DEVICE_KEY,
-        "TATER_HF_TRANSFORMERS_DEVICE",
-        DEFAULT_HF_TRANSFORMERS_DEVICE,
-    ).strip().lower()
-    if token in {"", "default"}:
-        return DEFAULT_HF_TRANSFORMERS_DEVICE
-    if token in {"auto", "cuda", "mps", "cpu"}:
-        return token
-    return token or DEFAULT_HF_TRANSFORMERS_DEVICE
-
-
-def _hf_llm_dtype_pref() -> str:
-    token = _setting_text(
-        HYDRA_HF_TRANSFORMERS_DTYPE_KEY,
-        "TATER_HF_TRANSFORMERS_DTYPE",
-        DEFAULT_HF_TRANSFORMERS_DTYPE,
-    ).strip().lower()
-    if token in {"", "default"}:
-        return DEFAULT_HF_TRANSFORMERS_DTYPE
-    aliases = {
-        "fp16": "float16",
-        "half": "float16",
-        "bf16": "bfloat16",
-        "fp32": "float32",
-    }
-    return aliases.get(token, token or DEFAULT_HF_TRANSFORMERS_DTYPE)
-
-
-def _hf_llm_trust_remote_code() -> bool:
-    raw = _safe_redis_text_get(HYDRA_HF_TRANSFORMERS_TRUST_REMOTE_CODE_KEY)
-    if raw:
-        return _boolish(raw, default=DEFAULT_HF_TRANSFORMERS_TRUST_REMOTE_CODE)
-    return _boolish(os.getenv("TATER_HF_TRANSFORMERS_TRUST_REMOTE_CODE"), default=DEFAULT_HF_TRANSFORMERS_TRUST_REMOTE_CODE)
 
 
 def _local_llm_context_tokens(
@@ -2064,90 +1960,6 @@ def _local_llm_context_tokens(
     except Exception:
         return default
     return max(int(minimum), min(int(maximum), int(value)))
-
-
-def _hf_llm_max_input_tokens() -> int:
-    value = _local_llm_context_tokens(
-        HYDRA_HF_TRANSFORMERS_CONTEXT_TOKENS_KEY,
-        ("TATER_HF_TRANSFORMERS_MAX_INPUT_TOKENS",),
-        DEFAULT_HF_TRANSFORMERS_CONTEXT_TOKENS,
-    )
-    return int(value or DEFAULT_HF_TRANSFORMERS_CONTEXT_TOKENS)
-
-
-def _hf_llm_resolve_device(torch_module: Any, preference: str) -> str:
-    token = str(preference or "auto").strip().lower()
-    if token and token != "auto":
-        return token
-    try:
-        if bool(getattr(getattr(torch_module, "cuda", None), "is_available", lambda: False)()):
-            return "cuda"
-    except Exception:
-        pass
-    try:
-        mps_backend = getattr(getattr(torch_module, "backends", None), "mps", None)
-        if bool(getattr(mps_backend, "is_available", lambda: False)()):
-            return "mps"
-    except Exception:
-        pass
-    return "cpu"
-
-
-def _hf_llm_torch_dtype(torch_module: Any, dtype_pref: str, device: str) -> Any:
-    token = str(dtype_pref or "auto").strip().lower()
-    if token in {"", "auto"}:
-        return "auto"
-    mapping = {
-        "float16": "float16",
-        "fp16": "float16",
-        "half": "float16",
-        "bfloat16": "bfloat16",
-        "bf16": "bfloat16",
-        "float32": "float32",
-        "fp32": "float32",
-    }
-    attr = mapping.get(token, token)
-    return getattr(torch_module, attr, "auto")
-
-
-def _hf_llm_device_map_pref(device: str) -> str:
-    raw = _setting_text(
-        HYDRA_HF_TRANSFORMERS_DEVICE_MAP_KEY,
-        "TATER_HF_TRANSFORMERS_DEVICE_MAP",
-        DEFAULT_HF_TRANSFORMERS_DEVICE_MAP,
-    ).strip().lower()
-    if raw in {"", "default"}:
-        raw = ""
-    if raw in {"none", "off", "false", "0", "disabled"}:
-        return ""
-    if raw:
-        return raw
-    if str(device or "").startswith("cuda"):
-        return "auto"
-    return ""
-
-
-def _hf_llm_attn_implementation() -> str:
-    token = _setting_text(
-        HYDRA_HF_TRANSFORMERS_ATTN_IMPLEMENTATION_KEY,
-        "TATER_HF_TRANSFORMERS_ATTN_IMPLEMENTATION",
-        DEFAULT_HF_TRANSFORMERS_ATTN_IMPLEMENTATION,
-    ).strip().lower()
-    if token in {"", "auto", "default", "none", "off", "false", "0"}:
-        return ""
-    allowed = {"sdpa", "flash_attention_2", "eager"}
-    return token if token in allowed else ""
-
-
-def _hf_llm_cache_key(model_id: str) -> Tuple[Any, ...]:
-    return (
-        str(model_id or "").strip(),
-        _hf_llm_device_pref(),
-        _hf_llm_dtype_pref(),
-        _hf_llm_trust_remote_code(),
-        _hf_llm_device_map_pref(_hf_llm_device_pref()),
-        _hf_llm_attn_implementation(),
-    )
 
 
 def _huggingface_integration_token() -> str:
@@ -2174,9 +1986,7 @@ def _huggingface_integration_token() -> str:
 
 
 def _hf_llm_hub_token() -> Optional[str]:
-    token = _text(os.getenv("TATER_HF_TRANSFORMERS_TOKEN")).strip()
-    if not token:
-        token = _huggingface_integration_token()
+    token = _huggingface_integration_token()
     if not token:
         token = _text(
             os.getenv("HF_TOKEN")
@@ -2191,7 +2001,7 @@ def _hf_llm_hub_token() -> Optional[str]:
 
 def _hf_llm_snapshot_max_workers() -> int:
     try:
-        value = int(str(os.getenv("TATER_HF_TRANSFORMERS_DOWNLOAD_WORKERS") or "4").strip())
+        value = int(str(os.getenv("TATER_HF_DOWNLOAD_WORKERS") or "4").strip())
     except Exception:
         value = 4
     return max(1, min(16, value))
@@ -2256,6 +2066,27 @@ def _llama_cpp_cache_reuse_tokens() -> int:
     return max(0, min(8192, int(value)))
 
 
+def _llama_cpp_cache_ram_mib() -> int:
+    """Return the host-RAM prompt snapshot budget for llama-server.
+
+    Tater keeps this disabled by default because it is separate from the live
+    KV pool and can consume several additional GiB of unified memory on Apple
+    Silicon. An environment override remains available for advanced installs.
+    """
+    raw = str(
+        os.getenv("TATER_LLAMA_CPP_CACHE_RAM_MIB")
+        or os.getenv("LLAMA_ARG_CACHE_RAM")
+        or DEFAULT_LLAMA_CPP_CACHE_RAM_MIB
+    ).strip()
+    try:
+        value = int(float(raw))
+    except Exception:
+        value = DEFAULT_LLAMA_CPP_CACHE_RAM_MIB
+    if value < 0:
+        return -1
+    return max(0, min(262144, int(value)))
+
+
 def _llama_cpp_context_checkpoints(*, mtp_enabled: bool = False) -> int:
     raw = str(
         os.getenv("TATER_LLAMA_CPP_CTX_CHECKPOINTS")
@@ -2281,7 +2112,11 @@ def _llama_cpp_slot_count() -> int:
         value = int(float(raw))
     except Exception:
         value = DEFAULT_LLAMA_CPP_SLOT_COUNT
-    return max(1, min(32, int(value)))
+    # Tater exposes two intentional layouts: one shared context for minimum
+    # memory use, or four contexts for Base plus the three Hydra heads. Treat
+    # legacy/custom values below four as shared and values at or above four as
+    # per-head so routing never lands in an accidental partial layout.
+    return 4 if int(value) >= 4 else 1
 
 
 def _llama_cpp_slot_id(scope: str = "base", value: Any = None) -> int:
@@ -2314,33 +2149,37 @@ def _llama_cpp_cache_namespace_slot(
     configured_slot: Any = None,
     vision: bool = False,
 ) -> int:
-    """Keep stable Hydra roles on stable llama-server slots.
+    """Keep Base and stable Hydra roles on distinct llama-server slots.
 
-    A valid configured slot is an explicit pin and always wins. Auto slots use
-    the cache namespace to keep each Hydra role on a stable llama-server slot.
-    Calls without a namespace retain the configured slot behavior exactly.
+    Hydra role pins override the automatic layout. Other explicit route pins
+    remain authoritative for non-Hydra calls. With automatic settings, Base is
+    slot 0 and the three Hydra heads use slots 1 through 3, even when Beast
+    Mode is disabled and every head shares the Base model client.
     """
     if vision:
         return _llama_cpp_slot_id("vision", configured_slot)
 
+    namespace = str(cache_namespace or "").strip().lower()
+    slot_count = _llama_cpp_slot_count()
+    role_slots = (
+        ("astraeus", ("astraeus", "plan", "review"), 1),
+        ("hermes", ("hermes", "chat", "final", "progress", "waiting"), 2),
+        ("thanatos", ("thanatos", "state", "execution", "checker", "validation"), 3),
+    )
+    for role, role_tokens, offset in role_slots:
+        if any(token in namespace for token in role_tokens):
+            configured_role_slot = _llama_cpp_slot_id(
+                value=_safe_redis_text_get(f"tater:hydra:llm:{role}:llama_cpp_slot")
+            )
+            if configured_role_slot >= 0:
+                return configured_role_slot
+            return int(offset % slot_count)
+
     base_slot = _llama_cpp_slot_id("base", configured_slot)
     if base_slot >= 0:
         return base_slot
-
-    namespace = str(cache_namespace or "").strip().lower()
-    slot_count = _llama_cpp_slot_count()
     if not namespace or slot_count <= 1:
-        return base_slot
-
-    role_offsets = (
-        (("hermes", "chat", "final"), 1),
-        (("thanatos", "state", "execution"), 2),
-        (("progress", "waiting"), 3),
-        (("astraeus", "plan", "review"), 0),
-    )
-    for role_tokens, offset in role_offsets:
-        if any(token in namespace for token in role_tokens):
-            return int(offset % slot_count)
+        return 0
 
     digest = hashlib.sha256(namespace.encode("utf-8", "ignore")).digest()
     return int(int.from_bytes(digest[:4], "big") % slot_count)
@@ -3360,21 +3199,6 @@ def _apple_metal_vram_snapshot(*, enable_ioreg_probe: Optional[bool] = None) -> 
                         total_candidates.append(max(0, int(getter() or 0)))
         except Exception:
             pass
-        try:
-            import mlx.core as mx  # type: ignore
-
-            detail_parts.append("MLX")
-            for attr in ("get_active_memory", "get_cache_memory"):
-                getter = getattr(mx, attr, None)
-                if callable(getter):
-                    with contextlib.suppress(Exception):
-                        used_candidates.append(max(0, int(getter() or 0)))
-            getter = getattr(mx, "get_peak_memory", None)
-            if callable(getter):
-                with contextlib.suppress(Exception):
-                    total_candidates.append(max(0, int(getter() or 0)))
-        except Exception:
-            pass
     ram_snapshot = _system_ram_snapshot()
     unified_total = max(0, int(ram_snapshot.get("total_bytes") or 0))
     unified_memory = bool(apple_silicon)
@@ -3555,12 +3379,8 @@ def _local_llm_memory_kind(provider: str, bundle: Dict[str, Any]) -> str:
 
 def _local_llm_provider_label(provider: str) -> str:
     provider_token = _normalize_hydra_llm_provider(provider)
-    if provider_token == HYDRA_LLM_PROVIDER_HF_TRANSFORMERS:
-        return "Transformers"
     if provider_token == HYDRA_LLM_PROVIDER_LLAMA_CPP:
         return "llama.cpp"
-    if provider_token == HYDRA_LLM_PROVIDER_MLX_LM:
-        return "MLX LM"
     return "Local LLM"
 
 
@@ -3570,10 +3390,7 @@ def _local_llm_loaded_model_row(provider: str, cache_key: Tuple[Any, ...], bundl
     device = str((bundle or {}).get("device") or "").strip()
     memory_bytes = max(0, int((bundle or {}).get("memory_estimate_bytes") or 0))
     if memory_bytes <= 0:
-        if provider_token == HYDRA_LLM_PROVIDER_HF_TRANSFORMERS:
-            memory_bytes = _model_memory_footprint_bytes((bundle or {}).get("model"))
-        else:
-            memory_bytes = _safe_path_size_bytes((bundle or {}).get("model_path"))
+        memory_bytes = _safe_path_size_bytes((bundle or {}).get("model_path"))
     memory_kind = _local_llm_memory_kind(provider_token, bundle)
     return {
         "cache_key": _local_llm_cache_token(provider_token, cache_key),
@@ -3616,7 +3433,10 @@ def get_system_hardware_snapshot(
             if include_vram_probe
             else _empty_system_vram_snapshot()
         ),
-        "unified_memory": bool(_mlx_lm_is_apple_silicon()),
+        "unified_memory": bool(
+            platform.system().lower() == "darwin"
+            and platform.machine().lower() in {"arm64", "aarch64"}
+        ),
     }
 
 
@@ -3628,12 +3448,8 @@ def get_local_llm_loaded_models_snapshot(
 ) -> Dict[str, Any]:
     rows: List[Dict[str, Any]] = []
     cache_specs = (
-        (HYDRA_LLM_PROVIDER_HF_TRANSFORMERS, _HF_LLM_MODEL_CACHE, _HF_LLM_MODEL_CACHE_LOCK),
         (HYDRA_LLM_PROVIDER_LLAMA_CPP, _LLAMA_CPP_ENGINE_CACHE, _LLAMA_CPP_ENGINE_CACHE_LOCK),
         (HYDRA_LLM_PROVIDER_LLAMA_CPP, _LLAMA_CPP_MODEL_CACHE, _LLAMA_CPP_MODEL_CACHE_LOCK),
-        (HYDRA_LLM_PROVIDER_MLX_LM, _MLX_ENGINE_MODEL_CACHE, _MLX_ENGINE_MODEL_CACHE_LOCK),
-        (HYDRA_LLM_PROVIDER_MLX_LM, _MLX_LM_MODEL_CACHE, _MLX_LM_MODEL_CACHE_LOCK),
-        (HYDRA_LLM_PROVIDER_MLX_LM, _MLX_VLM_MODEL_CACHE, _MLX_VLM_MODEL_CACHE_LOCK),
     )
     for provider, cache, lock in cache_specs:
         with lock:
@@ -3704,14 +3520,6 @@ def _release_local_llm_runtime_memory() -> None:
                 pass
     except Exception:
         pass
-    try:
-        import mlx.core as mx  # type: ignore
-
-        clear_cache = getattr(mx, "clear_cache", None)
-        if callable(clear_cache):
-            clear_cache()
-    except Exception:
-        pass
 
 
 def unload_local_llm_models(
@@ -3730,12 +3538,8 @@ def unload_local_llm_models(
     removed: List[Dict[str, Any]] = []
     removed_bundles: List[Dict[str, Any]] = []
     cache_specs = (
-        (HYDRA_LLM_PROVIDER_HF_TRANSFORMERS, _HF_LLM_MODEL_CACHE, _HF_LLM_GENERATION_LOCKS, _HF_LLM_MODEL_CACHE_LOCK),
         (HYDRA_LLM_PROVIDER_LLAMA_CPP, _LLAMA_CPP_ENGINE_CACHE, _LLAMA_CPP_ENGINE_GENERATION_LOCKS, _LLAMA_CPP_ENGINE_CACHE_LOCK),
         (HYDRA_LLM_PROVIDER_LLAMA_CPP, _LLAMA_CPP_MODEL_CACHE, _LLAMA_CPP_GENERATION_LOCKS, _LLAMA_CPP_MODEL_CACHE_LOCK),
-        (HYDRA_LLM_PROVIDER_MLX_LM, _MLX_ENGINE_MODEL_CACHE, _MLX_ENGINE_GENERATION_LOCKS, _MLX_ENGINE_MODEL_CACHE_LOCK),
-        (HYDRA_LLM_PROVIDER_MLX_LM, _MLX_LM_MODEL_CACHE, _MLX_LM_GENERATION_LOCKS, _MLX_LM_MODEL_CACHE_LOCK),
-        (HYDRA_LLM_PROVIDER_MLX_LM, _MLX_VLM_MODEL_CACHE, _MLX_VLM_GENERATION_LOCKS, _MLX_VLM_MODEL_CACHE_LOCK),
     )
 
     for provider_token, cache, locks, lock in cache_specs:
@@ -3888,6 +3692,7 @@ def _llama_cpp_gemma4_vulkan_workarounds(model_identity: str, server_bin: str) -
 
 def get_llama_cpp_runtime_diagnostics() -> Dict[str, Any]:
     server_bin = _llama_cpp_native_server_bin()
+    configured_base_slot = _llama_cpp_slot_id("base")
     diagnostics: Dict[str, Any] = {
         "available": bool(server_bin),
         "runtime": "tater-llama-native",
@@ -3896,13 +3701,17 @@ def get_llama_cpp_runtime_diagnostics() -> Dict[str, Any]:
         "n_gpu_layers": _llama_cpp_n_gpu_layers(),
         "draft_n_gpu_layers": _llama_cpp_draft_n_gpu_layers(),
         "n_ctx": _llama_cpp_n_ctx(),
+        "n_ctx_total": _llama_cpp_n_ctx(),
+        "n_ctx_estimated_per_slot": max(1, _llama_cpp_n_ctx() // _llama_cpp_slot_count()),
         "vision_n_ctx": _llama_cpp_n_ctx(vision=True),
         "n_batch": _llama_cpp_n_batch(),
         "n_ubatch": _llama_cpp_n_ubatch(),
         "cache_reuse_tokens": _llama_cpp_cache_reuse_tokens(),
+        "cache_ram_mib": _llama_cpp_cache_ram_mib(),
+        "kv_unified": True,
         "ctx_checkpoints": _llama_cpp_context_checkpoints(mtp_enabled=_llama_cpp_mtp_enabled()),
         "slot_count": _llama_cpp_slot_count(),
-        "base_slot": _llama_cpp_slot_id("base"),
+        "base_slot": configured_base_slot if configured_base_slot >= 0 else 0,
         "vision_slot": _llama_cpp_slot_id("vision"),
         "flash_attn": _llama_cpp_flash_attn_enabled(),
         "offload_kqv": _llama_cpp_offload_kqv_enabled(),
@@ -4029,35 +3838,9 @@ def _llama_cpp_disable_thinking_enabled() -> bool:
     return _provider_disable_thinking_enabled("TATER_LLAMA_CPP_DISABLE_THINKING")
 
 
-def _hf_transformers_disable_thinking_enabled() -> bool:
-    return _provider_disable_thinking_enabled("TATER_HF_TRANSFORMERS_DISABLE_THINKING")
-
-
 def _llama_cpp_preferred_quants() -> List[str]:
     raw = str(os.getenv("TATER_LLAMA_CPP_PREFERRED_QUANTS") or "Q4_K_M,Q5_K_M,Q4_K_S,Q5_0,Q4_0,Q8_0").strip()
     return [item.strip().upper() for item in raw.split(",") if item.strip()]
-
-
-def _mlx_lm_is_apple_silicon() -> bool:
-    return platform.system().lower() == "darwin" and platform.machine().lower() in {"arm64", "aarch64"}
-
-
-def _mlx_lm_trust_remote_code() -> bool:
-    raw = _safe_redis_text_get(HYDRA_MLX_LM_TRUST_REMOTE_CODE_KEY)
-    if raw:
-        return _boolish(raw, default=DEFAULT_MLX_LM_TRUST_REMOTE_CODE)
-    return _boolish(os.getenv("TATER_MLX_LM_TRUST_REMOTE_CODE"), default=DEFAULT_MLX_LM_TRUST_REMOTE_CODE)
-
-
-def _mlx_lm_lazy_load() -> bool:
-    raw = _safe_redis_text_get(HYDRA_MLX_LM_LAZY_LOAD_KEY)
-    if raw:
-        return _boolish(raw, default=DEFAULT_MLX_LM_LAZY_LOAD)
-    return _boolish(os.getenv("TATER_MLX_LM_LAZY"), default=DEFAULT_MLX_LM_LAZY_LOAD)
-
-
-def _mlx_lm_disable_thinking_enabled() -> bool:
-    return _provider_disable_thinking_enabled("TATER_MLX_LM_DISABLE_THINKING")
 
 
 def _local_no_thinking_template_variants(enabled: bool = True) -> Tuple[Dict[str, Any], ...]:
@@ -4106,11 +3889,7 @@ def _llama_cpp_chat_template_field(model_id: Any) -> str:
 
 
 def _local_llm_chat_template_store_key(provider: Any) -> str:
-    provider_token = _normalize_hydra_llm_provider(provider)
-    if provider_token == HYDRA_LLM_PROVIDER_HF_TRANSFORMERS:
-        return HYDRA_HF_TRANSFORMERS_CHAT_TEMPLATE_OVERRIDES_KEY
-    if provider_token == HYDRA_LLM_PROVIDER_MLX_LM:
-        return HYDRA_MLX_LM_CHAT_TEMPLATE_OVERRIDES_KEY
+    _ = provider
     return HYDRA_LLAMA_CPP_CHAT_TEMPLATE_OVERRIDES_KEY
 
 
@@ -4211,835 +3990,6 @@ def _llama_cpp_chat_template_override_text(model_id: Any) -> str:
 def _llama_cpp_chat_template_cache_token(model_id: Any) -> str:
     template = _llama_cpp_chat_template_override_text(model_id)
     return hashlib.sha256(template.encode("utf-8", errors="ignore")).hexdigest() if template else ""
-
-
-def _mlx_lm_adapter_path() -> str:
-    return os.path.abspath(os.path.expanduser(str(os.getenv("TATER_MLX_LM_ADAPTER_PATH") or "").strip())) if str(os.getenv("TATER_MLX_LM_ADAPTER_PATH") or "").strip() else ""
-
-
-def _mlx_lm_revision() -> str:
-    return str(os.getenv("TATER_MLX_LM_REVISION") or "").strip()
-
-
-def _mlx_lm_hub_token() -> Optional[str]:
-    token = _text(os.getenv("TATER_MLX_LM_TOKEN") or os.getenv("TATER_HF_TRANSFORMERS_TOKEN")).strip()
-    if not token:
-        token = _huggingface_integration_token()
-    if not token:
-        token = _text(
-            os.getenv("HF_TOKEN")
-            or os.getenv("HUGGINGFACE_HUB_TOKEN")
-            or os.getenv("HUGGING_FACE_HUB_TOKEN")
-            or os.getenv("HUGGINGFACE_TOKEN")
-            or os.getenv("HF_HUB_TOKEN")
-            or os.getenv("HUGGINGFACE_API_TOKEN")
-        ).strip()
-    return token or None
-
-
-def _mlx_lm_max_kv_size() -> Optional[int]:
-    return _local_llm_context_tokens(
-        HYDRA_MLX_LM_CONTEXT_TOKENS_KEY,
-        ("TATER_MLX_LM_MAX_KV_SIZE",),
-        None,
-        minimum=128,
-    )
-
-
-def _mlx_lm_context_tokens_for_bundle(bundle: Any) -> int:
-    configured = _mlx_lm_max_kv_size()
-    if configured is not None:
-        return max(1, int(configured))
-
-    sources: List[Any] = []
-    if isinstance(bundle, dict):
-        config = bundle.get("config")
-        sources.append(config)
-        if isinstance(config, dict):
-            sources.extend((config.get("text_config"), config.get("llm_config")))
-        sources.extend((bundle.get("tokenizer"), bundle.get("processor")))
-
-    for source in sources:
-        if source is None:
-            continue
-        for key in (
-            "max_position_embeddings",
-            "max_sequence_length",
-            "max_seq_len",
-            "seq_length",
-            "context_length",
-            "model_max_length",
-        ):
-            value = source.get(key) if isinstance(source, dict) else getattr(source, key, None)
-            try:
-                parsed = int(value)
-            except Exception:
-                continue
-            if 256 <= parsed <= 1_048_576:
-                return parsed
-    return DEFAULT_MLX_LM_CONTEXT_TOKENS
-
-
-def _mlx_runtime_call(func: Callable[..., Any], args: Tuple[Any, ...], kwargs: Dict[str, Any]) -> Any:
-    previous = bool(getattr(_MLX_RUNTIME_LOCAL, "active", False))
-    _MLX_RUNTIME_LOCAL.active = True
-    try:
-        return func(*args, **kwargs)
-    finally:
-        _MLX_RUNTIME_LOCAL.active = previous
-
-
-def _run_mlx_runtime_sync(func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
-    if bool(getattr(_MLX_RUNTIME_LOCAL, "active", False)):
-        return func(*args, **kwargs)
-    future = _MLX_RUNTIME_EXECUTOR.submit(_mlx_runtime_call, func, tuple(args), dict(kwargs))
-    return future.result()
-
-
-async def _run_mlx_runtime_async(func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
-    loop = asyncio.get_running_loop()
-    call = functools.partial(_mlx_runtime_call, func, tuple(args), dict(kwargs))
-    return await loop.run_in_executor(_MLX_RUNTIME_EXECUTOR, call)
-
-
-def _mlx_engine_checkout_path() -> str:
-    raw = str(os.getenv("TATER_MLX_ENGINE_PATH") or "").strip()
-    if raw:
-        return os.path.abspath(os.path.expanduser(raw))
-    return str(runtime_dir() / "mlx-engine")
-
-
-def _mlx_engine_max_seq_nums() -> int:
-    try:
-        raw = int(float(os.getenv("TATER_MLX_ENGINE_MAX_SEQ_NUMS") or "1"))
-    except Exception:
-        raw = 1
-    return max(1, min(64, raw))
-
-
-def _mlx_engine_prefill_step_size_raw() -> str:
-    raw = _safe_redis_text_get(HYDRA_MLX_ENGINE_PREFILL_STEP_SIZE_KEY)
-    if not raw:
-        raw = str(os.getenv("TATER_MLX_ENGINE_PREFILL_STEP_SIZE") or "").strip()
-    return raw
-
-
-def _mlx_engine_parse_prefill_step_size(raw: Any) -> Optional[int]:
-    text = str(raw or "").strip()
-    if not text:
-        return None
-    try:
-        value = int(float(text))
-    except Exception:
-        return None
-    if value < 1:
-        return None
-    return max(1, min(MAX_MLX_ENGINE_PREFILL_STEP_SIZE, value))
-
-
-def _mlx_engine_auto_prefill_step_size() -> int:
-    if not _mlx_lm_is_apple_silicon():
-        return DEFAULT_MLX_ENGINE_PREFILL_STEP_SIZE
-    try:
-        total_bytes = max(0, int(_system_ram_snapshot().get("total_bytes") or 0))
-    except Exception:
-        total_bytes = 0
-    total_gib = total_bytes / float(1024**3) if total_bytes > 0 else 0.0
-    if total_gib >= 64:
-        return FAST_MLX_ENGINE_PREFILL_STEP_SIZE
-    if total_gib >= 32:
-        return MEDIUM_MLX_ENGINE_PREFILL_STEP_SIZE
-    return DEFAULT_MLX_ENGINE_PREFILL_STEP_SIZE
-
-
-def _mlx_engine_resolve_prefill_step_size() -> Tuple[Optional[int], str]:
-    raw = _mlx_engine_prefill_step_size_raw()
-    token = raw.strip().lower()
-    if token in {"runtime", "engine", "mlx-default"}:
-        return None, "runtime_default"
-    manual = _mlx_engine_parse_prefill_step_size(raw)
-    if manual is not None:
-        return manual, "manual"
-    return _mlx_engine_auto_prefill_step_size(), "auto"
-
-
-def _mlx_engine_prefill_step_size() -> Optional[int]:
-    return _mlx_engine_resolve_prefill_step_size()[0]
-
-
-def _mlx_engine_optional_int_setting(
-    redis_key: str,
-    env_name: str,
-    *,
-    minimum: int = 0,
-    maximum: int = 1_048_576,
-    allow_zero: bool = False,
-    allowed: Optional[Tuple[int, ...]] = None,
-) -> Optional[int]:
-    raw = _safe_redis_text_get(redis_key)
-    if not raw:
-        raw = str(os.getenv(env_name) or "").strip()
-    if not raw:
-        return None
-    try:
-        value = int(float(raw))
-    except Exception:
-        return None
-    if value < 0 or (value == 0 and not allow_zero):
-        return None
-    if allowed is not None and value not in set(int(item) for item in allowed):
-        return None
-    return max(int(minimum), min(int(maximum), int(value)))
-
-
-def _mlx_engine_optional_int_env(name: str) -> Optional[int]:
-    raw = str(os.getenv(name) or "").strip()
-    if not raw:
-        return None
-    try:
-        return int(float(raw))
-    except Exception:
-        return None
-
-
-def _mlx_engine_max_image_size() -> Optional[Tuple[int, int]]:
-    value = _mlx_engine_optional_int_env("TATER_MLX_ENGINE_MAX_IMAGE_SIZE")
-    if value is None or value <= 0:
-        return None
-    side = max(64, min(4096, int(value)))
-    return (side, side)
-
-
-def _mlx_engine_prepare_import_path() -> str:
-    checkout = _mlx_engine_checkout_path()
-    package_dir = os.path.join(checkout, "mlx_engine")
-    if os.path.isdir(package_dir) and checkout not in sys.path:
-        sys.path.insert(0, checkout)
-    return checkout
-
-
-def _mlx_engine_patch_gemma4_blockwise_overlay() -> None:
-    try:
-        from mlx_vlm.models.gemma4 import language as gemma4_language  # type: ignore
-    except Exception:
-        return
-
-    model_cls = getattr(gemma4_language, "Gemma4TextModel", None)
-    if model_cls is None:
-        return
-    current = getattr(model_cls, "_apply_blockwise_bidirectional_overlay", None)
-    if getattr(current, "_tater_mlx_gemma4_overlay_compat", False):
-        return
-    mx_module = getattr(gemma4_language, "mx", None)
-    if mx_module is None or not callable(current):
-        return
-
-    original = current
-
-    def _apply_blockwise_bidirectional_overlay_compat(self: Any, base_mask: Any, mm_token_type_ids: Any) -> Any:
-        if mm_token_type_ids is None:
-            return base_mask
-        try:
-            key_len = int(base_mask.shape[-1])
-            query_len = int(base_mask.shape[-2])
-            token_len = int(mm_token_type_ids.shape[1])
-        except Exception:
-            return original(self, base_mask, mm_token_type_ids)
-        if token_len != key_len or query_len <= 0:
-            return base_mask
-
-        try:
-            block_sequence_ids = self._block_sequence_ids_for_mask(mm_token_type_ids)
-            if query_len < token_len:
-                start = token_len - query_len
-                query_blocks = block_sequence_ids[:, start : start + query_len]
-            else:
-                query_blocks = block_sequence_ids
-            q_blocks = mx_module.expand_dims(query_blocks, -1)
-            k_blocks = mx_module.expand_dims(block_sequence_ids, -2)
-            same_block = (q_blocks != -1) & (q_blocks == k_blocks)
-            return base_mask | mx_module.expand_dims(same_block, 1)
-        except Exception:
-            return original(self, base_mask, mm_token_type_ids)
-
-    setattr(_apply_blockwise_bidirectional_overlay_compat, "_tater_mlx_gemma4_overlay_compat", True)
-    setattr(model_cls, "_apply_blockwise_bidirectional_overlay", _apply_blockwise_bidirectional_overlay_compat)
-
-
-def _mlx_engine_patch_batched_vision_loader() -> None:
-    try:
-        from mlx_engine.model_kit.batched_vision import model_kit as batched_vision_model_kit  # type: ignore
-    except Exception:
-        return
-
-    kit_cls = getattr(batched_vision_model_kit, "BatchedVisionModelKit", None)
-    if kit_cls is None:
-        return
-    current = getattr(kit_cls, "_load_model", None)
-    if getattr(current, "_tater_mlx_vlm_load_compat", False):
-        return
-
-    mlx_vlm_module = getattr(batched_vision_model_kit, "mlx_vlm", None)
-    mx_module = getattr(batched_vision_model_kit, "mx", None)
-    if mlx_vlm_module is None or mx_module is None:
-        return
-
-    def _load_model_compat(self: Any) -> None:
-        loaded = mlx_vlm_module.utils.load_model(
-            self._model_path,
-            lazy=False,
-            trust_remote_code=self._trust_remote_code,
-        )
-        if isinstance(loaded, (tuple, list)):
-            if not loaded:
-                raise RuntimeError("mlx-vlm returned no model object.")
-            self.model = loaded[0]
-        else:
-            self.model = loaded
-        mx_module.synchronize()
-        mx_module.clear_cache()
-
-    setattr(_load_model_compat, "_tater_mlx_vlm_load_compat", True)
-    setattr(kit_cls, "_load_model", _load_model_compat)
-
-
-def _mlx_vlm_token_from_id(tokenizer: Any, token_id: Any, fallback: str) -> str:
-    if token_id is None:
-        return fallback
-    convert = getattr(tokenizer, "convert_ids_to_tokens", None)
-    if callable(convert):
-        try:
-            token = convert(int(token_id))
-            if isinstance(token, str) and token:
-                return token
-        except Exception:
-            pass
-    decode = getattr(tokenizer, "decode", None)
-    if callable(decode):
-        try:
-            token = decode([int(token_id)])
-            if isinstance(token, str) and token:
-                return token
-        except Exception:
-            pass
-    return fallback
-
-
-def _mlx_vlm_first_token_id(value: Any) -> Optional[int]:
-    if isinstance(value, (list, tuple)):
-        for item in value:
-            parsed = _mlx_vlm_first_token_id(item)
-            if parsed is not None:
-                return parsed
-        return None
-    try:
-        return int(value)
-    except Exception:
-        return None
-
-
-def _mlx_vlm_config_token_id(config: Dict[str, Any], key: str) -> Optional[int]:
-    for source in (config, config.get("text_config", {}), config.get("vision_config", {})):
-        if isinstance(source, dict) and key in source:
-            parsed = _mlx_vlm_first_token_id(source.get(key))
-            if parsed is not None:
-                return parsed
-    return None
-
-
-def _mlx_vlm_set_missing_attr(target: Any, name: str, value: Any) -> None:
-    if target is None or value is None:
-        return
-    try:
-        current = getattr(target, name, None)
-        if current in (None, ""):
-            setattr(target, name, value)
-    except Exception:
-        pass
-
-
-def _mlx_vlm_normalize_special_tokens(target: Any, config: Dict[str, Any], token_source: Any) -> None:
-    if target is None:
-        return
-    eos_token_id = _mlx_vlm_config_token_id(config, "eos_token_id")
-    bos_token_id = _mlx_vlm_config_token_id(config, "bos_token_id")
-    pad_token_id = _mlx_vlm_config_token_id(config, "pad_token_id")
-    if pad_token_id is None:
-        pad_token_id = eos_token_id
-
-    eos_token = _mlx_vlm_token_from_id(token_source, eos_token_id, "<eos>") if eos_token_id is not None else None
-    bos_token = _mlx_vlm_token_from_id(token_source, bos_token_id, "<bos>") if bos_token_id is not None else None
-    pad_token = _mlx_vlm_token_from_id(token_source, pad_token_id, eos_token or "<pad>") if pad_token_id is not None else None
-
-    _mlx_vlm_set_missing_attr(target, "eos_token_id", eos_token_id)
-    _mlx_vlm_set_missing_attr(target, "bos_token_id", bos_token_id)
-    _mlx_vlm_set_missing_attr(target, "pad_token_id", pad_token_id)
-    _mlx_vlm_set_missing_attr(target, "eos_token", eos_token)
-    _mlx_vlm_set_missing_attr(target, "bos_token", bos_token)
-    _mlx_vlm_set_missing_attr(target, "pad_token", pad_token)
-
-
-def _mlx_vlm_normalize_vision_tokens(processor: Any, tokenizer: Any, config: Any) -> None:
-    if not isinstance(config, dict) or "vision_config" not in config:
-        return
-    nested_tokenizer = getattr(processor, "tokenizer", None)
-    token_source = nested_tokenizer or tokenizer or processor
-
-    image_token_id = config.get("image_token_id") or config.get("vision_config", {}).get("image_token_id")
-    boi_token_id = config.get("boi_token_id") or config.get("vision_config", {}).get("boi_token_id")
-    eoi_token_id = config.get("eoi_token_id") or config.get("vision_config", {}).get("eoi_token_id")
-    image_token = _mlx_vlm_token_from_id(token_source, image_token_id, "<|image|>")
-    boi_token = _mlx_vlm_token_from_id(token_source, boi_token_id, "<|image>")
-    eoi_token = _mlx_vlm_token_from_id(token_source, eoi_token_id, "<image|>")
-
-    targets = [processor, tokenizer, nested_tokenizer]
-    seen: set[int] = set()
-    for target in targets:
-        if target is None:
-            continue
-        ident = id(target)
-        if ident in seen:
-            continue
-        seen.add(ident)
-        _mlx_vlm_set_missing_attr(target, "image_token_id", image_token_id)
-        _mlx_vlm_set_missing_attr(target, "boi_token_id", boi_token_id)
-        _mlx_vlm_set_missing_attr(target, "eoi_token_id", eoi_token_id)
-        _mlx_vlm_set_missing_attr(target, "image_token", image_token)
-        _mlx_vlm_set_missing_attr(target, "boi_token", boi_token)
-        _mlx_vlm_set_missing_attr(target, "eoi_token", eoi_token)
-        _mlx_vlm_normalize_special_tokens(target, config, token_source)
-
-    image_seq_length = (
-        config.get("image_seq_length")
-        or config.get("vision_soft_tokens_per_image")
-        or config.get("vision_config", {}).get("image_seq_length")
-        or config.get("vision_config", {}).get("max_soft_tokens")
-        or getattr(processor, "image_seq_length", None)
-    )
-    try:
-        image_seq_length_int = int(image_seq_length)
-    except Exception:
-        image_seq_length_int = 0
-    if processor is not None and image_seq_length_int > 0 and image_token:
-        try:
-            processor.image_seq_length = image_seq_length_int
-            processor.full_image_sequence = f"{boi_token}{image_token * image_seq_length_int}{eoi_token}"
-        except Exception:
-            pass
-
-
-def _mlx_engine_normalize_bundle_vision_tokens(bundle: Dict[str, Any]) -> None:
-    config = bundle.get("config")
-    if not isinstance(config, dict) or "vision_config" not in config:
-        return
-    model_kit = bundle.get("model_kit")
-    _mlx_vlm_normalize_vision_tokens(
-        getattr(model_kit, "processor", None),
-        getattr(model_kit, "tokenizer", None),
-        config,
-    )
-    _mlx_vlm_normalize_vision_tokens(
-        bundle.get("processor"),
-        bundle.get("tokenizer"),
-        config,
-    )
-
-
-def _mlx_engine_import_helpers() -> Dict[str, Any]:
-    checkout = _mlx_engine_prepare_import_path()
-    try:
-        from mlx_engine.generate import create_generator, load_model, tokenize  # type: ignore
-        _mlx_engine_patch_gemma4_blockwise_overlay()
-        _mlx_engine_patch_batched_vision_loader()
-    except Exception as exc:
-        repair = (
-            "Restart Tater to let the macOS app repair its private runtime. "
-            "Source installs should rerun setup_tater.sh."
-        )
-        detail = f"{type(exc).__name__}: {exc}"
-        hint = f"MLX engine could not start ({detail}). {repair}"
-        if checkout and not os.path.isdir(os.path.join(checkout, "mlx_engine")):
-            hint = f"MLX engine checkout was not found at {checkout}. {hint}"
-        elif isinstance(exc, ModuleNotFoundError) and exc.name:
-            hint = f"MLX engine is missing Python dependency '{exc.name}'. {repair}"
-        raise RuntimeError(hint) from exc
-    return {
-        "load_model": load_model,
-        "create_generator": create_generator,
-        "tokenize": tokenize,
-    }
-
-
-def _mlx_engine_config_json(model_path: str) -> Dict[str, Any]:
-    try:
-        path = Path(str(model_path or "")) / "config.json"
-        data = json.loads(path.read_text())
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
-
-
-def _mlx_engine_cache_key(model_id: str) -> Tuple[Any, ...]:
-    return (
-        str(model_id or "").strip(),
-        _mlx_lm_trust_remote_code(),
-        _mlx_lm_max_kv_size() or 0,
-        _mlx_engine_max_seq_nums(),
-        _mlx_engine_prefill_step_size() or 0,
-        _mlx_engine_optional_int_setting(
-            HYDRA_MLX_ENGINE_KV_BITS_KEY,
-            "TATER_MLX_ENGINE_KV_BITS",
-            minimum=2,
-            maximum=8,
-            allowed=(2, 3, 4, 6, 8),
-        )
-        or 0,
-        _mlx_engine_optional_int_setting(
-            HYDRA_MLX_ENGINE_KV_GROUP_SIZE_KEY,
-            "TATER_MLX_ENGINE_KV_GROUP_SIZE",
-            minimum=32,
-            maximum=128,
-            allowed=(32, 64, 128),
-        )
-        or 0,
-        _mlx_engine_optional_int_setting(
-            HYDRA_MLX_ENGINE_QUANTIZED_KV_START_KEY,
-            "TATER_MLX_ENGINE_QUANTIZED_KV_START",
-            minimum=0,
-            maximum=1_048_576,
-            allow_zero=True,
-        )
-        or 0,
-    )
-
-
-def _mlx_engine_bundle_backend_exception(bundle: Any) -> Optional[Exception]:
-    if not isinstance(bundle, dict):
-        return None
-    model_kit = bundle.get("model_kit")
-    backend_exception = getattr(model_kit, "_backend_exception", None)
-    return backend_exception if isinstance(backend_exception, Exception) else None
-
-
-def _mlx_engine_bundle_is_poisoned(bundle: Any) -> bool:
-    if _mlx_engine_bundle_backend_exception(bundle) is not None:
-        return True
-    model_kit = bundle.get("model_kit") if isinstance(bundle, dict) else None
-    is_shutdown = getattr(model_kit, "is_shutdown", None)
-    if callable(is_shutdown):
-        try:
-            return bool(is_shutdown())
-        except Exception:
-            return False
-    return False
-
-
-def _mlx_engine_shutdown_bundle(bundle: Any) -> None:
-    if not isinstance(bundle, dict):
-        return
-    shutdown = getattr(bundle.get("model_kit"), "shutdown", None)
-    if callable(shutdown):
-        try:
-            shutdown()
-        except Exception:
-            logger.debug("[mlx-engine] Failed to shut down poisoned model kit.", exc_info=True)
-
-
-def _mlx_engine_evict_bundle(bundle: Any, *, reason: str) -> None:
-    if not isinstance(bundle, dict):
-        return
-    cache_key = bundle.get("cache_key")
-    with _MLX_ENGINE_MODEL_CACHE_LOCK:
-        if cache_key is not None and _MLX_ENGINE_MODEL_CACHE.get(cache_key) is bundle:
-            _MLX_ENGINE_MODEL_CACHE.pop(cache_key, None)
-            _MLX_ENGINE_GENERATION_LOCKS.pop(cache_key, None)
-    _mlx_engine_shutdown_bundle(bundle)
-    logger.warning("[mlx-engine] Evicted cached model after backend failure: %s", reason)
-
-
-def _mlx_engine_generation_exception_is_fatal(bundle: Dict[str, Any], exc: Exception) -> bool:
-    if _mlx_engine_bundle_backend_exception(bundle) is not None:
-        return True
-    detail = str(exc or "")
-    return "Encountered fatal exception in the backend generation thread" in detail
-
-
-def _load_mlx_engine_bundle(
-    model_id: str,
-    *,
-    progress_callback: Optional[HFProgressCallback] = None,
-) -> Dict[str, Any]:
-    model_token = str(model_id or "").strip()
-    if not model_token:
-        raise RuntimeError("MLX model id or local path is required.")
-    if not _mlx_lm_is_apple_silicon():
-        raise RuntimeError("MLX engine runs on Apple Silicon Macs only.")
-    if _mlx_lm_adapter_path():
-        raise RuntimeError("MLX engine adapter loading is not wired in Tater yet.")
-
-    cache_key = _mlx_engine_cache_key(model_token)
-    with _MLX_ENGINE_MODEL_CACHE_LOCK:
-        cached = _MLX_ENGINE_MODEL_CACHE.get(cache_key)
-        if isinstance(cached, dict):
-            if _mlx_engine_bundle_is_poisoned(cached):
-                _mlx_engine_evict_bundle(cached, reason="cached model kit has a backend exception")
-            else:
-                _mlx_engine_normalize_bundle_vision_tokens(cached)
-                _emit_hf_llm_progress(
-                    progress_callback,
-                    {
-                        "event": "complete",
-                        "stage": "load",
-                        "description": "MLX engine model is already loaded",
-                        "progress": 100.0,
-                        "device": "apple_silicon",
-                    },
-                )
-                return cached
-
-        helpers = _mlx_engine_import_helpers()
-        model_path = _download_mlx_lm_model(model_token, progress_callback=progress_callback)
-        config = _mlx_engine_config_json(model_path)
-        _emit_hf_llm_progress(
-            progress_callback,
-            {
-                "event": "start",
-                "stage": "load",
-                "description": "Loading MLX engine model into memory",
-                "progress": 0.0,
-            },
-        )
-
-        load_kwargs: Dict[str, Any] = {
-            "trust_remote_code": _mlx_lm_trust_remote_code(),
-            "max_seq_nums": _mlx_engine_max_seq_nums(),
-        }
-        max_kv_size = _mlx_lm_max_kv_size()
-        if max_kv_size is not None:
-            load_kwargs["max_kv_size"] = max(128, int(max_kv_size))
-        prefill_step_size, prefill_step_size_source = _mlx_engine_resolve_prefill_step_size()
-        if prefill_step_size is not None:
-            load_kwargs["prefill_step_size"] = prefill_step_size
-        if "vision_config" not in config:
-            for redis_key, env_name, arg_name, minimum, maximum, allow_zero, allowed in (
-                (HYDRA_MLX_ENGINE_KV_BITS_KEY, "TATER_MLX_ENGINE_KV_BITS", "kv_bits", 2, 8, False, (2, 3, 4, 6, 8)),
-                (HYDRA_MLX_ENGINE_KV_GROUP_SIZE_KEY, "TATER_MLX_ENGINE_KV_GROUP_SIZE", "kv_group_size", 32, 128, False, (32, 64, 128)),
-                (
-                    HYDRA_MLX_ENGINE_QUANTIZED_KV_START_KEY,
-                    "TATER_MLX_ENGINE_QUANTIZED_KV_START",
-                    "quantized_kv_start",
-                    0,
-                    1_048_576,
-                    True,
-                    None,
-                ),
-            ):
-                value = _mlx_engine_optional_int_setting(
-                    redis_key,
-                    env_name,
-                    minimum=minimum,
-                    maximum=maximum,
-                    allow_zero=allow_zero,
-                    allowed=allowed,
-                )
-                if value is not None:
-                    load_kwargs[arg_name] = value
-        elif any(
-            _mlx_engine_optional_int_setting(redis_key, env_name, minimum=minimum, maximum=maximum, allow_zero=allow_zero, allowed=allowed)
-            is not None
-            for redis_key, env_name, minimum, maximum, allow_zero, allowed in (
-                (HYDRA_MLX_ENGINE_KV_BITS_KEY, "TATER_MLX_ENGINE_KV_BITS", 2, 8, False, (2, 3, 4, 6, 8)),
-                (HYDRA_MLX_ENGINE_KV_GROUP_SIZE_KEY, "TATER_MLX_ENGINE_KV_GROUP_SIZE", 32, 128, False, (32, 64, 128)),
-                (HYDRA_MLX_ENGINE_QUANTIZED_KV_START_KEY, "TATER_MLX_ENGINE_QUANTIZED_KV_START", 0, 1_048_576, True, None),
-            )
-        ):
-            logger.info("[mlx-engine] KV cache quantization settings are ignored for vision-capable model %s.", model_token)
-
-        model_kit = helpers["load_model"](model_path, **load_kwargs)
-        _mlx_vlm_normalize_vision_tokens(
-            getattr(model_kit, "processor", None),
-            getattr(model_kit, "tokenizer", None),
-            config,
-        )
-        trust_kwargs: Dict[str, Any] = {}
-        if _mlx_lm_trust_remote_code():
-            trust_kwargs["trust_remote_code"] = True
-
-        tokenizer = getattr(model_kit, "tokenizer", None)
-        processor = getattr(model_kit, "processor", None) if "vision_config" in config else None
-        try:
-            from transformers import AutoProcessor, AutoTokenizer  # type: ignore
-
-            try:
-                tokenizer = AutoTokenizer.from_pretrained(model_path, **trust_kwargs)
-            except Exception:
-                pass
-            if "vision_config" in config:
-                try:
-                    processor = AutoProcessor.from_pretrained(model_path, **trust_kwargs)
-                except Exception:
-                    pass
-        except Exception:
-            pass
-        if processor is None:
-            processor = tokenizer
-        _mlx_vlm_normalize_vision_tokens(processor, tokenizer, config)
-
-        chat_template_override, chat_template_handler, chat_template_warning = _install_local_llm_chat_template_override(
-            HYDRA_LLM_PROVIDER_MLX_LM,
-            model_token,
-            tokenizer=tokenizer,
-            processor=processor,
-            config=config,
-            model=model_kit,
-        )
-        if chat_template_warning:
-            logger.warning("[mlx-engine] %s", chat_template_warning)
-
-        generation_lock = _MLX_ENGINE_GENERATION_LOCKS.get(cache_key)
-        if generation_lock is None:
-            generation_lock = threading.RLock()
-            _MLX_ENGINE_GENERATION_LOCKS[cache_key] = generation_lock
-
-        bundle = {
-            "runtime": "mlx-engine",
-            "cache_key": cache_key,
-            "model_kit": model_kit,
-            "tokenizer": tokenizer,
-            "processor": processor,
-            "config": config,
-            "lock": generation_lock,
-            "model_path": model_path,
-            "model_root": _mlx_lm_model_root(),
-            "device": "apple_silicon",
-            "memory_estimate_bytes": _safe_path_size_bytes(model_path),
-            "loaded_ts": time.time(),
-            "chat_template_override": bool(chat_template_override),
-            "chat_template_handler": chat_template_handler,
-            "chat_template_warning": chat_template_warning,
-            "trust_remote_code": _mlx_lm_trust_remote_code(),
-            "max_kv_size": max_kv_size,
-            "prefill_step_size": prefill_step_size,
-            "prefill_step_size_source": prefill_step_size_source,
-            "kv_bits": load_kwargs.get("kv_bits"),
-            "kv_group_size": load_kwargs.get("kv_group_size"),
-            "quantized_kv_start": load_kwargs.get("quantized_kv_start"),
-            "supports_vision": bool("vision_config" in config),
-            "vision_chat_handler": "mlx-engine" if "vision_config" in config else "",
-            "create_generator": helpers["create_generator"],
-            "tokenize": helpers["tokenize"],
-        }
-        _mlx_engine_normalize_bundle_vision_tokens(bundle)
-        _MLX_ENGINE_MODEL_CACHE[cache_key] = bundle
-        _emit_hf_llm_progress(
-            progress_callback,
-            {
-                "event": "complete",
-                "stage": "load",
-                "description": "MLX engine model loaded",
-                "progress": 100.0,
-                "device": "apple_silicon",
-            },
-        )
-        return bundle
-
-
-def _mlx_engine_tokenize_prompt(bundle: Dict[str, Any], prompt: str) -> List[int]:
-    tokenize = bundle.get("tokenize")
-    model_kit = bundle.get("model_kit")
-    if callable(tokenize) and model_kit is not None:
-        tokens = tokenize(model_kit, prompt)
-        return list(tokens or [])
-    tokenizer = bundle.get("tokenizer") or bundle.get("processor")
-    encode = getattr(tokenizer, "encode", None)
-    if callable(encode):
-        tokens = encode(prompt)
-        return list(tokens or [])
-    return []
-
-
-def _mlx_engine_stop_strings(stop: Any) -> List[str]:
-    if not stop:
-        return []
-    items = stop if isinstance(stop, list) else [stop]
-    return [str(item) for item in items if str(item or "")]
-
-
-def _mlx_engine_run_generation(
-    bundle: Dict[str, Any],
-    prompt: str,
-    *,
-    max_tokens: int,
-    temp: float,
-    stop: Any = None,
-    images_b64: Optional[List[str]] = None,
-    max_image_size: Optional[Tuple[int, int]] = None,
-    extra_kwargs: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
-    create_generator = bundle.get("create_generator")
-    model_kit = bundle.get("model_kit")
-    generation_lock = bundle.get("lock")
-    if not callable(create_generator) or model_kit is None:
-        raise RuntimeError("MLX engine runtime is missing generation helpers.")
-
-    prompt_tokens = _mlx_engine_tokenize_prompt(bundle, prompt)
-    generation_kwargs: Dict[str, Any] = {
-        "max_tokens": max(1, int(max_tokens or 1)),
-        "temp": max(0.0, float(temp)),
-        "request_id": f"tater-{uuid.uuid4().hex}",
-    }
-    stop_strings = _mlx_engine_stop_strings(stop)
-    if stop_strings:
-        generation_kwargs["stop_strings"] = stop_strings
-    if images_b64:
-        generation_kwargs["images_b64"] = [str(item) for item in images_b64 if str(item or "")]
-    if max_image_size is not None:
-        generation_kwargs["max_image_size"] = max_image_size
-    for key in (
-        "top_p",
-        "top_k",
-        "min_p",
-        "min_tokens_to_keep",
-        "seed",
-        "json_schema",
-        "repetition_penalty",
-        "repetition_context_size",
-        "num_draft_tokens",
-    ):
-        if extra_kwargs and key in extra_kwargs and extra_kwargs.get(key) is not None:
-            generation_kwargs[key] = extra_kwargs[key]
-
-    content = ""
-    completion_tokens = 0
-    generation_started = time.perf_counter()
-    lock = generation_lock if hasattr(generation_lock, "__enter__") else threading.RLock()
-    try:
-        with lock:
-            for generation_result in create_generator(model_kit, prompt_tokens, **generation_kwargs):
-                text_part = _coerce_content_to_text(getattr(generation_result, "text", ""))
-                content += text_part
-                tokens = getattr(generation_result, "tokens", None)
-                try:
-                    completion_tokens += len(tokens or [])
-                except Exception:
-                    pass
-                if getattr(generation_result, "stop_condition", None) is not None:
-                    break
-    except Exception as exc:
-        if _mlx_engine_generation_exception_is_fatal(bundle, exc):
-            reason = (str(exc or type(exc).__name__) or type(exc).__name__).replace("\n", " ")[:240]
-            _mlx_engine_evict_bundle(bundle, reason=reason)
-        raise
-    generation_elapsed = max(0.0, time.perf_counter() - generation_started)
-    content = _strip_local_thinking_blocks(_apply_local_stop_sequences(content, stop)).strip()
-    if completion_tokens <= 0:
-        completion_tokens = len(_mlx_engine_tokenize_prompt(bundle, content))
-    return {
-        "content": content,
-        "prompt_tokens": len(prompt_tokens),
-        "completion_tokens": max(0, int(completion_tokens)),
-        "elapsed": generation_elapsed,
-    }
 
 
 def _emit_hf_llm_progress(progress_callback: Optional[HFProgressCallback], payload: Dict[str, Any]) -> None:
@@ -5846,105 +4796,6 @@ def _make_hf_snapshot_tqdm_class(progress_callback: Optional[HFProgressCallback]
     return TaterHFSnapshotTqdm
 
 
-def _download_hf_llm_snapshot(
-    model_id: str,
-    *,
-    model_root: str,
-    progress_callback: Optional[HFProgressCallback] = None,
-) -> None:
-    _emit_hf_llm_progress(
-        progress_callback,
-        {
-            "event": "start",
-            "stage": "download",
-            "description": "Resolving model repository",
-            "progress": 0.0,
-        },
-    )
-    try:
-        from huggingface_hub import snapshot_download  # type: ignore
-    except Exception:
-        _emit_hf_llm_progress(
-            progress_callback,
-            {
-                "event": "skip",
-                "stage": "download",
-                "description": "huggingface_hub is unavailable; Transformers will download files while loading",
-                "progress": 0.0,
-            },
-        )
-        return
-
-    kwargs: Dict[str, Any] = {
-        "repo_id": str(model_id or "").strip(),
-        "cache_dir": model_root,
-        "max_workers": _hf_llm_snapshot_max_workers(),
-        "ignore_patterns": [
-            "*.gguf",
-            "*.onnx",
-            "*.tflite",
-            "*.h5",
-            "*.ot",
-            "*.msgpack",
-            "*.mlmodel",
-            "onnx/*",
-            "*/onnx/*",
-        ],
-    }
-    token = _hf_llm_hub_token()
-    if token:
-        kwargs["token"] = token
-    _ = snapshot_download
-    _snapshot_download_with_progress_worker(
-        kwargs=kwargs,
-        progress_callback=progress_callback,
-        description="Downloading model files",
-    )
-    _emit_hf_llm_progress(
-        progress_callback,
-        {
-            "event": "complete",
-            "stage": "download",
-            "description": "Model files are cached",
-            "progress": 100.0,
-        },
-    )
-
-
-def _hf_model_config_supports_vision(config: Any) -> bool:
-    if config is None:
-        return False
-    for attr in ("vision_config", "image_token_id", "mm_vision_tower", "vision_tower"):
-        try:
-            if getattr(config, attr, None) is not None:
-                return True
-        except Exception:
-            pass
-    try:
-        model_type = str(getattr(config, "model_type", "") or "").lower()
-        architectures = " ".join(str(item or "") for item in getattr(config, "architectures", []) or []).lower()
-    except Exception:
-        model_type = ""
-        architectures = ""
-    return any(token in f"{model_type} {architectures}" for token in ("vision", "vl", "vla", "image", "multimodal"))
-
-
-def _hf_processor_supports_vision(processor: Any) -> bool:
-    if processor is None:
-        return False
-    for attr in ("image_processor", "image_processor_class", "vision_processor"):
-        try:
-            if getattr(processor, attr, None) is not None:
-                return True
-        except Exception:
-            pass
-    try:
-        name = str(type(processor).__name__).lower()
-        return any(token in name for token in ("image", "vision", "vl", "multimodal"))
-    except Exception:
-        return False
-
-
 def _gguf_read_u32(handle) -> int:
     data = handle.read(4)
     if len(data) != 4:
@@ -6592,373 +5443,6 @@ def _download_llama_cpp_model(
     return str(path)
 
 
-def _download_mlx_lm_model(
-    model_id: str,
-    *,
-    progress_callback: Optional[HFProgressCallback] = None,
-) -> str:
-    raw = str(model_id or "").strip()
-    if not raw:
-        raise RuntimeError("MLX LM model id or local path is required.")
-
-    expanded = os.path.abspath(os.path.expanduser(raw))
-    if os.path.exists(expanded) or raw.startswith(("/", "./", "../", "~")):
-        if not os.path.exists(expanded):
-            raise RuntimeError(f"MLX LM local model path does not exist: {expanded}")
-        _emit_hf_llm_progress(
-            progress_callback,
-            {
-                "event": "complete",
-                "stage": "download",
-                "description": "Using local MLX model files",
-                "progress": 100.0,
-            },
-        )
-        return expanded
-    if raw.startswith("file://"):
-        path = os.path.abspath(os.path.expanduser(raw[len("file://") :]))
-        if not os.path.exists(path):
-            raise RuntimeError(f"MLX LM local model path does not exist: {path}")
-        _emit_hf_llm_progress(
-            progress_callback,
-            {
-                "event": "complete",
-                "stage": "download",
-                "description": "Using local MLX model files",
-                "progress": 100.0,
-            },
-        )
-        return path
-    if raw.startswith("hf://"):
-        raw = raw[len("hf://") :]
-
-    try:
-        from huggingface_hub import snapshot_download  # type: ignore
-    except Exception as exc:
-        raise RuntimeError("MLX LM auto-download needs huggingface_hub installed.") from exc
-
-    model_root = _mlx_lm_model_root()
-    os.makedirs(model_root, exist_ok=True)
-    _emit_hf_llm_progress(
-        progress_callback,
-        {
-            "event": "start",
-            "stage": "download",
-            "description": "Downloading MLX model files",
-            "progress": 0.0,
-        },
-    )
-    kwargs: Dict[str, Any] = {
-        "repo_id": raw,
-        "cache_dir": model_root,
-        "allow_patterns": [
-            "*.json",
-            "*.safetensors",
-            "*.py",
-            "tokenizer.model",
-            "*.tiktoken",
-            "tiktoken.model",
-            "*.txt",
-            "*.jsonl",
-            "*.jinja",
-        ],
-    }
-    revision = _mlx_lm_revision()
-    if revision:
-        kwargs["revision"] = revision
-    token = _mlx_lm_hub_token()
-    if token:
-        kwargs["token"] = token
-    _ = snapshot_download
-    path = _snapshot_download_with_progress_worker(
-        kwargs=kwargs,
-        progress_callback=progress_callback,
-        description="Downloading MLX model files",
-    )
-    _emit_hf_llm_progress(
-        progress_callback,
-        {
-            "event": "complete",
-            "stage": "download",
-            "description": "MLX model files are cached",
-            "progress": 100.0,
-        },
-    )
-    return str(path)
-
-
-def _load_hf_llm_bundle(
-    model_id: str,
-    *,
-    progress_callback: Optional[HFProgressCallback] = None,
-) -> Dict[str, Any]:
-    model_token = str(model_id or "").strip()
-    if not model_token:
-        raise RuntimeError("Hugging Face Transformers model id is required.")
-
-    cache_key = _hf_llm_cache_key(model_token)
-    with _HF_LLM_MODEL_CACHE_LOCK:
-        cached = _HF_LLM_MODEL_CACHE.get(cache_key)
-        if isinstance(cached, dict):
-            _emit_hf_llm_progress(
-                progress_callback,
-                {
-                    "event": "complete",
-                    "stage": "load",
-                    "description": "Model is already loaded",
-                    "progress": 100.0,
-                },
-            )
-            return cached
-
-        try:
-            import torch  # type: ignore
-            import transformers as transformers_module  # type: ignore
-        except Exception as exc:
-            raise RuntimeError(
-                "Hugging Face Transformers LLM backend needs torch and transformers installed."
-            ) from exc
-
-        AutoProcessor = getattr(transformers_module, "AutoProcessor", None)
-        AutoTokenizer = getattr(transformers_module, "AutoTokenizer", None)
-        if AutoTokenizer is None:
-            raise RuntimeError("Hugging Face Transformers LLM backend could not find AutoTokenizer.")
-
-        model_class_names = (
-            "AutoModelForImageTextToText",
-            "AutoModelForVision2Seq",
-            "AutoModelForCausalLM",
-            "AutoModelForSeq2SeqLM",
-        )
-        model_classes = [
-            (name, getattr(transformers_module, name, None))
-            for name in model_class_names
-            if getattr(transformers_module, name, None) is not None
-        ]
-        if not model_classes:
-            raise RuntimeError("Hugging Face Transformers LLM backend could not find a supported AutoModel class.")
-
-        model_root = _hf_llm_model_root()
-        os.makedirs(model_root, exist_ok=True)
-        device = _hf_llm_resolve_device(torch, cache_key[1])
-        torch_dtype = _hf_llm_torch_dtype(torch, cache_key[2], device)
-        trust_remote_code = bool(cache_key[3])
-        device_map = _hf_llm_device_map_pref(device)
-        attn_implementation = _hf_llm_attn_implementation()
-        hub_token = _hf_llm_hub_token()
-
-        _download_hf_llm_snapshot(
-            model_token,
-            model_root=model_root,
-            progress_callback=progress_callback,
-        )
-        model_path = _latest_hf_snapshot_path(model_root, model_token)
-        _emit_hf_llm_progress(
-            progress_callback,
-            {
-                "event": "start",
-                "stage": "load",
-                "description": "Loading tokenizer and model into memory",
-                "progress": 0.0,
-            },
-        )
-
-        load_kwargs: Dict[str, Any] = {
-            "cache_dir": model_root,
-            "trust_remote_code": trust_remote_code,
-        }
-        if hub_token:
-            load_kwargs["token"] = hub_token
-        if torch_dtype != "auto" or device != "cpu":
-            load_kwargs["torch_dtype"] = torch_dtype
-        else:
-            load_kwargs["torch_dtype"] = "auto"
-        if device_map:
-            load_kwargs["device_map"] = device_map
-        if attn_implementation:
-            load_kwargs["attn_implementation"] = attn_implementation
-
-        pretrained_kwargs: Dict[str, Any] = {
-            "cache_dir": model_root,
-            "trust_remote_code": trust_remote_code,
-        }
-        if hub_token:
-            pretrained_kwargs["token"] = hub_token
-
-        processor = None
-        tokenizer = None
-        tokenizer_error: Optional[Exception] = None
-        processor_error: Optional[Exception] = None
-        try:
-            tokenizer = AutoTokenizer.from_pretrained(model_token, **pretrained_kwargs)
-        except Exception as exc:
-            tokenizer_error = exc
-        if AutoProcessor is not None:
-            try:
-                processor = AutoProcessor.from_pretrained(model_token, **pretrained_kwargs)
-            except Exception as exc:
-                processor_error = exc
-                processor = None
-        if tokenizer is None and processor is not None:
-            tokenizer = getattr(processor, "tokenizer", None)
-        if tokenizer is None:
-            detail_exc = tokenizer_error or processor_error
-            detail = str(detail_exc) if detail_exc is not None else "unknown tokenizer error"
-            raise RuntimeError(f"Could not load tokenizer or processor for {model_token}: {detail}") from detail_exc
-
-        model = None
-        loaded_device_map = device_map
-        load_errors: List[str] = []
-        for class_name, model_class in model_classes:
-            try:
-                model = model_class.from_pretrained(model_token, **load_kwargs)
-                loaded_device_map = device_map
-                break
-            except TypeError as exc:
-                message = str(exc)
-                if "attn_implementation" in message and "attn_implementation" in load_kwargs:
-                    retry_kwargs = dict(load_kwargs)
-                    retry_kwargs.pop("attn_implementation", None)
-                    try:
-                        model = model_class.from_pretrained(model_token, **retry_kwargs)
-                        loaded_device_map = device_map
-                        break
-                    except Exception as retry_exc:
-                        load_errors.append(f"{class_name}: {str(retry_exc)}")
-                        continue
-                if "torch_dtype" not in message:
-                    load_errors.append(f"{class_name}: {message}")
-                    continue
-                retry_kwargs = dict(load_kwargs)
-                retry_kwargs["dtype"] = retry_kwargs.pop("torch_dtype")
-                try:
-                    model = model_class.from_pretrained(model_token, **retry_kwargs)
-                    loaded_device_map = device_map
-                    break
-                except Exception as retry_exc:
-                    load_errors.append(f"{class_name}: {str(retry_exc)}")
-            except Exception as exc:
-                message = str(exc)
-                if not device_map or ("accelerate" not in message.lower() and "device_map" not in message.lower()):
-                    load_errors.append(f"{class_name}: {message}")
-                    continue
-                retry_kwargs = dict(load_kwargs)
-                retry_kwargs.pop("device_map", None)
-                try:
-                    model = model_class.from_pretrained(model_token, **retry_kwargs)
-                    loaded_device_map = ""
-                    break
-                except Exception as retry_exc:
-                    load_errors.append(f"{class_name}: {str(retry_exc)}")
-        if model is None:
-            detail = "; ".join(error for error in load_errors if error) or "no compatible model class loaded"
-            raise RuntimeError(f"Could not load Hugging Face model {model_token}. {detail}")
-        device_map = loaded_device_map
-        if getattr(tokenizer, "pad_token_id", None) is None and getattr(tokenizer, "eos_token", None) is not None:
-            try:
-                tokenizer.pad_token = tokenizer.eos_token
-            except Exception:
-                pass
-        if not device_map:
-            try:
-                model.to(device)
-            except Exception:
-                device = "cpu"
-        else:
-            try:
-                first_param = next(model.parameters())
-                device = str(getattr(first_param, "device", None) or device)
-            except Exception:
-                device = str(getattr(model, "device", None) or device)
-        try:
-            model.eval()
-        except Exception:
-            pass
-        chat_template_override, chat_template_handler, chat_template_warning = _install_local_llm_chat_template_override(
-            HYDRA_LLM_PROVIDER_HF_TRANSFORMERS,
-            model_token,
-            tokenizer=tokenizer,
-            processor=processor,
-            model=model,
-        )
-        if chat_template_warning:
-            logger.warning("[transformers] %s", chat_template_warning)
-
-        generation_lock = _HF_LLM_GENERATION_LOCKS.get(cache_key)
-        if generation_lock is None:
-            generation_lock = threading.RLock()
-            _HF_LLM_GENERATION_LOCKS[cache_key] = generation_lock
-
-        bundle = {
-            "model": model,
-            "tokenizer": tokenizer,
-            "processor": processor,
-            "device": device,
-            "torch": torch,
-            "lock": generation_lock,
-            "model_path": str(model_path or ""),
-            "model_root": model_root,
-            "memory_estimate_bytes": _model_memory_footprint_bytes(model),
-            "loaded_ts": time.time(),
-            "chat_template_override": bool(chat_template_override),
-            "chat_template_handler": chat_template_handler,
-            "chat_template_warning": chat_template_warning,
-            "torch_dtype": str(torch_dtype),
-            "device_map": str(device_map or ""),
-            "attn_implementation": str(attn_implementation or ""),
-            "trust_remote_code": trust_remote_code,
-            "supports_vision": bool(_hf_processor_supports_vision(processor) or _hf_model_config_supports_vision(getattr(model, "config", None))),
-        }
-        _HF_LLM_MODEL_CACHE[cache_key] = bundle
-        _emit_hf_llm_progress(
-            progress_callback,
-            {
-                "event": "complete",
-                "stage": "load",
-                "description": "Model loaded",
-                "progress": 100.0,
-                "device": device,
-            },
-        )
-        return bundle
-
-
-def preload_hf_transformers_llm_model(
-    model_id: str,
-    *,
-    progress_callback: Optional[HFProgressCallback] = None,
-) -> Dict[str, Any]:
-    bundle = _load_hf_llm_bundle(model_id, progress_callback=progress_callback)
-    return {
-        "ok": True,
-        "model": str(model_id or "").strip(),
-        "device": str(bundle.get("device") or ""),
-        "model_root": str(bundle.get("model_root") or _hf_llm_model_root()),
-        "model_path": str(bundle.get("model_path") or ""),
-        "warning": str(bundle.get("chat_template_warning") or ""),
-        "supports_vision": bool(bundle.get("supports_vision")),
-    }
-
-
-def download_hf_transformers_llm_model(
-    model_id: str,
-    *,
-    progress_callback: Optional[HFProgressCallback] = None,
-) -> Dict[str, Any]:
-    model_token = str(model_id or "").strip()
-    if not model_token:
-        raise RuntimeError("Hugging Face Transformers model id is required.")
-    model_root = _hf_llm_model_root()
-    os.makedirs(model_root, exist_ok=True)
-    _download_hf_llm_snapshot(model_token, model_root=model_root, progress_callback=progress_callback)
-    return {
-        "ok": True,
-        "model": model_token,
-        "model_root": model_root,
-        "model_path": _latest_hf_snapshot_path(model_root, model_token),
-    }
-
-
 def _llama_cpp_cache_key(model_id: str, *, vision: bool = False) -> Tuple[Any, ...]:
     return (
         str(model_id or "").strip(),
@@ -6969,6 +5453,7 @@ def _llama_cpp_cache_key(model_id: str, *, vision: bool = False) -> Tuple[Any, .
         _llama_cpp_n_batch(vision=vision),
         _llama_cpp_n_ubatch(vision=vision),
         _llama_cpp_cache_reuse_tokens(),
+        _llama_cpp_cache_ram_mib(),
         _llama_cpp_context_checkpoints(mtp_enabled=_llama_cpp_mtp_enabled()),
         _llama_cpp_slot_count(),
         _llama_cpp_flash_attn_enabled(),
@@ -6995,6 +5480,7 @@ def _llama_cpp_engine_cache_key(model_id: str) -> Tuple[Any, ...]:
         _llama_cpp_n_ubatch(vision=False),
         _llama_cpp_n_ubatch(vision=True),
         _llama_cpp_cache_reuse_tokens(),
+        _llama_cpp_cache_ram_mib(),
         _llama_cpp_context_checkpoints(mtp_enabled=_llama_cpp_mtp_enabled()),
         _llama_cpp_slot_count(),
         _llama_cpp_flash_attn_enabled(),
@@ -7654,13 +6140,18 @@ def _llama_cpp_oai_chat_payload(
     model_token: str,
     messages: List[Dict[str, Any]],
     chat_kwargs: Dict[str, Any],
+    slot_id: Any = None,
 ) -> Dict[str, Any]:
     payload: Dict[str, Any] = {
         "model": str(model_token or "tater-llama").strip() or "tater-llama",
         "messages": messages,
         "stream": False,
         "tools": list(chat_kwargs.get("tools") or []),
+        "cache_prompt": True,
     }
+    normalized_slot = _llama_cpp_slot_id(value=slot_id) if slot_id is not None else DEFAULT_LLAMA_CPP_SLOT_ID
+    if normalized_slot >= 0:
+        payload["id_slot"] = int(normalized_slot)
     key_map = {
         "temperature": "temperature",
         "top_p": "top_p",
@@ -7936,9 +6427,13 @@ def _llama_cpp_public_bundle_metadata(bundle: Dict[str, Any]) -> Dict[str, Any]:
         "n_gpu_layers",
         "draft_n_gpu_layers",
         "n_ctx",
+        "n_ctx_total",
+        "n_ctx_estimated_per_slot",
         "n_batch",
         "n_ubatch",
         "cache_reuse_tokens",
+        "cache_ram_mib",
+        "kv_unified",
         "ctx_checkpoints",
         "configured_slot_count",
         "slot_count",
@@ -8093,13 +6588,14 @@ def _llama_cpp_native_server_command(
     mmproj_path: str,
     temp_dir: str,
 ) -> Tuple[List[str], Dict[str, Any]]:
-    n_ctx = max(_llama_cpp_n_ctx(vision=False), _llama_cpp_n_ctx(vision=True) if mmproj_path else 0)
+    n_ctx_pool = max(_llama_cpp_n_ctx(vision=False), _llama_cpp_n_ctx(vision=True) if mmproj_path else 0)
     # A unified text+vision server still spends nearly all Hydra time on text
     # prefill. Loading an mmproj must not silently replace the configured text
     # batch sizes with the conservative vision-only defaults.
     n_batch = _llama_cpp_n_batch(vision=False)
     n_ubatch = _llama_cpp_n_ubatch(vision=False)
     cache_reuse_tokens = _llama_cpp_cache_reuse_tokens()
+    cache_ram_mib = _llama_cpp_cache_ram_mib()
     n_gpu_layers = _llama_cpp_n_gpu_layers()
     draft_n_gpu_layers = _llama_cpp_draft_n_gpu_layers()
     configured_slot_count = _llama_cpp_slot_count()
@@ -8119,14 +6615,20 @@ def _llama_cpp_native_server_command(
         spec_type=speculative_method,
     )
     slot_count = 1 if mtp_single_slot_workaround else configured_slot_count
+    # --kv-unified makes --ctx-size one shared live KV pool. Keep the UI's
+    # context value as that total pool instead of multiplying it by the slot
+    # count. Four active heads can share it unevenly; the per-slot figure below
+    # is only an equal-load estimate, not a hard partition.
+    n_ctx_total = int(n_ctx_pool)
+    n_ctx_estimated_per_slot = max(1, int(n_ctx_total) // max(1, int(slot_count)))
     mtp_stall_timeout_seconds = _llama_cpp_mtp_stall_timeout_seconds(
         model_identity,
         mtp_enabled=mtp_requested,
         spec_type=speculative_method,
     )
     base_slot = _llama_cpp_slot_id("base")
-    if base_slot >= slot_count:
-        base_slot = DEFAULT_LLAMA_CPP_SLOT_ID
+    if base_slot < 0 or base_slot >= slot_count:
+        base_slot = 0
     vision_slot = _llama_cpp_slot_id("vision")
     if vision_slot >= slot_count:
         vision_slot = DEFAULT_LLAMA_CPP_SLOT_ID
@@ -8148,7 +6650,7 @@ def _llama_cpp_native_server_command(
         "--port",
         str(_llama_cpp_native_free_port()),
         "--ctx-size",
-        str(int(n_ctx)),
+        str(int(n_ctx_total)),
         "--batch-size",
         str(int(n_batch)),
         "--n-gpu-layers",
@@ -8170,8 +6672,19 @@ def _llama_cpp_native_server_command(
         json.dumps(_llama_cpp_native_chat_template_kwargs({}), separators=(",", ":")),
     ]
     cmd.append("--reasoning-preserve" if thinking_enabled else "--no-reasoning-preserve")
-    if slot_count > 1:
-        cmd.extend(["--parallel", str(int(slot_count))])
+    # Be explicit: current llama.cpp interprets an omitted --parallel as auto,
+    # which creates four slots. Unified KV lets the logical slots share the
+    # configured context pool dynamically while id_slot keeps role affinity.
+    cmd.extend(
+        [
+            "--parallel",
+            str(int(slot_count)),
+            "--kv-unified",
+            "--cache-ram",
+            str(int(cache_ram_mib)),
+        ]
+    )
+    cmd.append("--no-cache-idle-slots" if cache_ram_mib == 0 else "--cache-idle-slots")
     if gemma4_vulkan["no_warmup"]:
         cmd.append("--no-warmup")
     if gemma4_vulkan["load_mode"]:
@@ -8214,12 +6727,16 @@ def _llama_cpp_native_server_command(
         if mtp_draft_model_path:
             cmd.extend(["--model-draft", mtp_draft_model_path])
     metadata = {
-        "n_ctx": int(n_ctx),
+        "n_ctx": int(n_ctx_pool),
+        "n_ctx_total": int(n_ctx_total),
+        "n_ctx_estimated_per_slot": int(n_ctx_estimated_per_slot),
         "n_gpu_layers": int(n_gpu_layers),
         "draft_n_gpu_layers": int(draft_n_gpu_layers),
         "n_batch": int(n_batch),
         "n_ubatch": int(n_ubatch),
         "cache_reuse_tokens": int(cache_reuse_tokens),
+        "cache_ram_mib": int(cache_ram_mib),
+        "kv_unified": True,
         "ctx_checkpoints": int(ctx_checkpoints),
         "configured_slot_count": int(configured_slot_count),
         "slot_count": int(slot_count),
@@ -8425,6 +6942,19 @@ def _llama_cpp_native_worker_chat(
         label = "images" if requested_media_kind == "vision" else requested_media_kind
         raise RuntimeError(f"This llama.cpp model does not advertise support for {label} input.")
     base_url = str(state.get("base_url") or "").strip()
+    try:
+        effective_slot_count = max(1, int(metadata.get("slot_count") or 1))
+    except Exception:
+        effective_slot_count = 1
+    try:
+        requested_slot = int(slot_id) if slot_id is not None else DEFAULT_LLAMA_CPP_SLOT_ID
+    except Exception:
+        requested_slot = DEFAULT_LLAMA_CPP_SLOT_ID
+    effective_slot = (
+        requested_slot
+        if effective_slot_count > 1 and 0 <= requested_slot < effective_slot_count
+        else None
+    )
     if isinstance(chat_kwargs.get("tools"), list) and chat_kwargs.get("tools"):
         native_started = time.perf_counter()
         native_response = _llama_cpp_native_json_post(
@@ -8434,6 +6964,7 @@ def _llama_cpp_native_worker_chat(
                 model_token="tater-llama",
                 messages=messages,
                 chat_kwargs=chat_kwargs,
+                slot_id=effective_slot,
             ),
             timeout=max(30.0, timeout or 600.0),
         )
@@ -8460,19 +6991,6 @@ def _llama_cpp_native_worker_chat(
             "prompt_string": prompt,
             "multimodal_data": media,
         }
-    try:
-        effective_slot_count = max(1, int(metadata.get("slot_count") or 1))
-    except Exception:
-        effective_slot_count = 1
-    try:
-        requested_slot = int(slot_id) if slot_id is not None else DEFAULT_LLAMA_CPP_SLOT_ID
-    except Exception:
-        requested_slot = DEFAULT_LLAMA_CPP_SLOT_ID
-    effective_slot = (
-        requested_slot
-        if effective_slot_count > 1 and 0 <= requested_slot < effective_slot_count
-        else None
-    )
     completion_payload = _llama_cpp_native_completion_payload(
         completion_prompt,
         chat_kwargs,
@@ -9003,10 +7521,14 @@ def preload_llama_cpp_llm_model(
         "model_path": str(bundle.get("model_path") or ""),
         "gpu_backend": str(bundle.get("gpu_backend") or ""),
         "n_ctx": int(bundle.get("n_ctx") or 0),
+        "n_ctx_total": int(bundle.get("n_ctx_total") or bundle.get("n_ctx") or 0),
+        "n_ctx_estimated_per_slot": int(bundle.get("n_ctx_estimated_per_slot") or bundle.get("n_ctx") or 0),
         "n_gpu_layers": int(bundle.get("n_gpu_layers") or 0),
         "draft_n_gpu_layers": int(bundle.get("draft_n_gpu_layers") or 0),
         "n_batch": int(bundle.get("n_batch") or 0),
         "n_ubatch": int(bundle.get("n_ubatch") or 0),
+        "cache_ram_mib": int(bundle.get("cache_ram_mib") or 0),
+        "kv_unified": bool(bundle.get("kv_unified")),
         "ctx_checkpoints": int(bundle.get("ctx_checkpoints") or 0),
         "configured_slot_count": int(bundle.get("configured_slot_count") or bundle.get("slot_count") or 1),
         "slot_count": int(bundle.get("slot_count") or 1),
@@ -9068,397 +7590,6 @@ def download_llama_cpp_llm_model(
     }
 
 
-def _mlx_lm_cache_key(model_id: str) -> Tuple[str, str, bool, bool]:
-    return (
-        str(model_id or "").strip(),
-        _mlx_lm_adapter_path(),
-        _mlx_lm_trust_remote_code(),
-        _mlx_lm_lazy_load(),
-    )
-
-
-def _mlx_lm_loaded_bundle_for_model(model_id: str) -> Optional[Dict[str, Any]]:
-    model_token = str(model_id or "").strip()
-    if not model_token:
-        return None
-    cache_key = _mlx_lm_cache_key(model_token)
-    with _MLX_LM_MODEL_CACHE_LOCK:
-        cached = _MLX_LM_MODEL_CACHE.get(cache_key)
-        return cached if isinstance(cached, dict) else None
-
-
-def _load_mlx_lm_bundle(
-    model_id: str,
-    *,
-    progress_callback: Optional[HFProgressCallback] = None,
-) -> Dict[str, Any]:
-    model_token = str(model_id or "").strip()
-    if not model_token:
-        raise RuntimeError("MLX LM model id or local path is required.")
-    if not _mlx_lm_is_apple_silicon():
-        raise RuntimeError("MLX LM provider runs on Apple Silicon Macs only. Use llama.cpp GGUF on this device.")
-
-    cache_key = _mlx_lm_cache_key(model_token)
-    with _MLX_LM_MODEL_CACHE_LOCK:
-        cached = _MLX_LM_MODEL_CACHE.get(cache_key)
-        if isinstance(cached, dict):
-            _emit_hf_llm_progress(
-                progress_callback,
-                {
-                    "event": "complete",
-                    "stage": "load",
-                    "description": "MLX model is already loaded",
-                    "progress": 100.0,
-                    "device": "apple_silicon",
-                },
-            )
-            return cached
-
-        try:
-            from mlx_lm import generate as mlx_generate  # type: ignore
-            from mlx_lm import load as mlx_load  # type: ignore
-            from mlx_lm import stream_generate as mlx_stream_generate  # type: ignore
-            from mlx_lm.sample_utils import make_logits_processors, make_sampler  # type: ignore
-        except Exception as exc:
-            raise RuntimeError("MLX LM provider needs mlx-lm installed on an Apple Silicon Mac.") from exc
-
-        model_path = _download_mlx_lm_model(model_token, progress_callback=progress_callback)
-        _emit_hf_llm_progress(
-            progress_callback,
-            {
-                "event": "start",
-                "stage": "load",
-                "description": "Loading MLX model into memory",
-                "progress": 0.0,
-            },
-        )
-
-        tokenizer_config: Dict[str, Any] = {}
-        if cache_key[2]:
-            tokenizer_config["trust_remote_code"] = True
-        load_kwargs: Dict[str, Any] = {
-            "tokenizer_config": tokenizer_config,
-            "lazy": cache_key[3],
-            "return_config": True,
-        }
-        adapter_path = cache_key[1]
-        if adapter_path:
-            load_kwargs["adapter_path"] = adapter_path
-
-        try:
-            loaded = mlx_load(model_path, **load_kwargs)
-        except TypeError:
-            retry_kwargs = dict(load_kwargs)
-            retry_kwargs.pop("return_config", None)
-            loaded = mlx_load(model_path, **retry_kwargs)
-        if not isinstance(loaded, tuple) or len(loaded) < 2:
-            raise RuntimeError(f"Could not load MLX model {model_token}.")
-        model = loaded[0]
-        tokenizer = loaded[1]
-        config = loaded[2] if len(loaded) >= 3 and isinstance(loaded[2], dict) else {}
-        chat_template_override, chat_template_handler, chat_template_warning = _install_local_llm_chat_template_override(
-            HYDRA_LLM_PROVIDER_MLX_LM,
-            model_token,
-            tokenizer=tokenizer,
-            config=config,
-            model=model,
-        )
-        if chat_template_warning:
-            logger.warning("[mlx-lm] %s", chat_template_warning)
-
-        generation_lock = _MLX_LM_GENERATION_LOCKS.get(cache_key)
-        if generation_lock is None:
-            generation_lock = threading.RLock()
-            _MLX_LM_GENERATION_LOCKS[cache_key] = generation_lock
-
-        bundle = {
-            "model": model,
-            "tokenizer": tokenizer,
-            "config": config,
-            "lock": generation_lock,
-            "model_path": model_path,
-            "model_root": _mlx_lm_model_root(),
-            "device": "apple_silicon",
-            "memory_estimate_bytes": _safe_path_size_bytes(model_path),
-            "loaded_ts": time.time(),
-            "chat_template_override": bool(chat_template_override),
-            "chat_template_handler": chat_template_handler,
-            "chat_template_warning": chat_template_warning,
-            "trust_remote_code": bool(cache_key[2]),
-            "lazy_load": bool(cache_key[3]),
-            "supports_vision": False,
-            "vision_chat_handler": "",
-            "generate": mlx_generate,
-            "stream_generate": mlx_stream_generate,
-            "make_sampler": make_sampler,
-            "make_logits_processors": make_logits_processors,
-        }
-        _MLX_LM_MODEL_CACHE[cache_key] = bundle
-        _emit_hf_llm_progress(
-            progress_callback,
-            {
-                "event": "complete",
-                "stage": "load",
-                "description": "MLX model loaded",
-                "progress": 100.0,
-                "device": "apple_silicon",
-            },
-        )
-        return bundle
-
-
-def _preload_mlx_lm_llm_model_sync(
-    model_id: str,
-    *,
-    progress_callback: Optional[HFProgressCallback] = None,
-) -> Dict[str, Any]:
-    bundle = _load_mlx_engine_bundle(model_id, progress_callback=progress_callback)
-    return {
-        "ok": True,
-        "model": str(model_id or "").strip(),
-        "device": str(bundle.get("device") or "apple_silicon"),
-        "model_root": str(bundle.get("model_root") or _mlx_lm_model_root()),
-        "model_path": str(bundle.get("model_path") or ""),
-        "supports_vision": bool(bundle.get("supports_vision")),
-        "vision_chat_handler": str(bundle.get("vision_chat_handler") or ""),
-        "warning": str(bundle.get("chat_template_warning") or ""),
-        "runtime": "mlx-engine",
-    }
-
-
-def preload_mlx_lm_llm_model(
-    model_id: str,
-    *,
-    progress_callback: Optional[HFProgressCallback] = None,
-) -> Dict[str, Any]:
-    return _run_mlx_runtime_sync(
-        _preload_mlx_lm_llm_model_sync,
-        model_id,
-        progress_callback=progress_callback,
-    )
-
-
-def download_mlx_lm_llm_model(
-    model_id: str,
-    *,
-    progress_callback: Optional[HFProgressCallback] = None,
-) -> Dict[str, Any]:
-    model_token = str(model_id or "").strip()
-    if not model_token:
-        raise RuntimeError("MLX LM model id or local path is required.")
-    model_path = _download_mlx_lm_model(model_token, progress_callback=progress_callback)
-    return {
-        "ok": True,
-        "model": model_token,
-        "model_root": _mlx_lm_model_root(),
-        "model_path": model_path,
-        "supports_vision": False,
-        "vision_chat_handler": "",
-    }
-
-
-def _mlx_vlm_cache_key(model_id: str) -> Tuple[str, bool, bool]:
-    return (
-        str(model_id or "").strip(),
-        _mlx_lm_trust_remote_code(),
-        _mlx_lm_lazy_load(),
-    )
-
-
-def _load_mlx_vlm_bundle(
-    model_id: str,
-    *,
-    progress_callback: Optional[HFProgressCallback] = None,
-) -> Dict[str, Any]:
-    model_token = str(model_id or "").strip()
-    if not model_token:
-        raise RuntimeError("MLX VLM model id or local path is required.")
-    if not _mlx_lm_is_apple_silicon():
-        raise RuntimeError("MLX vision runs on Apple Silicon Macs only. Use Transformers or llama.cpp on this device.")
-
-    cache_key = _mlx_vlm_cache_key(model_token)
-    with _MLX_VLM_MODEL_CACHE_LOCK:
-        cached = _MLX_VLM_MODEL_CACHE.get(cache_key)
-        if isinstance(cached, dict):
-            _emit_hf_llm_progress(
-                progress_callback,
-                {
-                    "event": "complete",
-                    "stage": "load",
-                    "description": "MLX vision model is already loaded",
-                    "progress": 100.0,
-                    "device": "apple_silicon",
-                },
-            )
-            return cached
-
-        try:
-            from mlx_vlm import generate as mlx_vlm_generate  # type: ignore
-            from mlx_vlm import load as mlx_vlm_load  # type: ignore
-            from mlx_vlm.prompt_utils import apply_chat_template as mlx_vlm_apply_chat_template  # type: ignore
-        except Exception as exc:
-            raise RuntimeError(
-                "MLX vision needs mlx-vlm installed on an Apple Silicon Mac. "
-                "Install/update requirements, then load a vision-capable MLX model."
-            ) from exc
-
-        try:
-            from mlx_vlm.utils import load_config as mlx_vlm_load_config  # type: ignore
-        except Exception:
-            mlx_vlm_load_config = None
-
-        model_path = _download_mlx_lm_model(model_token, progress_callback=progress_callback)
-        _emit_hf_llm_progress(
-            progress_callback,
-            {
-                "event": "start",
-                "stage": "load",
-                "description": "Loading MLX vision model into memory",
-                "progress": 0.0,
-            },
-        )
-
-        load_kwargs: Dict[str, Any] = {}
-        if cache_key[1]:
-            load_kwargs["trust_remote_code"] = True
-        if cache_key[2]:
-            load_kwargs["lazy"] = True
-        try:
-            loaded = mlx_vlm_load(model_path, **load_kwargs)
-        except TypeError:
-            retry_kwargs = dict(load_kwargs)
-            retry_kwargs.pop("lazy", None)
-            try:
-                loaded = mlx_vlm_load(model_path, **retry_kwargs)
-            except TypeError:
-                retry_kwargs.pop("trust_remote_code", None)
-                loaded = mlx_vlm_load(model_path, **retry_kwargs)
-        if not isinstance(loaded, tuple) or len(loaded) < 2:
-            raise RuntimeError(f"Could not load MLX vision model {model_token}.")
-        model_obj = loaded[0]
-        processor = loaded[1]
-
-        config = getattr(model_obj, "config", None)
-        if not isinstance(config, dict) and callable(mlx_vlm_load_config):
-            try:
-                config_kwargs: Dict[str, Any] = {}
-                if cache_key[1]:
-                    config_kwargs["trust_remote_code"] = True
-                try:
-                    config = mlx_vlm_load_config(model_path, **config_kwargs)
-                except TypeError:
-                    config = mlx_vlm_load_config(model_path)
-            except Exception:
-                config = None
-        _mlx_vlm_normalize_vision_tokens(processor, getattr(processor, "tokenizer", None), config)
-        chat_template_override, chat_template_handler, chat_template_warning = _install_local_llm_chat_template_override(
-            HYDRA_LLM_PROVIDER_MLX_LM,
-            model_token,
-            processor=processor,
-            config=config,
-            model=model_obj,
-        )
-        if chat_template_warning:
-            logger.warning("[mlx-vlm] %s", chat_template_warning)
-
-        generation_lock = _MLX_VLM_GENERATION_LOCKS.get(cache_key)
-        if generation_lock is None:
-            generation_lock = threading.RLock()
-            _MLX_VLM_GENERATION_LOCKS[cache_key] = generation_lock
-
-        bundle = {
-            "model": model_obj,
-            "processor": processor,
-            "config": config,
-            "lock": generation_lock,
-            "model_path": model_path,
-            "model_root": _mlx_lm_model_root(),
-            "device": "apple_silicon",
-            "memory_estimate_bytes": _safe_path_size_bytes(model_path),
-            "loaded_ts": time.time(),
-            "chat_template_override": bool(chat_template_override),
-            "chat_template_handler": chat_template_handler,
-            "chat_template_warning": chat_template_warning,
-            "generate": mlx_vlm_generate,
-            "apply_chat_template": mlx_vlm_apply_chat_template,
-            "supports_vision": True,
-            "vision_chat_handler": "mlx-vlm",
-        }
-        _MLX_VLM_MODEL_CACHE[cache_key] = bundle
-        _emit_hf_llm_progress(
-            progress_callback,
-            {
-                "event": "complete",
-                "stage": "load",
-                "description": "MLX vision model loaded",
-                "progress": 100.0,
-                "device": "apple_silicon",
-            },
-        )
-        return bundle
-
-
-def _mlx_vlm_processor_tokenizer(bundle: Dict[str, Any]) -> Any:
-    processor = bundle.get("processor")
-    for attr in ("tokenizer", "_tokenizer"):
-        try:
-            tokenizer = getattr(processor, attr, None)
-            if tokenizer is not None:
-                return tokenizer
-        except Exception:
-            pass
-    return processor
-
-
-def _mlx_vlm_generate_with_fallback(
-    generate: Any,
-    model_obj: Any,
-    processor: Any,
-    formatted_prompt: str,
-    images: Optional[List[str]],
-    generation_kwargs: Dict[str, Any],
-    *,
-    allow_no_images: bool = False,
-) -> Any:
-    if not callable(generate):
-        raise RuntimeError("MLX vision runtime is missing generate helper.")
-    image_values: List[Tuple[str, Any]] = []
-    if images is not None:
-        image_list = list(images)
-        image_values.append(("positional", image_list))
-        image_values.append(("named", image_list))
-        if len(image_list) == 1:
-            image_values.append(("named", image_list[0]))
-    if allow_no_images:
-        image_values.append(("none", None))
-
-    kw_variants: List[Dict[str, Any]] = [dict(generation_kwargs)]
-    no_temperature = dict(generation_kwargs)
-    no_temperature.pop("temperature", None)
-    if no_temperature not in kw_variants:
-        kw_variants.append(no_temperature)
-    no_max_tokens = dict(no_temperature)
-    no_max_tokens.pop("max_tokens", None)
-    if no_max_tokens not in kw_variants:
-        kw_variants.append(no_max_tokens)
-
-    last_exc: Optional[TypeError] = None
-    for kwargs_variant in kw_variants:
-        for mode, image_value in image_values:
-            try:
-                if mode == "positional":
-                    return generate(model_obj, processor, formatted_prompt, image_value, **kwargs_variant)
-                if mode == "named":
-                    return generate(model_obj, processor, formatted_prompt, image=image_value, **kwargs_variant)
-                return generate(model_obj, processor, formatted_prompt, **kwargs_variant)
-            except TypeError as exc:
-                last_exc = exc
-                continue
-    if last_exc is not None:
-        raise last_exc
-    raise RuntimeError("MLX vision generation failed.")
-
-
 def _resolve_hydra_llm_defaults(*, redis_conn: Any = None) -> tuple[str, str]:
     host = _safe_redis_text_get(HYDRA_LLM_HOST_KEY, redis_conn=redis_conn)
     port = _safe_redis_text_get(HYDRA_LLM_PORT_KEY, redis_conn=redis_conn)
@@ -9498,13 +7629,7 @@ def _normalize_hydra_base_server_row(row: Any) -> Optional[Dict[str, str]]:
                 if _is_llama_cpp_hydra_llm_provider(provider)
                 else ""
             ),
-            "endpoint": (
-                "hf://transformers"
-                if provider == HYDRA_LLM_PROVIDER_HF_TRANSFORMERS
-                else "llama-cpp://local"
-                if provider == HYDRA_LLM_PROVIDER_LLAMA_CPP
-                else "mlx-lm://local"
-            ),
+            "endpoint": "llama-cpp://local",
         }
 
     endpoint = _build_hydra_llm_endpoint(raw_host, raw_port)
@@ -10643,14 +8768,10 @@ def _make_llm_client_for_provider(
 ) -> Any:
     selected_provider = _normalize_hydra_llm_provider(provider)
     llama_cpp_slot = kwargs.pop("llama_cpp_slot", None)
-    if selected_provider == HYDRA_LLM_PROVIDER_HF_TRANSFORMERS:
-        return TransformersLLMClientWrapper(model=model, **kwargs)
     if selected_provider == HYDRA_LLM_PROVIDER_LLAMA_CPP:
         return LlamaCppLLMClientWrapper(model=model, llama_cpp_slot=llama_cpp_slot, **kwargs)
     if selected_provider == HYDRA_LLM_PROVIDER_LLAMA_CPP_REMOTE:
         return LlamaCppRemoteLLMClientWrapper(host=host, model=model, api_key=api_key, llama_cpp_slot=llama_cpp_slot, **kwargs)
-    if selected_provider == HYDRA_LLM_PROVIDER_MLX_LM:
-        return MlxLmLLMClientWrapper(model=model, **kwargs)
     if selected_provider == HYDRA_LLM_PROVIDER_SPUD_LINK:
         return SpudLinkLLMClientWrapper(host=host, model=model, api_key=api_key, **kwargs)
     return LLMClientWrapper(host=host, model=model, api_key=api_key, **kwargs)
@@ -10808,14 +8929,8 @@ def get_primary_llm_client_from_env(host: Optional[str] = None, model: Optional[
     has_explicit_api_key = "api_key" in kwargs
     host_hint = str(host or "").strip().lower()
     if host_hint and not has_explicit_provider:
-        if host_hint.startswith("hf://"):
-            kwargs["provider"] = HYDRA_LLM_PROVIDER_HF_TRANSFORMERS
-            has_explicit_provider = True
-        elif host_hint.startswith("llama-cpp://"):
+        if host_hint.startswith("llama-cpp://"):
             kwargs["provider"] = HYDRA_LLM_PROVIDER_LLAMA_CPP
-            has_explicit_provider = True
-        elif host_hint.startswith("mlx-lm://"):
-            kwargs["provider"] = HYDRA_LLM_PROVIDER_MLX_LM
             has_explicit_provider = True
     if host or model or has_explicit_provider or has_explicit_api_key:
         return get_llm_client_from_env(host=host, model=model, redis_conn=redis_conn, **kwargs)
@@ -11656,607 +9771,6 @@ class SpudLinkLLMClientWrapper:
             _finish_active_llm_call(call_id, error=call_error, response_model=final_model)
 
 
-class TransformersLLMClientWrapper:
-    def __init__(self, model=None, **kwargs):
-        _ = kwargs
-        resolved_model = str(model or "").strip()
-        if not resolved_model:
-            raise RuntimeError(HYDRA_LLM_SETUP_ERROR)
-
-        self.host = "hf://transformers"
-        self.model = resolved_model
-        self.provider = HYDRA_LLM_PROVIDER_HF_TRANSFORMERS
-        self.temperature = float(os.getenv("LLM_TEMPERATURE", "0.7"))
-
-        self._llm_calls = 0
-        self._llm_elapsed_sec = 0.0
-        self._llm_prompt_elapsed_sec = 0.0
-        self._llm_completion_elapsed_sec = 0.0
-        self._llm_prompt_tokens = 0
-        self._llm_completion_tokens = 0
-        self._llm_total_tokens = 0
-        self._llm_model_last = resolved_model
-        self._llm_speed_basis = "local_generate"
-
-    async def aclose(self):
-        return None
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, exc_type, exc, tb):
-        await self.aclose()
-
-    def get_perf_stats(self, *, reset: bool = False) -> Dict[str, Any]:
-        out = _build_llm_perf_stats(
-            model=str(self._llm_model_last or self.model or "HF Transformers"),
-            elapsed=self._llm_elapsed_sec,
-            prompt_elapsed=getattr(self, "_llm_prompt_elapsed_sec", 0.0),
-            completion_elapsed=getattr(self, "_llm_completion_elapsed_sec", 0.0),
-            prompt_tokens=self._llm_prompt_tokens,
-            completion_tokens=self._llm_completion_tokens,
-            total_tokens=self._llm_total_tokens,
-            calls=self._llm_calls,
-            speed_basis=getattr(self, "_llm_speed_basis", "local_generate"),
-        )
-
-        if reset:
-            self._llm_calls = 0
-            self._llm_elapsed_sec = 0.0
-            self._llm_prompt_elapsed_sec = 0.0
-            self._llm_completion_elapsed_sec = 0.0
-            self._llm_prompt_tokens = 0
-            self._llm_completion_tokens = 0
-            self._llm_total_tokens = 0
-        return out
-
-    def _format_messages_without_template(self, messages: List[Dict[str, Any]]) -> str:
-        parts: List[str] = []
-        for item in (messages if isinstance(messages, list) else []):
-            if not isinstance(item, dict):
-                continue
-            role = str(item.get("role") or "user").strip().lower()
-            content = _coerce_content_to_text(item.get("content")).strip()
-            if not content:
-                continue
-            if role == "system":
-                parts.append(f"System: {content}")
-            elif role == "assistant":
-                parts.append(f"Assistant: {content}")
-            else:
-                parts.append(f"User: {content}")
-        parts.append("Assistant:")
-        return "\n\n".join(parts).strip()
-
-    def _messages_with_text_blocks(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        normalized: List[Dict[str, Any]] = []
-        for item in (messages if isinstance(messages, list) else []):
-            if not isinstance(item, dict):
-                continue
-            role = str(item.get("role") or "user").strip().lower() or "user"
-            content = item.get("content")
-            if isinstance(content, list):
-                normalized.append({"role": role, "content": content})
-                continue
-            text = _coerce_content_to_text(content).strip()
-            normalized.append({"role": role, "content": [{"type": "text", "text": text}]})
-        return normalized
-
-    def _model_input_device(self, bundle: Dict[str, Any]) -> str:
-        model = bundle.get("model")
-        device = str(bundle.get("device") or "cpu")
-        try:
-            first_param = next(model.parameters())
-            return str(getattr(first_param, "device", None) or device)
-        except Exception:
-            return device
-
-    def _move_encoded_to_device(self, encoded: Any, device: str) -> Any:
-        if hasattr(encoded, "to"):
-            try:
-                return encoded.to(device)
-            except Exception:
-                pass
-        if isinstance(encoded, dict):
-            return {key: value.to(device) if hasattr(value, "to") else value for key, value in encoded.items()}
-        return encoded
-
-    def _chat_template_inputs(
-        self,
-        formatter: Any,
-        messages: List[Dict[str, Any]],
-        *,
-        tokenize: bool,
-        return_dict: bool = False,
-        tools: Optional[List[Dict[str, Any]]] = None,
-    ) -> Any:
-        base_kwargs: Dict[str, Any] = {
-            "add_generation_prompt": True,
-            "tokenize": bool(tokenize),
-        }
-        if tokenize:
-            base_kwargs.update({"return_tensors": "pt"})
-        if return_dict:
-            base_kwargs["return_dict"] = True
-        if tools:
-            base_kwargs["tools"] = tools
-        variants = [messages]
-        block_messages = self._messages_with_text_blocks(messages)
-        if block_messages != messages:
-            variants.append(block_messages)
-        last_exc: Optional[Exception] = None
-        thinking_variants = _local_no_thinking_template_variants(_hf_transformers_disable_thinking_enabled())
-        for variant in variants:
-            for extra in thinking_variants:
-                try:
-                    return formatter.apply_chat_template(variant, **base_kwargs, **extra)
-                except TypeError as exc:
-                    last_exc = exc
-                    continue
-                except Exception as exc:
-                    last_exc = exc
-                    break
-        if last_exc is not None:
-            raise last_exc
-        return formatter.apply_chat_template(messages, **base_kwargs)
-
-    def _encode_messages(
-        self,
-        bundle: Dict[str, Any],
-        messages: List[Dict[str, Any]],
-        *,
-        tools: Optional[List[Dict[str, Any]]] = None,
-    ) -> Tuple[Any, int]:
-        tokenizer = bundle["tokenizer"]
-        processor = bundle.get("processor")
-        formatter = processor if processor is not None and hasattr(processor, "apply_chat_template") else tokenizer
-        input_builder = processor if processor is not None and callable(processor) else tokenizer
-        torch = bundle["torch"]
-        device = self._model_input_device(bundle)
-        max_input_tokens = _hf_llm_max_input_tokens()
-        images = _extract_pil_images_from_messages(messages)
-
-        if images and processor is not None:
-            prompt_text = ""
-            vision_messages = _messages_with_hf_image_blocks(messages, images)
-            try:
-                prompt_text = self._chat_template_inputs(
-                    formatter,
-                    vision_messages,
-                    tokenize=False,
-                    return_dict=False,
-                    tools=tools,
-                )
-            except Exception:
-                if tools:
-                    raise RuntimeError("This Transformers vision model's chat template does not support native tools.")
-                prompt_text = self._format_messages_without_template(messages)
-            prompt_text = _coerce_content_to_text(prompt_text).strip()
-            if not prompt_text:
-                prompt_text = self._format_messages_without_template(messages)
-            processor_variants = (
-                {"text": [prompt_text], "images": images, "return_tensors": "pt"},
-                {"text": prompt_text, "images": images[0] if len(images) == 1 else images, "return_tensors": "pt"},
-                {"text": [prompt_text], "images": images[0] if len(images) == 1 else images, "return_tensors": "pt"},
-            )
-            last_exc: Optional[Exception] = None
-            for call_kwargs in processor_variants:
-                try:
-                    encoded = processor(**call_kwargs)
-                    encoded = self._move_encoded_to_device(encoded, device)
-                    encoded_fields = dict(encoded)
-                    input_ids = encoded_fields.get("input_ids")
-                    attention_mask = encoded_fields.get("attention_mask")
-                    if input_ids is not None and hasattr(input_ids, "dim") and input_ids.dim() == 1:
-                        input_ids = input_ids.unsqueeze(0)
-                        encoded_fields["input_ids"] = input_ids
-                    if attention_mask is not None and hasattr(attention_mask, "dim") and attention_mask.dim() == 1:
-                        attention_mask = attention_mask.unsqueeze(0)
-                        encoded_fields["attention_mask"] = attention_mask
-                    input_len = int(getattr(input_ids, "shape", [0])[-1] or 0) if input_ids is not None else 0
-                    return encoded_fields, input_len
-                except Exception as exc:
-                    last_exc = exc
-                    continue
-            raise RuntimeError(f"Could not encode image input for Hugging Face vision model: {last_exc}")
-
-        input_ids = None
-        attention_mask = None
-        encoded_fields: Dict[str, Any] = {}
-        try:
-            input_ids = self._chat_template_inputs(
-                formatter,
-                messages,
-                tokenize=True,
-                return_dict=True,
-                tools=tools,
-            )
-        except Exception:
-            input_ids = None
-
-        if input_ids is None:
-            try:
-                input_ids = self._chat_template_inputs(
-                    formatter,
-                    messages,
-                    tokenize=True,
-                    return_dict=False,
-                    tools=tools,
-                )
-            except Exception:
-                input_ids = None
-
-        if input_ids is None and formatter is not tokenizer:
-            try:
-                input_ids = self._chat_template_inputs(
-                    tokenizer,
-                    messages,
-                    tokenize=True,
-                    return_dict=False,
-                    tools=tools,
-                )
-            except Exception:
-                input_ids = None
-
-        if input_ids is None:
-            try:
-                prompt_text = self._chat_template_inputs(
-                    formatter,
-                    messages,
-                    tokenize=False,
-                    return_dict=False,
-                    tools=tools,
-                )
-                input_ids = input_builder(text=prompt_text, return_tensors="pt")
-            except Exception:
-                input_ids = None
-
-        if input_ids is None and formatter is not tokenizer:
-            try:
-                prompt_text = self._chat_template_inputs(
-                    tokenizer,
-                    messages,
-                    tokenize=False,
-                    return_dict=False,
-                    tools=tools,
-                )
-                input_ids = tokenizer(prompt_text, return_tensors="pt")
-            except Exception:
-                input_ids = None
-
-        if input_ids is not None:
-            try:
-                if hasattr(input_ids, "to") and not isinstance(input_ids, dict):
-                    input_ids = input_ids.to(device)
-                elif isinstance(input_ids, dict):
-                    input_ids = self._move_encoded_to_device(input_ids, device)
-            except Exception:
-                pass
-
-        if input_ids is not None:
-            try:
-                input_ids = dict(input_ids)
-            except Exception:
-                pass
-
-        if input_ids is not None:
-            try:
-                if isinstance(input_ids, dict):
-                    encoded_fields = dict(input_ids)
-                    attention_mask = encoded_fields.get("attention_mask")
-                    input_ids = encoded_fields.get("input_ids")
-            except Exception:
-                pass
-            try:
-                if input_ids is not None and hasattr(input_ids, "dim") and input_ids.dim() == 1:
-                    input_ids = input_ids.unsqueeze(0)
-                    if attention_mask is not None and hasattr(attention_mask, "dim") and attention_mask.dim() == 1:
-                        attention_mask = attention_mask.unsqueeze(0)
-                if input_ids is not None and max_input_tokens > 0 and int(input_ids.shape[-1]) > max_input_tokens:
-                    input_ids = input_ids[:, -max_input_tokens:]
-                    if attention_mask is not None:
-                        attention_mask = attention_mask[:, -max_input_tokens:]
-                if input_ids is not None:
-                    if attention_mask is None:
-                        attention_mask = torch.ones_like(input_ids)
-                    input_ids = input_ids.to(device)
-                    attention_mask = attention_mask.to(device)
-                    encoded_fields["input_ids"] = input_ids
-                    encoded_fields["attention_mask"] = attention_mask
-                    encoded_fields = self._move_encoded_to_device(encoded_fields, device)
-                    return encoded_fields, int(input_ids.shape[-1])
-            except Exception:
-                pass
-
-        if tools:
-            raise RuntimeError("This Transformers model's chat template does not support native tools.")
-        prompt = self._format_messages_without_template(messages)
-        try:
-            encoded = input_builder(
-                text=prompt,
-                return_tensors="pt",
-                truncation=True,
-                max_length=max_input_tokens,
-            )
-        except Exception:
-            encoded = tokenizer(
-                prompt,
-                return_tensors="pt",
-                truncation=True,
-                max_length=max_input_tokens,
-            )
-        encoded = self._move_encoded_to_device(encoded, device)
-        input_len = int(encoded["input_ids"].shape[-1])
-        return encoded, input_len
-
-    def _decode_completion(self, bundle: Dict[str, Any], completion_ids: Any) -> str:
-        processor = bundle.get("processor")
-        tokenizer = bundle.get("tokenizer")
-        decoder = processor if processor is not None and hasattr(processor, "decode") else tokenizer
-        try:
-            raw = decoder.decode(completion_ids, skip_special_tokens=False)
-        except Exception:
-            raw = tokenizer.decode(completion_ids, skip_special_tokens=True)
-        parser = getattr(processor, "parse_response", None) if processor is not None else None
-        if callable(parser):
-            try:
-                parsed = parser(raw)
-                if isinstance(parsed, str):
-                    return parsed
-                if isinstance(parsed, dict):
-                    for key in ("response", "text", "content"):
-                        value = parsed.get(key)
-                        if isinstance(value, str) and value.strip():
-                            return value
-                if parsed is not None:
-                    return _coerce_content_to_text(parsed)
-            except Exception:
-                pass
-        try:
-            return tokenizer.decode(completion_ids, skip_special_tokens=True)
-        except Exception:
-            return _coerce_content_to_text(raw)
-
-    def _build_generation_kwargs(
-        self,
-        tokenizer: Any,
-        timeout: Any,
-        kwargs: Dict[str, Any],
-        *,
-        prompt_tokens: int = 0,
-    ) -> Dict[str, Any]:
-        generation_kwargs: Dict[str, Any] = {}
-        max_new_tokens = kwargs.pop("max_tokens", None)
-        remaining_context = max(
-            1,
-            _hf_llm_max_input_tokens() - max(0, int(prompt_tokens or 0)),
-        )
-        if max_new_tokens is None:
-            generation_kwargs["max_new_tokens"] = remaining_context
-        else:
-            try:
-                generation_kwargs["max_new_tokens"] = max(1, int(max_new_tokens))
-            except Exception:
-                generation_kwargs["max_new_tokens"] = remaining_context
-
-        temperature = kwargs.pop("temperature", self.temperature)
-        try:
-            temperature_value = float(temperature)
-        except Exception:
-            temperature_value = self.temperature
-        if temperature_value > 0:
-            generation_kwargs["temperature"] = temperature_value
-            generation_kwargs["do_sample"] = bool(kwargs.pop("do_sample", True))
-        else:
-            generation_kwargs["do_sample"] = bool(kwargs.pop("do_sample", False))
-
-        for key in ("top_p", "top_k", "repetition_penalty", "num_beams", "min_new_tokens"):
-            if key in kwargs and kwargs.get(key) is not None:
-                generation_kwargs[key] = kwargs.pop(key)
-
-        try:
-            timeout_value = float(timeout) if timeout is not None else 0.0
-        except Exception:
-            timeout_value = 0.0
-        if timeout_value > 0:
-            generation_kwargs["max_time"] = timeout_value
-
-        eos_token_id = getattr(tokenizer, "eos_token_id", None)
-        pad_token_id = getattr(tokenizer, "pad_token_id", None)
-        if eos_token_id is not None:
-            generation_kwargs["eos_token_id"] = eos_token_id
-        if pad_token_id is not None:
-            generation_kwargs["pad_token_id"] = pad_token_id
-        elif eos_token_id is not None:
-            generation_kwargs["pad_token_id"] = eos_token_id
-
-        return generation_kwargs
-
-    def _apply_stop_sequences(self, text: str, stop: Any) -> str:
-        if not stop:
-            return text
-        stops = stop if isinstance(stop, list) else [stop]
-        cut_at: Optional[int] = None
-        for item in stops:
-            token = str(item or "")
-            if not token:
-                continue
-            idx = text.find(token)
-            if idx >= 0:
-                cut_at = idx if cut_at is None else min(cut_at, idx)
-        if cut_at is None:
-            return text
-        return text[:cut_at]
-
-    def _chat_sync(self, messages: List[Dict[str, Any]], *, timeout: Any = None, **kwargs) -> Dict[str, Any]:
-        stop = kwargs.pop("stop", None)
-        tools = kwargs.pop("tools", None)
-        if not isinstance(tools, list):
-            tools = None
-        kwargs.pop("tool_choice", None)
-        kwargs.pop("parallel_tool_calls", None)
-        context_bounded = kwargs.get("max_tokens") is None
-        bundle = _load_hf_llm_bundle(self.model)
-        model = bundle["model"]
-        tokenizer = bundle["tokenizer"]
-        torch = bundle["torch"]
-        generation_lock = bundle["lock"]
-
-        encoded, prompt_tokens = self._encode_messages(bundle, messages, tools=tools)
-        is_encoder_decoder = bool(getattr(getattr(model, "config", None), "is_encoder_decoder", False))
-        generation_kwargs = self._build_generation_kwargs(
-            tokenizer,
-            timeout,
-            kwargs,
-            prompt_tokens=0 if is_encoder_decoder else prompt_tokens,
-        )
-
-        with generation_lock:
-            generation_started = time.perf_counter()
-            with torch.inference_mode():
-                output_ids = model.generate(**encoded, **generation_kwargs)
-        generation_elapsed = max(0.0, time.perf_counter() - generation_started)
-
-        input_ids = encoded["input_ids"]
-        completion_ids = output_ids[0] if is_encoder_decoder else output_ids[0][int(input_ids.shape[-1]):]
-        raw_content = self._decode_completion(bundle, completion_ids)
-        raw_content = self._apply_stop_sequences(_coerce_content_to_text(raw_content).strip(), stop).strip()
-        message_result = _normalized_assistant_message(content=raw_content)
-        content = str(message_result.get("content") or "")
-        completion_tokens = int(getattr(completion_ids, "shape", [0])[-1] or 0)
-        total_tokens = max(0, int(prompt_tokens) + int(completion_tokens))
-        completion_limit = max(1, int(generation_kwargs.get("max_new_tokens") or 1))
-        hit_limit = completion_tokens >= completion_limit
-
-        parser = bundle.get("processor") or tokenizer
-        tool_calls = _native_tool_calls_from_parser(content, tools, parser)
-        if not tool_calls:
-            tool_calls = _native_tool_calls_from_text(content, tools)
-        if tool_calls:
-            message_result["tool_calls"] = tool_calls
-        return {
-            "model": self.model,
-            "message": message_result,
-            "_usage": {
-                "prompt_tokens": int(prompt_tokens),
-                "completion_tokens": int(completion_tokens),
-                "total_tokens": int(total_tokens),
-            },
-            "_timing": {
-                "completion_elapsed": generation_elapsed,
-                "speed_basis": "local_generate",
-            },
-            "_finish_reason": "tool_calls" if tool_calls else "length" if hit_limit else "stop",
-            "_limit_reason": (
-                "context" if hit_limit and context_bounded else "max_tokens" if hit_limit else ""
-            ),
-        }
-
-    async def chat(self, messages, **kwargs):
-        timeout = kwargs.pop("timeout", None)
-        timeout_ms = kwargs.pop("timeout_ms", None)
-        if timeout is None and timeout_ms is not None:
-            try:
-                timeout = float(timeout_ms) / 1000.0
-            except Exception:
-                timeout = None
-
-        stream = kwargs.pop("stream", False)
-        stream_callback = kwargs.pop("stream_callback", None)
-        if stream and not callable(stream_callback):
-            raise RuntimeError("Hugging Face Transformers LLM backend does not support streaming yet.")
-
-        activity_hint = kwargs.pop("activity", "")
-        kwargs.pop("cache_namespace", "")
-        model = kwargs.pop("model", self.model)
-        if model and str(model).strip() != self.model:
-            self.model = str(model).strip()
-
-        if "max_tokens" not in kwargs:
-            kwargs["max_tokens"] = None
-        if "temperature" not in kwargs:
-            kwargs["temperature"] = self.temperature
-
-        try:
-            if _vision_payload_has_image_url(messages):
-                messages = messages if isinstance(messages, list) else []
-            else:
-                messages = _sanitize_chat_messages(messages if isinstance(messages, list) else [])
-        except Exception:
-            messages = messages if isinstance(messages, list) else []
-
-        call_id = _register_active_llm_call(
-            host=self.host,
-            model=str(self.model or "").strip(),
-            stream=bool(callable(stream_callback)),
-            message_count=(len(messages) if isinstance(messages, list) else 0),
-            messages=(messages if isinstance(messages, list) else []),
-            activity_hint=str(activity_hint or ""),
-        )
-        call_error: Optional[Exception] = None
-        final_model = str(self.model or "").strip()
-        started_at = asyncio.get_running_loop().time()
-
-        try:
-            _append_llm_debug_event(
-                phase="prompt",
-                level="info",
-                message="Local prompt submitted",
-                call_id=call_id,
-                provider=HYDRA_LLM_PROVIDER_HF_TRANSFORMERS,
-                host=self.host,
-                model=str(self.model or "").strip(),
-                detail=f"messages={len(messages) if isinstance(messages, list) else 0}",
-            )
-            result = await asyncio.to_thread(self._chat_sync, messages, timeout=timeout, **kwargs)
-            elapsed = max(0.0, float(asyncio.get_running_loop().time() - started_at))
-            usage = result.pop("_usage", {}) if isinstance(result, dict) else {}
-            timing = result.pop("_timing", {}) if isinstance(result, dict) else {}
-            prompt_tokens = int((usage or {}).get("prompt_tokens") or 0)
-            completion_tokens = int((usage or {}).get("completion_tokens") or 0)
-            total_tokens = int((usage or {}).get("total_tokens") or (prompt_tokens + completion_tokens))
-            completion_elapsed = _perf_nonnegative_float((timing or {}).get("completion_elapsed"), elapsed)
-
-            self._llm_calls += 1
-            self._llm_elapsed_sec += elapsed
-            self._llm_prompt_elapsed_sec += _perf_nonnegative_float((timing or {}).get("prompt_elapsed"))
-            self._llm_completion_elapsed_sec += completion_elapsed
-            self._llm_prompt_tokens += max(0, prompt_tokens)
-            self._llm_completion_tokens += max(0, completion_tokens)
-            self._llm_total_tokens += max(0, total_tokens)
-            self._llm_model_last = str((result or {}).get("model") or self.model)
-            self._llm_speed_basis = str((timing or {}).get("speed_basis") or "local_generate")
-            final_model = self._llm_model_last
-            _append_llm_debug_result(
-                call_id=call_id,
-                provider=HYDRA_LLM_PROVIDER_HF_TRANSFORMERS,
-                host=self.host,
-                model=final_model,
-                result=result,
-                usage={
-                    "prompt_tokens": prompt_tokens,
-                    "completion_tokens": completion_tokens,
-                    "total_tokens": total_tokens,
-                },
-                timing=timing,
-                elapsed=elapsed,
-            )
-            await _dispatch_llm_stream_callback(
-                stream_callback,
-                ((result or {}).get("message") or {}).get("content", ""),
-            )
-            return result
-        except Exception as exc:
-            call_error = exc
-            raise
-        finally:
-            _finish_active_llm_call(
-                call_id,
-                error=call_error,
-                response_model=final_model,
-            )
-
-
 def _split_local_thinking_blocks(text: Any) -> Tuple[str, str]:
     """Separate common local-model thinking wrappers from the visible answer."""
     content = _coerce_content_to_text(text)
@@ -12710,6 +10224,15 @@ class LlamaCppRemoteLLMClientWrapper(LlamaCppLLMClientWrapper):
         stream_callback = kwargs.pop("_stream_callback", None)
         chat_kwargs = self._build_chat_kwargs(timeout, kwargs)
         local_messages = _llama_cpp_disable_thinking_messages(messages)
+        request_slot = _llama_cpp_cache_namespace_slot(
+            cache_namespace,
+            configured_slot=(
+                _llama_cpp_slot_id("vision")
+                if vision_requested and not self.vision
+                else self.llama_cpp_slot
+            ),
+            vision=vision_requested,
+        )
         if isinstance(chat_kwargs.get("tools"), list) and chat_kwargs.get("tools"):
             native_started = time.perf_counter()
             native_response = _llama_cpp_native_json_post(
@@ -12719,6 +10242,7 @@ class LlamaCppRemoteLLMClientWrapper(LlamaCppLLMClientWrapper):
                     model_token=self.model,
                     messages=local_messages,
                     chat_kwargs=chat_kwargs,
+                    slot_id=request_slot,
                 ),
                 timeout=max(30.0, timeout or 600.0),
                 api_key=self.api_key,
@@ -12755,15 +10279,6 @@ class LlamaCppRemoteLLMClientWrapper(LlamaCppLLMClientWrapper):
                 "prompt_string": prompt,
                 "multimodal_data": media,
             }
-        request_slot = _llama_cpp_cache_namespace_slot(
-            cache_namespace,
-            configured_slot=(
-                _llama_cpp_slot_id("vision")
-                if vision_requested and not self.vision
-                else self.llama_cpp_slot
-            ),
-            vision=vision_requested,
-        )
         completion_payload = _llama_cpp_native_completion_payload(completion_prompt, chat_kwargs, slot_id=request_slot)
         if remote_mode == "router":
             completion_payload["model"] = self.model
@@ -12819,10 +10334,6 @@ class LlamaCppRemoteLLMClientWrapper(LlamaCppLLMClientWrapper):
         )
 
 
-def _mlx_lm_disable_thinking_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    return [dict(item) for item in (messages if isinstance(messages, list) else []) if isinstance(item, dict)]
-
-
 def _apply_local_stop_sequences(text: Any, stop: Any) -> str:
     content = _coerce_content_to_text(text)
     if not content or not stop:
@@ -12837,381 +10348,6 @@ def _apply_local_stop_sequences(text: Any, stop: Any) -> str:
         if idx >= 0:
             cut_at = idx if cut_at is None else min(cut_at, idx)
     return content if cut_at is None else content[:cut_at]
-
-
-class MlxLmLLMClientWrapper:
-    def __init__(self, model=None, **kwargs):
-        _ = kwargs
-        resolved_model = str(model or "").strip()
-        if not resolved_model:
-            raise RuntimeError(HYDRA_LLM_SETUP_ERROR)
-
-        self.host = "mlx-lm://local"
-        self.model = resolved_model
-        self.provider = HYDRA_LLM_PROVIDER_MLX_LM
-        self.temperature = float(os.getenv("LLM_TEMPERATURE", "0.7"))
-
-        self._llm_calls = 0
-        self._llm_elapsed_sec = 0.0
-        self._llm_prompt_elapsed_sec = 0.0
-        self._llm_completion_elapsed_sec = 0.0
-        self._llm_prompt_tokens = 0
-        self._llm_completion_tokens = 0
-        self._llm_total_tokens = 0
-        self._llm_model_last = resolved_model
-        self._llm_speed_basis = "local_generate"
-
-    async def aclose(self):
-        return None
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, exc_type, exc, tb):
-        await self.aclose()
-
-    def get_perf_stats(self, *, reset: bool = False) -> Dict[str, Any]:
-        out = _build_llm_perf_stats(
-            model=str(self._llm_model_last or self.model or "MLX LM"),
-            elapsed=self._llm_elapsed_sec,
-            prompt_elapsed=getattr(self, "_llm_prompt_elapsed_sec", 0.0),
-            completion_elapsed=getattr(self, "_llm_completion_elapsed_sec", 0.0),
-            prompt_tokens=self._llm_prompt_tokens,
-            completion_tokens=self._llm_completion_tokens,
-            total_tokens=self._llm_total_tokens,
-            calls=self._llm_calls,
-            speed_basis=getattr(self, "_llm_speed_basis", "local_generate"),
-        )
-        if reset:
-            self._llm_calls = 0
-            self._llm_elapsed_sec = 0.0
-            self._llm_prompt_elapsed_sec = 0.0
-            self._llm_completion_elapsed_sec = 0.0
-            self._llm_prompt_tokens = 0
-            self._llm_completion_tokens = 0
-            self._llm_total_tokens = 0
-        return out
-
-    def _format_messages_without_template(self, messages: List[Dict[str, Any]]) -> str:
-        parts: List[str] = []
-        for item in (messages if isinstance(messages, list) else []):
-            if not isinstance(item, dict):
-                continue
-            role = str(item.get("role") or "user").strip().lower()
-            content = _coerce_content_to_text(item.get("content")).strip()
-            if not content:
-                continue
-            if role == "system":
-                parts.append(f"System: {content}")
-            elif role == "assistant":
-                parts.append(f"Assistant: {content}")
-            else:
-                parts.append(f"User: {content}")
-        parts.append("Assistant:")
-        return "\n\n".join(parts).strip()
-
-    def _chat_template_prompt(
-        self,
-        tokenizer: Any,
-        messages: List[Dict[str, Any]],
-        *,
-        tools: Optional[List[Dict[str, Any]]] = None,
-    ) -> str:
-        local_messages = _mlx_lm_disable_thinking_messages(messages)
-        template = getattr(tokenizer, "apply_chat_template", None)
-        if callable(template):
-            last_exc: Optional[Exception] = None
-            thinking_variants = _local_no_thinking_template_variants(_mlx_lm_disable_thinking_enabled())
-            for extra in thinking_variants:
-                try:
-                    template_kwargs = dict(extra)
-                    if tools:
-                        template_kwargs["tools"] = tools
-                    prompt = template(
-                        local_messages,
-                        tokenize=False,
-                        add_generation_prompt=True,
-                        **template_kwargs,
-                    )
-                    return _coerce_content_to_text(prompt)
-                except TypeError as exc:
-                    last_exc = exc
-                    continue
-                except Exception as exc:
-                    last_exc = exc
-                    break
-            if last_exc is not None:
-                if tools:
-                    raise RuntimeError("This MLX model's chat template does not support native tools.") from last_exc
-                logger.debug("MLX LM chat template failed; using plain prompt: %s", last_exc)
-        if tools:
-            raise RuntimeError("This MLX model does not provide a native tool chat template.")
-        return self._format_messages_without_template(local_messages)
-
-    def _estimate_tokens(self, tokenizer: Any, text: str) -> int:
-        try:
-            encoded = tokenizer.encode(text)
-            return int(len(encoded))
-        except Exception:
-            return 0
-
-    def _build_generation_kwargs(self, bundle: Dict[str, Any], kwargs: Dict[str, Any]) -> Dict[str, Any]:
-        generation_kwargs: Dict[str, Any] = {}
-        max_tokens = kwargs.pop("max_tokens", None)
-        if max_tokens is None:
-            generation_kwargs["max_tokens"] = _mlx_lm_context_tokens_for_bundle(bundle)
-        else:
-            try:
-                generation_kwargs["max_tokens"] = max(1, int(max_tokens))
-            except Exception:
-                generation_kwargs["max_tokens"] = _mlx_lm_context_tokens_for_bundle(bundle)
-
-        temperature = kwargs.pop("temperature", self.temperature)
-        try:
-            temp_value = max(0.0, float(temperature))
-        except Exception:
-            temp_value = self.temperature
-        try:
-            top_p = float(kwargs.pop("top_p", 1.0))
-        except Exception:
-            top_p = 1.0
-        try:
-            min_p = float(kwargs.pop("min_p", 0.0))
-        except Exception:
-            min_p = 0.0
-        try:
-            top_k = int(kwargs.pop("top_k", 0))
-        except Exception:
-            top_k = 0
-        try:
-            min_tokens_to_keep = int(kwargs.pop("min_tokens_to_keep", 1))
-        except Exception:
-            min_tokens_to_keep = 1
-
-        make_sampler = bundle.get("make_sampler")
-        if callable(make_sampler):
-            generation_kwargs["sampler"] = make_sampler(
-                temp=temp_value,
-                top_p=top_p,
-                min_p=min_p,
-                top_k=top_k,
-                min_tokens_to_keep=max(1, min_tokens_to_keep),
-            )
-
-        make_logits_processors = bundle.get("make_logits_processors")
-        if callable(make_logits_processors):
-            processors = make_logits_processors(
-                repetition_penalty=kwargs.pop("repeat_penalty", kwargs.pop("repetition_penalty", None)),
-                presence_penalty=kwargs.pop("presence_penalty", None),
-                frequency_penalty=kwargs.pop("frequency_penalty", None),
-            )
-            if processors:
-                generation_kwargs["logits_processors"] = processors
-
-        max_kv_size = kwargs.pop("max_kv_size", _mlx_lm_max_kv_size())
-        if max_kv_size is not None:
-            try:
-                generation_kwargs["max_kv_size"] = max(128, int(max_kv_size))
-            except Exception:
-                pass
-        for key in ("prefill_step_size", "kv_bits", "kv_group_size", "quantized_kv_start"):
-            if key in kwargs and kwargs.get(key) is not None:
-                generation_kwargs[key] = kwargs.pop(key)
-        return generation_kwargs
-
-    def _build_engine_generation_kwargs(self, kwargs: Dict[str, Any]) -> Dict[str, Any]:
-        generation_kwargs: Dict[str, Any] = {}
-        for key in ("top_p", "top_k", "min_p", "min_tokens_to_keep", "seed", "json_schema", "num_draft_tokens"):
-            if key in kwargs and kwargs.get(key) is not None:
-                generation_kwargs[key] = kwargs.pop(key)
-        repetition_penalty = kwargs.pop("repeat_penalty", kwargs.pop("repetition_penalty", None))
-        if repetition_penalty is not None:
-            generation_kwargs["repetition_penalty"] = repetition_penalty
-        repetition_context_size = kwargs.pop("repetition_context_size", None)
-        if repetition_context_size is not None:
-            generation_kwargs["repetition_context_size"] = repetition_context_size
-        return generation_kwargs
-
-    def _chat_sync_mlx_engine(
-        self,
-        bundle: Dict[str, Any],
-        messages: List[Dict[str, Any]],
-        *,
-        stop: Any = None,
-        **kwargs,
-    ) -> Dict[str, Any]:
-        tokenizer = bundle.get("tokenizer") or bundle.get("processor")
-        tools = kwargs.pop("tools", None)
-        if not isinstance(tools, list):
-            tools = None
-        kwargs.pop("tool_choice", None)
-        kwargs.pop("parallel_tool_calls", None)
-        prompt = self._chat_template_prompt(tokenizer, messages, tools=tools)
-        max_tokens = kwargs.pop("max_tokens", None)
-        context_bounded = max_tokens is None
-        remaining_context = max(
-            1,
-            _mlx_lm_context_tokens_for_bundle(bundle) - self._estimate_tokens(tokenizer, prompt),
-        )
-        if max_tokens is None:
-            max_tokens_i = remaining_context
-        else:
-            try:
-                max_tokens_i = max(1, int(max_tokens))
-            except Exception:
-                max_tokens_i = remaining_context
-        temperature = kwargs.pop("temperature", self.temperature)
-        try:
-            temp_value = max(0.0, float(temperature))
-        except Exception:
-            temp_value = self.temperature
-
-        output = _mlx_engine_run_generation(
-            bundle,
-            prompt,
-            max_tokens=max_tokens_i,
-            temp=temp_value,
-            stop=stop,
-            extra_kwargs=self._build_engine_generation_kwargs(kwargs),
-        )
-        raw_content = str(output.get("content") or "").strip()
-        message_result = _normalized_assistant_message(
-            content=raw_content,
-            source_message=output,
-        )
-        content = str(message_result.get("content") or "")
-        prompt_tokens = max(0, int(output.get("prompt_tokens") or 0))
-        completion_tokens = max(0, int(output.get("completion_tokens") or 0))
-        total_tokens = prompt_tokens + completion_tokens
-        generation_elapsed = _perf_nonnegative_float(output.get("elapsed"))
-        hit_limit = completion_tokens >= max_tokens_i
-        tool_calls = _native_tool_calls_from_parser(content, tools, tokenizer)
-        if not tool_calls:
-            tool_calls = _native_tool_calls_from_text(content, tools)
-        if tool_calls:
-            message_result["tool_calls"] = tool_calls
-        return {
-            "model": self.model,
-            "message": message_result,
-            "_usage": {
-                "prompt_tokens": prompt_tokens,
-                "completion_tokens": completion_tokens,
-                "total_tokens": total_tokens,
-            },
-            "_timing": {
-                "prompt_elapsed": 0.0,
-                "completion_elapsed": generation_elapsed,
-                "speed_basis": "mlx_engine",
-            },
-            "_finish_reason": "tool_calls" if tool_calls else "length" if hit_limit else "stop",
-            "_limit_reason": (
-                "context" if hit_limit and context_bounded else "max_tokens" if hit_limit else ""
-            ),
-        }
-
-    def _chat_sync(self, messages: List[Dict[str, Any]], *, timeout: Any = None, **kwargs) -> Dict[str, Any]:
-        _ = timeout
-        stop = kwargs.pop("stop", None)
-        seed = kwargs.pop("seed", None)
-        if seed is not None and "seed" not in kwargs:
-            kwargs["seed"] = seed
-        engine_bundle = _load_mlx_engine_bundle(self.model)
-        return self._chat_sync_mlx_engine(engine_bundle, messages, stop=stop, **dict(kwargs))
-
-    async def chat(self, messages, **kwargs):
-        timeout = kwargs.pop("timeout", None)
-        timeout_ms = kwargs.pop("timeout_ms", None)
-        if timeout is None and timeout_ms is not None:
-            try:
-                timeout = float(timeout_ms) / 1000.0
-            except Exception:
-                timeout = None
-        stream = kwargs.pop("stream", False)
-        stream_callback = kwargs.pop("stream_callback", None)
-        if stream and not callable(stream_callback):
-            raise RuntimeError("MLX LM provider does not support streaming yet.")
-        activity_hint = kwargs.pop("activity", "")
-        kwargs.pop("cache_namespace", "")
-        model = kwargs.pop("model", self.model)
-        if model and str(model).strip() != self.model:
-            self.model = str(model).strip()
-        if "max_tokens" not in kwargs:
-            kwargs["max_tokens"] = None
-        if "temperature" not in kwargs:
-            kwargs["temperature"] = self.temperature
-        try:
-            messages = _sanitize_chat_messages(messages if isinstance(messages, list) else [])
-        except Exception:
-            messages = messages if isinstance(messages, list) else []
-
-        call_id = _register_active_llm_call(
-            host=self.host,
-            model=str(self.model or "").strip(),
-            stream=bool(callable(stream_callback)),
-            message_count=(len(messages) if isinstance(messages, list) else 0),
-            messages=(messages if isinstance(messages, list) else []),
-            activity_hint=str(activity_hint or ""),
-        )
-        call_error: Optional[Exception] = None
-        final_model = str(self.model or "").strip()
-        started_at = asyncio.get_running_loop().time()
-        try:
-            _append_llm_debug_event(
-                phase="prompt",
-                level="info",
-                message="Local prompt submitted",
-                call_id=call_id,
-                provider=HYDRA_LLM_PROVIDER_MLX_LM,
-                host=self.host,
-                model=str(self.model or "").strip(),
-                detail=f"messages={len(messages) if isinstance(messages, list) else 0}",
-            )
-            result = await _run_mlx_runtime_async(self._chat_sync, messages, timeout=timeout, **kwargs)
-            elapsed = max(0.0, float(asyncio.get_running_loop().time() - started_at))
-            usage = result.pop("_usage", {}) if isinstance(result, dict) else {}
-            timing = result.pop("_timing", {}) if isinstance(result, dict) else {}
-            prompt_tokens = int((usage or {}).get("prompt_tokens") or 0)
-            completion_tokens = int((usage or {}).get("completion_tokens") or 0)
-            total_tokens = int((usage or {}).get("total_tokens") or (prompt_tokens + completion_tokens))
-            completion_elapsed = _perf_nonnegative_float((timing or {}).get("completion_elapsed"), elapsed)
-            self._llm_calls += 1
-            self._llm_elapsed_sec += elapsed
-            self._llm_prompt_elapsed_sec += _perf_nonnegative_float((timing or {}).get("prompt_elapsed"))
-            self._llm_completion_elapsed_sec += completion_elapsed
-            self._llm_prompt_tokens += max(0, prompt_tokens)
-            self._llm_completion_tokens += max(0, completion_tokens)
-            self._llm_total_tokens += max(0, total_tokens)
-            self._llm_model_last = str((result or {}).get("model") or self.model)
-            self._llm_speed_basis = str((timing or {}).get("speed_basis") or "local_generate")
-            final_model = self._llm_model_last
-            _append_llm_debug_result(
-                call_id=call_id,
-                provider=HYDRA_LLM_PROVIDER_MLX_LM,
-                host=self.host,
-                model=final_model,
-                result=result,
-                usage={
-                    "prompt_tokens": prompt_tokens,
-                    "completion_tokens": completion_tokens,
-                    "total_tokens": total_tokens,
-                },
-                timing=timing,
-                elapsed=elapsed,
-            )
-            await _dispatch_llm_stream_callback(
-                stream_callback,
-                ((result or {}).get("message") or {}).get("content", ""),
-            )
-            return result
-        except Exception as exc:
-            call_error = exc
-            raise
-        finally:
-            _finish_active_llm_call(
-                call_id,
-                error=call_error,
-                response_model=final_model,
-            )
 
 
 def _local_vision_messages(image_bytes: bytes, filename: str, prompt: str) -> List[Dict[str, Any]]:
@@ -13710,179 +10846,6 @@ def _describe_image_with_llama_cpp_subprocess(
         raise
 
 
-def _mlx_vlm_result_text(output: Any) -> str:
-    for attr in ("text", "content", "response"):
-        value = getattr(output, attr, None)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    text = _coerce_content_to_text(output).strip()
-    if text:
-        return text
-    if isinstance(output, (list, tuple)):
-        for item in output:
-            text = _mlx_vlm_result_text(item)
-            if text:
-                return text
-    return str(output or "").strip()
-
-
-def _mlx_engine_vision_prompt(bundle: Dict[str, Any], prompt_text: str, image_b64: str) -> str:
-    conversation = [
-        {
-            "role": "user",
-            "content": [
-                {"type": "image", "base64": image_b64},
-                {"type": "text", "text": prompt_text},
-            ],
-        }
-    ]
-    targets = [bundle.get("processor"), bundle.get("tokenizer")]
-    seen: set[int] = set()
-    last_exc: Optional[Exception] = None
-    for target in targets:
-        if target is None:
-            continue
-        ident = id(target)
-        if ident in seen:
-            continue
-        seen.add(ident)
-        template = getattr(target, "apply_chat_template", None)
-        if not callable(template):
-            continue
-        for extra in _local_no_thinking_template_variants(_mlx_lm_disable_thinking_enabled()):
-            try:
-                prompt = template(conversation, tokenize=False, add_generation_prompt=True, **extra)
-                return _coerce_content_to_text(prompt)
-            except TypeError as exc:
-                last_exc = exc
-                continue
-            except Exception as exc:
-                last_exc = exc
-                break
-    if last_exc is not None:
-        logger.debug("MLX engine vision chat template failed; using plain prompt: %s", last_exc)
-    return prompt_text
-
-
-def _describe_image_with_mlx_engine(
-    *,
-    model_token: str,
-    image_bytes: bytes,
-    filename: str,
-    prompt: str,
-    timeout: float,
-) -> Dict[str, Any]:
-    _ = timeout
-    prepared_bytes, _prepared_name = _local_vision_prepare_image_bytes(image_bytes, filename)
-    image_b64 = base64.b64encode(bytes(prepared_bytes or b"")).decode("utf-8")
-    if not image_b64:
-        raise RuntimeError("No image bytes were provided for MLX vision.")
-
-    bundle = _load_mlx_engine_bundle(model_token)
-    _mlx_engine_normalize_bundle_vision_tokens(bundle)
-    prompt_text = str(prompt or "").strip() or "Describe this image."
-    formatted_prompt = _mlx_engine_vision_prompt(bundle, prompt_text, image_b64)
-    output = _mlx_engine_run_generation(
-        bundle,
-        formatted_prompt,
-        max_tokens=768,
-        temp=0.2,
-        images_b64=[image_b64],
-        max_image_size=_mlx_engine_max_image_size(),
-    )
-    content = str(output.get("content") or "").strip()
-    return {
-        "model": model_token,
-        "message": {"role": "assistant", "content": content},
-    }
-
-
-def _describe_image_with_mlx_vlm(
-    *,
-    model_token: str,
-    image_bytes: bytes,
-    filename: str,
-    prompt: str,
-    timeout: float,
-) -> Dict[str, Any]:
-    _ = timeout
-    prepared_bytes, prepared_name = _local_vision_prepare_image_bytes(image_bytes, filename)
-    suffix = Path(str(prepared_name or "image.png")).suffix.lower()
-    if suffix not in {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"}:
-        suffix = ".png"
-    temp_path = ""
-    try:
-        with tempfile.NamedTemporaryFile(prefix="tater-mlx-vlm-", suffix=suffix, delete=False) as handle:
-            handle.write(bytes(prepared_bytes or b""))
-            temp_path = str(handle.name)
-
-        bundle = _load_mlx_vlm_bundle(model_token)
-        model_obj = bundle["model"]
-        processor = bundle["processor"]
-        config = bundle.get("config") or getattr(model_obj, "config", None)
-        apply_chat_template = bundle.get("apply_chat_template")
-        generate = bundle.get("generate")
-        generation_lock = bundle["lock"]
-        if not callable(apply_chat_template) or not callable(generate):
-            raise RuntimeError("MLX vision runtime is missing generate/template helpers.")
-
-        prompt_text = str(prompt or "").strip() or "Describe this image."
-        formatted_prompt = ""
-        template_variants = [
-            _merge_template_kwargs(thinking, image)
-            for thinking in _local_no_thinking_template_variants(_mlx_lm_disable_thinking_enabled())
-            for image in ({"num_images": 1}, {})
-        ]
-        seen_variants: set[Tuple[Tuple[str, str], ...]] = set()
-        last_template_exc: Optional[Exception] = None
-        for extra in template_variants:
-            signature = tuple(sorted((str(key), repr(value)) for key, value in extra.items()))
-            if signature in seen_variants:
-                continue
-            seen_variants.add(signature)
-            try:
-                formatted_prompt = _coerce_content_to_text(apply_chat_template(processor, config, prompt_text, **extra))
-                break
-            except TypeError as exc:
-                last_template_exc = exc
-                continue
-            except Exception as exc:
-                last_template_exc = exc
-                break
-        if not formatted_prompt:
-            if last_template_exc is not None:
-                logger.debug("MLX VLM image chat template failed; using plain prompt: %s", last_template_exc)
-            formatted_prompt = prompt_text
-
-        generation_kwargs: Dict[str, Any] = {
-            "max_tokens": 768,
-            "temperature": 0.2,
-            "verbose": False,
-        }
-        with generation_lock:
-            output = _mlx_vlm_generate_with_fallback(
-                generate,
-                model_obj,
-                processor,
-                formatted_prompt,
-                [temp_path],
-                generation_kwargs,
-                allow_no_images=False,
-            )
-
-        content = _strip_local_thinking_blocks(_mlx_vlm_result_text(output)).strip()
-        return {
-            "model": model_token,
-            "message": {"role": "assistant", "content": content},
-        }
-    finally:
-        if temp_path:
-            try:
-                os.unlink(temp_path)
-            except Exception:
-                pass
-
-
 def describe_image_with_local_llm(
     *,
     provider: str,
@@ -13899,11 +10862,7 @@ def describe_image_with_local_llm(
 
     messages = _local_vision_messages(image_bytes, filename, prompt)
     call_id = register_active_vision_call(
-        api_base={
-            HYDRA_LLM_PROVIDER_HF_TRANSFORMERS: "hf://transformers",
-            HYDRA_LLM_PROVIDER_LLAMA_CPP: "llama-cpp://local",
-            HYDRA_LLM_PROVIDER_MLX_LM: "mlx-vlm://local",
-        }.get(provider_token, "local://vision"),
+        api_base="llama-cpp://local",
         model=model_token,
         source="local_vision",
     )
@@ -13919,29 +10878,12 @@ def describe_image_with_local_llm(
                     f"Local vision is busy and did not become available within {int(lock_timeout)} seconds."
                 )
 
-        if provider_token == HYDRA_LLM_PROVIDER_HF_TRANSFORMERS:
-            bundle = _load_hf_llm_bundle(model_token)
-            if not bool(bundle.get("supports_vision")):
-                raise RuntimeError(f"{model_token} does not look like a Hugging Face vision-capable model.")
-            client = TransformersLLMClientWrapper(model=model_token)
-            result = client._chat_sync(messages, timeout=timeout, max_tokens=768, temperature=0.2)
-        elif provider_token == HYDRA_LLM_PROVIDER_LLAMA_CPP:
+        if provider_token == HYDRA_LLM_PROVIDER_LLAMA_CPP:
             result = _describe_image_with_llama_cpp_engine(
                 model_token=model_token,
                 messages=messages,
                 timeout=timeout,
             )
-        elif provider_token == HYDRA_LLM_PROVIDER_MLX_LM:
-            def _describe_mlx_local() -> Dict[str, Any]:
-                return _describe_image_with_mlx_engine(
-                    model_token=model_token,
-                    image_bytes=image_bytes,
-                    filename=filename,
-                    prompt=prompt,
-                    timeout=timeout,
-                )
-
-            result = _run_mlx_runtime_sync(_describe_mlx_local)
         else:
             raise RuntimeError("OpenAI-compatible vision should use the API vision path.")
 

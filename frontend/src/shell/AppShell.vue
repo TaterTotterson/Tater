@@ -8,7 +8,9 @@ import IntegrationsApp from "../integrations/IntegrationsApp.vue";
 import PortalsApp from "../portals/PortalsApp.vue";
 import RuntimeStatus from "../runtime/RuntimeStatus.vue";
 import type { RuntimeStatusState } from "../runtime/types";
+import { getJson } from "../shared/api";
 import SettingsApp from "../settings/SettingsApp.vue";
+import LocalModelApplyProgress from "../settings/components/models/LocalModelApplyProgress.vue";
 import SpudexApp from "../spudex/SpudexApp.vue";
 import VerbasApp from "../verbas/VerbasApp.vue";
 import type { AppShellAuthState, AppShellBranding, AppShellMountOptions, AppView, ShellJson, ShellViewDescriptor } from "./types";
@@ -63,6 +65,13 @@ let requestSequence = 0;
 let toastSequence = 0;
 const toastTimers = new Map<number, number>();
 const toasts = ref<Array<{ id: number; message: string; tone: "success" | "error"; visible: boolean; closing: boolean }>>([]);
+const startupModelOpen = ref(false);
+const startupModelWarmup = ref<ShellJson>({});
+const startupModelPollError = ref("");
+let startupModelTimer = 0;
+let startupModelCompleteTimer = 0;
+let startupModelDismissed = false;
+let startupModelObserved = false;
 
 const activeSpec = computed(() => viewSpecs.find((view) => view.id === activeView.value) || viewSpecs[0]);
 const activeDescriptor = computed(() => loadedViews[activeView.value] || null);
@@ -192,6 +201,8 @@ async function handleAuthenticated(next: AppShellAuthState) {
   Object.assign(authState, next, { required: false, authenticated: true, message: "" });
   await ensureView(activeView.value, !loadedViews[activeView.value]);
   await props.options.onAuthenticated?.(authState);
+  startupModelDismissed = false;
+  void pollStartupModelWarmup();
 }
 function setHealth(health: ShellJson, tone: RuntimeStatusState["tone"] = "normal") {
   runtimeState.health = health || {};
@@ -253,16 +264,71 @@ function handlePopState() {
   if (view) void navigate(view, { history: "none" });
 }
 
+function clearStartupModelTimers() {
+  if (startupModelTimer) window.clearTimeout(startupModelTimer);
+  if (startupModelCompleteTimer) window.clearTimeout(startupModelCompleteTimer);
+  startupModelTimer = 0;
+  startupModelCompleteTimer = 0;
+}
+
+function scheduleStartupModelPoll(delay = 700) {
+  if (startupModelTimer) window.clearTimeout(startupModelTimer);
+  startupModelTimer = window.setTimeout(pollStartupModelWarmup, delay);
+}
+
+function closeStartupModelProgress() {
+  startupModelDismissed = true;
+  startupModelOpen.value = false;
+}
+
+async function pollStartupModelWarmup() {
+  startupModelTimer = 0;
+  const endpoint = String(props.options.modelWarmupEndpoint || "").trim();
+  if (!endpoint || authState.required) return;
+  try {
+    const snapshot = await getJson<ShellJson>(endpoint);
+    startupModelWarmup.value = snapshot;
+    startupModelPollError.value = "";
+    const bootstrapPending = Boolean(snapshot.startup_bootstrap_pending);
+    const startupWarmup = String(snapshot.reason || "").trim().toLowerCase() === "startup";
+    if (bootstrapPending || (startupWarmup && Boolean(snapshot.running))) {
+      startupModelObserved = true;
+      if (!startupModelDismissed) startupModelOpen.value = true;
+      scheduleStartupModelPoll(snapshot.running ? 650 : 900);
+      return;
+    }
+    if (!startupModelObserved) return;
+    const errors = Array.isArray(snapshot.errors) ? snapshot.errors : [];
+    const bootstrapError = String(snapshot.startup_bootstrap_error || "").trim();
+    if (bootstrapError && !errors.length) startupModelWarmup.value = { ...snapshot, errors: [bootstrapError] };
+    if (errors.length || bootstrapError) {
+      if (!startupModelDismissed) startupModelOpen.value = true;
+      return;
+    }
+    if (startupModelOpen.value && !startupModelCompleteTimer) {
+      startupModelCompleteTimer = window.setTimeout(() => {
+        startupModelOpen.value = false;
+        startupModelCompleteTimer = 0;
+      }, 1400);
+    }
+  } catch (error) {
+    startupModelPollError.value = error instanceof Error ? error.message : "Live startup model progress is temporarily unavailable.";
+    if (startupModelObserved) scheduleStartupModelPoll(1600);
+  }
+}
+
 defineExpose({ navigate, refresh, refreshTab, selectViewTab, selectSettings, select: selectSettings, updateView, update, setHealth, setStatus, openRuntime, toast, updateBranding, setSidebarCollapsed, updateAuth, requireAuth });
 
 onMounted(() => {
   window.addEventListener("popstate", handlePopState);
   const requested = viewFromLocation() || activeView.value;
   void navigate(requested, { history: "replace" });
+  void pollStartupModelWarmup();
 });
 onBeforeUnmount(() => {
   window.removeEventListener("popstate", handlePopState);
   if (sidebarTimer) window.clearTimeout(sidebarTimer);
+  clearStartupModelTimers();
   toastTimers.forEach((timer) => window.clearTimeout(timer));
   toastTimers.clear();
 });
@@ -293,5 +359,6 @@ onBeforeUnmount(() => {
   </div>
   <button id="sidebar-expand-btn" class="sidebar-expand-fab" type="button" aria-label="Show menu" title="Show menu" :disabled="Boolean(sidebarPhase)" @click="setSidebarCollapsed(false)">{{ sidebarPhase ? '⋯' : '☰' }}</button>
   <div id="toast-root" class="toast-root" aria-live="polite" aria-atomic="true"><button v-for="item in toasts" :key="item.id" type="button" class="toast-item" :class="[item.tone, { show: item.visible, 'flame-out': item.closing }]" @click="dismissToast(item.id)">{{ item.message }}</button></div>
+  <LocalModelApplyProgress v-if="!authState.required" :open="startupModelOpen" :snapshot="startupModelWarmup" :poll-error="startupModelPollError" startup @close="closeStartupModelProgress" />
   <AuthGate :state="authState" :authenticate="options.authenticate" @authenticated="handleAuthenticated" />
 </template>

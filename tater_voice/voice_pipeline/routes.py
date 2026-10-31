@@ -223,11 +223,10 @@ async def startup() -> None:
         int(eou_cfg.get("webrtc_aggressiveness") or vp.DEFAULT_WEBRTC_VAD_AGGRESSIVENESS),
     )
     vp.logger.info(
-        "[native-voice] stt backend selected=%s effective=%s faster_whisper=%s mlx_whisper=%s parakeet_onnx=%s qwen3_asr_llama_cpp=%s vosk=%s wyoming=%s",
+        "[native-voice] stt backend selected=%s effective=%s faster_whisper=%s parakeet_onnx=%s qwen3_asr_llama_cpp=%s vosk=%s wyoming=%s",
         selected_stt_backend,
         effective_stt_backend,
         "available" if vp.WhisperModel is not None else "missing",
-        "available" if vp.MLXWhisper is not None else "missing",
         "available" if vp.OnnxASR is not None else "missing",
         "available" if vp._qwen3_asr_llama_cpp_available()[0] else "missing",
         "available" if vp.VoskModel is not None else "missing",
@@ -235,7 +234,7 @@ async def startup() -> None:
     )
     vp.logger.info("[native-voice] stt model root=%s", vp._stt_model_root())
     vp.logger.info(
-        "[native-voice] acceleration selected=%s effective=%s cuda_available=%s rocm_available=%s ctranslate2_cuda=%s onnx_cuda=%s onnx_rocm=%s torch_cuda=%s torch_rocm=%s mps_available=%s faster_whisper_device=%s kokoro_provider=%s",
+        "[native-voice] acceleration selected=%s effective=%s cuda_available=%s rocm_available=%s ctranslate2_cuda=%s onnx_cuda=%s onnx_rocm=%s torch_cuda=%s torch_rocm=%s mps_available=%s faster_whisper_device=%s",
         vp.normalize_speech_acceleration(vp._voice_settings_with_shared_speech().get("VOICE_ACCELERATION")),
         vp._effective_speech_acceleration(),
         vp._cuda_runtime_available(),
@@ -247,18 +246,13 @@ async def startup() -> None:
         vp._torch_rocm_available(),
         vp._mps_runtime_available(),
         vp._faster_whisper_device(),
-        vp._kokoro_provider(),
     )
     vp.logger.info(
-        "[native-voice] tts backend selected=%s effective=%s openai_compatible=%s chatterbox=%s kokoro=%s kokoro_torch=%s pocket_tts=%s piper=%s wyoming=%s",
+        "[native-voice] tts backend selected=%s effective=%s openai_compatible=%s pocket_tts=%s wyoming=%s",
         selected_tts_backend,
         effective_tts_backend,
         "configured" if vp._text(((vp._tts_config_snapshot().get("openai_compatible") or {}).get("base_url"))) else "missing",
-        "configured" if vp._text(((vp._tts_config_snapshot().get("chatterbox") or {}).get("base_url"))) else "missing",
-        "available" if vp.build_kokoro_pipeline is not None else "missing",
-        "available" if vp.KokoroTorchPipeline is not None else "missing",
         "available" if vp.PocketTTSModel is not None else "missing",
-        "available" if vp.PiperVoice is not None else "missing",
         "available" if vp.AsyncTcpClient is not None else "missing",
     )
     vp.logger.info("[native-voice] tts model root=%s", vp._tts_model_root())
@@ -402,8 +396,6 @@ async def native_status(x_tater_token: Optional[str] = Header(None)) -> Dict[str
         "tts_model_root": vp._tts_model_root(),
         "faster_whisper_available": vp.FASTER_WHISPER_IMPORT_ERROR is None,
         "faster_whisper_error": vp._text(vp.FASTER_WHISPER_IMPORT_ERROR),
-        "mlx_whisper_available": vp.MLX_WHISPER_IMPORT_ERROR is None,
-        "mlx_whisper_error": vp._text(vp.MLX_WHISPER_IMPORT_ERROR),
         "parakeet_onnx_available": vp.PARAKEET_ONNX_IMPORT_ERROR is None,
         "parakeet_onnx_error": vp._text(vp.PARAKEET_ONNX_IMPORT_ERROR),
         "parakeet_onnx_providers": vp._parakeet_onnx_providers(),
@@ -413,14 +405,8 @@ async def native_status(x_tater_token: Optional[str] = Header(None)) -> Dict[str
         "qwen3_asr_llama_cpp_runtime": vp._qwen3_asr_llama_cpp_runtime_snapshot(),
         "vosk_available": vp.VOSK_IMPORT_ERROR is None,
         "vosk_error": vp._text(vp.VOSK_IMPORT_ERROR),
-        "kokoro_available": vp.KOKORO_IMPORT_ERROR is None,
-        "kokoro_error": vp._text(vp.KOKORO_IMPORT_ERROR),
-        "kokoro_torch_available": vp.KOKORO_TORCH_IMPORT_ERROR is None,
-        "kokoro_torch_error": vp._text(vp.KOKORO_TORCH_IMPORT_ERROR),
         "pocket_tts_available": vp.POCKET_TTS_IMPORT_ERROR is None,
         "pocket_tts_error": vp._text(vp.POCKET_TTS_IMPORT_ERROR),
-        "piper_available": vp.PIPER_IMPORT_ERROR is None,
-        "piper_error": vp._text(vp.PIPER_IMPORT_ERROR),
         "wyoming_available": vp.WYOMING_IMPORT_ERROR is None,
         "wyoming_error": vp._text(vp.WYOMING_IMPORT_ERROR),
         "openai_compatible_available": bool(vp._text(((vp._tts_config_snapshot().get("openai_compatible") or {}).get("base_url")))),
@@ -867,6 +853,60 @@ async def native_satellite_command(payload: Dict[str, Any], x_tater_token: Optio
         message_payload = {}
     try:
         return await native_satellite.send_command(selector, message_type, message_payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.get("/api/tater/satellite/v1/video")
+async def native_satellite_video_status(
+    selector: str,
+    x_tater_token: Optional[str] = Header(None),
+) -> Dict[str, Any]:
+    vp = _vp()
+    vp._require_api_auth(x_tater_token)
+    from .. import display_video
+
+    try:
+        target = display_video.resolve_target(selector)
+        return {"ok": True, "selector": target, "session": display_video.session_payload(target)}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/api/tater/satellite/v1/video")
+async def native_satellite_video(
+    payload: Dict[str, Any],
+    x_tater_token: Optional[str] = Header(None),
+) -> Dict[str, Any]:
+    """Provider-neutral fullscreen video service used by Verbas and integrations."""
+    vp = _vp()
+    vp._require_api_auth(x_tater_token)
+    from .. import display_video
+
+    values = payload if isinstance(payload, dict) else {}
+    action = vp._text(values.get("action") or "play").lower()
+    selector = vp._text(values.get("selector") or values.get("target") or values.get("room"))
+    try:
+        target = display_video.resolve_target(selector)
+        if action == "play":
+            return await display_video.play(
+                target,
+                values.get("video_url") or values.get("source_url") or values.get("url"),
+                title=values.get("title"),
+                subtitle=values.get("subtitle"),
+                loop=values.get("loop", False),
+                live=values.get("live", False),
+                fps=values.get("fps", 30),
+                duration_ms=values.get("duration_ms", 0),
+                position_ms=values.get("position_ms", 0),
+            )
+        return await display_video.control(
+            target,
+            action,
+            position_ms=values.get("position_ms"),
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
@@ -2072,21 +2112,6 @@ async def native_tts_stream(stream_id: str) -> Response:
         "Cache-Control": "no-store, max-age=0",
         "Pragma": "no-cache",
     }
-    if vp._text(row.get("stream_kind")) == "chatterbox":
-        try:
-            upstream_response = await asyncio.to_thread(vp._open_chatterbox_tts_stream_response, row)
-        except Exception as exc:
-            raise HTTPException(status_code=502, detail=vp._text(exc) or "Chatterbox TTS stream failed") from exc
-        vp._native_debug(
-            f"native chatterbox tts stream fetch stream_id={vp._text(stream_id)} "
-            f"session_id={vp._text(row.get('session_id'))} selector={vp._text(row.get('selector'))}"
-        )
-        return StreamingResponse(
-            vp._iter_chatterbox_tts_stream_response(upstream_response, row),
-            media_type="audio/wav",
-            headers=headers,
-        )
-
     if vp._text(row.get("stream_kind")) == "native_tts":
         backend = vp._normalize_tts_backend(row.get("backend"))
         vp._native_debug(
@@ -2132,7 +2157,7 @@ async def native_tts_stream(stream_id: str) -> Response:
                 media_type="audio/wav",
                 headers=headers,
             )
-        if backend in {"pocket_tts", "piper", "kokoro", "chatterbox_local"}:
+        if backend == "pocket_tts":
             return StreamingResponse(
                 _iter_sync_tts_stream_with_fallback(
                     vp._iter_native_tts_stream_response(row),

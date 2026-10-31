@@ -436,6 +436,8 @@ class DisplayWeatherTests(unittest.TestCase):
             field["label"] for field in profile["fields"] if field["key"] == "temp_in"
         ))
         for field in profile["fields"]:
+            if field.get("type") != "select" or field.get("key") == "thermostat":
+                continue
             self.assertEqual("", field["options"][0]["value"])
             self.assertEqual("Do not show", field["options"][0]["label"])
 
@@ -466,7 +468,11 @@ class DisplayWeatherTests(unittest.TestCase):
         self.assertEqual("rook", profile["screen_target"])
         self.assertEqual(
             ["temp_out", "humidity_out", "temp_in", "humidity_in"],
-            [field["key"] for field in profile["fields"]],
+            [
+                field["key"]
+                for field in profile["fields"]
+                if field.get("key") in {"temp_out", "humidity_out", "temp_in", "humidity_in"}
+            ],
         )
 
     def test_echo_profile_save_skips_s3_entities_and_refreshes_the_native_screen(self) -> None:
@@ -490,18 +496,27 @@ class DisplayWeatherTests(unittest.TestCase):
                 "selector": "native:echo-show",
                 "profile_kind": "native_screen",
                 "screen_target": "checkers",
-                "slots": {"temp_in": "environment:ecowitt:station:hallway"},
+                "slots": {
+                    "thermostat": "ecobee_homekit::thermostat:living-room",
+                    "temp_in": "environment:ecowitt:station:hallway",
+                },
             })
 
         self.assertTrue(result["ok"])
         apply_url.assert_not_called()
         apply_target.assert_not_called()
-        send_command.assert_called_once_with(
-            "native:echo-show", "display.weather", {"available": True}
+        self.assertEqual(
+            ["display.weather", "display.climate"],
+            [call.args[1] for call in send_command.call_args_list],
         )
+        send_command.assert_any_call("native:echo-show", "display.weather", {"available": True})
         stored = json.loads(client.hashes["tater:display:profiles:v1"]["native_echo_show"])
         self.assertEqual("native_screen", stored["template"])
         self.assertEqual("checkers", stored["screen_target"])
+        self.assertEqual(
+            "ecobee_homekit::thermostat:living-room",
+            stored["thermostat"],
+        )
         self.assertEqual(
             "environment:ecowitt:station:hallway",
             stored["slots"]["temp_in"],

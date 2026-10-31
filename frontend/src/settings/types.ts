@@ -176,7 +176,6 @@ export interface SettingsMountOptions {
     modelsWyomingVoices: string;
     modelsOpenAiVoices: string;
     modelsOpenAiModels: string;
-    modelsChatterboxVoices: string;
     modelsSpeechWarmup: string;
     modelsCloneAudio: string;
     voiceRuntime: string;

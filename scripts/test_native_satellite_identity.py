@@ -591,6 +591,70 @@ class NativeSatelliteForgetTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(native_satellite._clients[selector]["last_settings_result"]["ok"])
 
+    def test_runtime_row_reports_actual_network_transport_and_wifi_rescue(self) -> None:
+        base = {
+            "connected": True,
+            "device_id": "echo-network-test",
+            "device_name": "Tater Echo Network Test",
+            "board": "biscuit",
+            "firmware_target": "biscuit",
+            "firmware_version": "v3.2.0-test",
+            "capabilities": {"speaker": True},
+            "live_settings": {},
+        }
+        wired = home._native_client_to_runtime_row(
+            "native:echo-network-test",
+            {
+                **base,
+                "last_status": {
+                    "state": "idle",
+                    "usb_ethernet": {
+                        "active": True,
+                        "state": "active",
+                        "transport": "ethernet",
+                        "interface": "eth0",
+                        "address": "10.4.20.159",
+                    },
+                },
+            },
+        )
+        self.assertEqual("ethernet", wired["connection_transport"])
+        self.assertFalse(wired["connection_degraded"])
+        self.assertEqual("Connected by Ethernet on eth0.", wired["connection_note"])
+
+        rescue = home._native_client_to_runtime_row(
+            "native:echo-network-test",
+            {
+                **base,
+                "last_status": {
+                    "state": "idle",
+                    "usb_ethernet": {
+                        "active": False,
+                        "wifi_rescue": True,
+                        "state": "rescue",
+                        "transport": "wifi",
+                        "interface": "eth0",
+                        "reason": "path-unreachable",
+                    },
+                },
+            },
+        )
+        self.assertEqual("wifi", rescue["connection_transport"])
+        self.assertTrue(rescue["connection_degraded"])
+        self.assertEqual(
+            "Connected by Wi-Fi rescue; Ethernet path unreachable.",
+            rescue["connection_note"],
+        )
+        diagnostics = next(
+            section["rows"]
+            for section in rescue["native_detail_sections"]
+            if section["title"] == "Diagnostics"
+        )
+        self.assertEqual(
+            "Connected by Wi-Fi rescue; Ethernet path unreachable",
+            {row["label"]: row["value"] for row in diagnostics}["Network"],
+        )
+
     def test_thirdreality_nww_details_use_the_active_nested_model(self) -> None:
         runtime = home._native_client_to_runtime_row(
             "native:thirdreality-test",

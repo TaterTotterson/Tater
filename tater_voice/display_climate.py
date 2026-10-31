@@ -8,9 +8,10 @@ from integration_registry import (
     run_integration_device_action,
 )
 from little_spud_home import (
+    CONTROL_ACTIONS,
     build_satellite_climate_snapshot,
     home_action_payload,
-    resolve_home_action_targets,
+    select_satellite_thermostat,
 )
 
 from . import display_feed
@@ -45,52 +46,63 @@ def build_climate_summary(
     return build_satellite_climate_snapshot(
         registry,
         room_sensor_refs=_room_sensor_refs(profile, maximum_rooms),
+        thermostat_ref=_text(profile.get("thermostat")),
         preferred_room=preferred_room,
         maximum_rooms=maximum_rooms,
     )
 
 
-def run_climate_action(payload: Dict[str, Any], *, client: Any = None) -> Dict[str, Any]:
+def run_climate_action(
+    payload: Dict[str, Any],
+    *,
+    selector: str = "",
+    preferred_room: str = "",
+    client: Any = None,
+) -> Dict[str, Any]:
     action = _text(payload.get("action")).lower()
     if action not in {"set_temperature", "set_hvac_mode"}:
         raise ValueError("Unsupported climate action.")
-    registry = get_integration_device_registry(client or redis_client)
-    targets = resolve_home_action_targets(
-        registry,
-        room_id=payload.get("room_id"),
-        category_id="climate",
-        action=action,
+    redis_obj = client or redis_client
+    profile, _found = display_feed._saved_display_profile_from_query(
+        {"selector": selector, "target": selector},
+        redis_obj,
     )
+    registry = get_integration_device_registry(redis_obj)
+    thermostat = select_satellite_thermostat(
+        registry,
+        thermostat_ref=_text(profile.get("thermostat")),
+        preferred_room=preferred_room or _text(payload.get("room_id")),
+    )
+    if thermostat is None:
+        raise RuntimeError("No thermostat is assigned to this satellite.")
+    raw_actions = thermostat.get("actions") or []
+    if not isinstance(raw_actions, (list, tuple, set)):
+        raw_actions = [raw_actions]
+    actions = {
+        _text(value).lower().replace("-", "_").replace(" ", "_")
+        for value in raw_actions
+    }
+    if action not in actions or action not in CONTROL_ACTIONS["climate"]:
+        raise RuntimeError("The assigned thermostat does not support this action.")
     action_payload = home_action_payload(
         action,
         payload.get("value"),
         mode=payload.get("mode"),
         temperature_unit=payload.get("temperature_unit") or "F",
     )
-    succeeded = 0
-    failures: List[str] = []
-    for device in targets:
-        integration_id = _text(device.get("integration_id"))
-        device_id = _text(device.get("id") or device.get("ref"))
-        if not integration_id or not device_id:
-            failures.append("A thermostat is missing its integration target.")
-            continue
-        try:
-            result = run_integration_device_action(integration_id, action, device_id, action_payload)
-            if isinstance(result, dict) and result.get("ok") is False:
-                failures.append(_text(result.get("error")) or "The thermostat rejected the action.")
-            else:
-                succeeded += 1
-        except Exception as exc:
-            failures.append(_text(exc) or "The thermostat action failed.")
-    if succeeded <= 0:
-        raise RuntimeError(failures[0] if failures else "No thermostat accepted the action.")
+    integration_id = _text(thermostat.get("integration_id"))
+    device_id = _text(thermostat.get("id") or thermostat.get("ref"))
+    if not integration_id or not device_id:
+        raise RuntimeError("The assigned thermostat is missing its integration target.")
+    result = run_integration_device_action(integration_id, action, device_id, action_payload)
+    if isinstance(result, dict) and result.get("ok") is False:
+        raise RuntimeError(_text(result.get("error")) or "The thermostat rejected the action.")
     return {
         "ok": True,
         "action": action,
-        "succeeded": succeeded,
-        "failed": len(failures),
-        "warning": failures[0] if failures else "",
+        "succeeded": 1,
+        "failed": 0,
+        "warning": "",
     }
 
 

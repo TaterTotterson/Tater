@@ -92,6 +92,10 @@ class AnnouncementTtsProfileTests(unittest.TestCase):
         with mock.patch.object(speech_settings, "redis_client", fake):
             settings = speech_settings.get_speech_settings()
 
+        self.assertEqual(settings["tts_clone_audio"], "/profiles/reference.wav")
+        self.assertEqual(settings["tts_clone_text"], "Direct transcript")
+        self.assertEqual(settings["announcement_tts_clone_audio"], "/profiles/reference.wav")
+        self.assertEqual(settings["announcement_tts_clone_text"], "Announcement transcript")
         self.assertEqual(settings["announcement_qwen_tts_clone_audio"], "/profiles/reference.wav")
         self.assertEqual(settings["announcement_qwen_tts_clone_text"], "Announcement transcript")
         self.assertEqual(settings["announcement_qwen_tts_language"], "English")
@@ -124,39 +128,15 @@ class AnnouncementTtsProfileTests(unittest.TestCase):
 
         self.assertEqual(fake.values["omnivoice_tts_clone_audio"], "/profiles/direct.wav")
         self.assertEqual(fake.values["omnivoice_tts_clone_text"], "Direct voice")
+        self.assertEqual(fake.values["tts_clone_audio"], "/profiles/direct.wav")
+        self.assertEqual(fake.values["tts_clone_text"], "Direct voice")
+        self.assertEqual(fake.values["announcement_tts_clone_audio"], "/profiles/announcement.wav")
+        self.assertEqual(fake.values["announcement_tts_clone_text"], "Announcement voice")
         self.assertEqual(fake.values["announcement_qwen_tts_clone_audio"], "/profiles/announcement.wav")
         self.assertEqual(fake.values["announcement_qwen_tts_clone_text"], "Announcement voice")
         self.assertEqual(fake.values["announcement_qwen_tts_language"], "Spanish")
         self.assertEqual(fake.values["announcement_qwen_tts_instruct"], "A bright announcement voice.")
 
-    def test_built_in_chatterbox_profiles_are_saved_independently(self) -> None:
-        fake = _FakeRedis()
-        with mock.patch.object(speech_settings, "redis_client", fake):
-            speech_settings.save_speech_settings(
-                stt_backend="faster_whisper",
-                wyoming_stt_host="127.0.0.1",
-                wyoming_stt_port="10300",
-                tts_backend="chatterbox_local",
-                tts_model="ResembleAI/chatterbox-turbo",
-                tts_voice="",
-                wyoming_tts_host="127.0.0.1",
-                wyoming_tts_port="10200",
-                wyoming_tts_voice="",
-                openai_tts_base_url="",
-                openai_tts_api_key="",
-                announcement_tts_backend="chatterbox_local",
-                announcement_tts_model="ResembleAI/chatterbox-nano",
-                announcement_tts_voice="",
-                chatterbox_local_tts_clone_audio="/profiles/direct-chatterbox.wav",
-                announcement_chatterbox_local_tts_clone_audio="/profiles/announcement-chatterbox.wav",
-            )
-
-        self.assertEqual(fake.values["tts_backend"], "chatterbox_local")
-        self.assertEqual(fake.values["chatterbox_local_tts_clone_audio"], "/profiles/direct-chatterbox.wav")
-        self.assertEqual(
-            fake.values["announcement_chatterbox_local_tts_clone_audio"],
-            "/profiles/announcement-chatterbox.wav",
-        )
 
     def test_ui_exposes_reuse_and_independent_managed_voice_cards(self) -> None:
         models_source = (ROOT / "frontend" / "src" / "settings" / "components" / "ModelsSettings.vue").read_text(encoding="utf-8")
@@ -168,8 +148,38 @@ class AnnouncementTtsProfileTests(unittest.TestCase):
         self.assertIn('scope="announcement"', speech_source)
         self.assertIn('scope="direct"', speech_source)
         self.assertIn('const keyPrefix = computed(() => announcement.value ? "speech_announcement_" : "speech_")', profile_source)
-        self.assertIn("speech_announcement_qwen_tts_clone_text", models_source)
-        self.assertIn("speech_announcement_omnivoice_tts_clone_text", models_source)
+        self.assertIn("speech_announcement_tts_clone_text", models_source)
+        self.assertIn("Shared personal voice", profile_source)
+        self.assertIn("<audio", profile_source)
+        self.assertIn('v-model="draft[languageKey]"', profile_source)
+        self.assertIn("Auto detect (recommended)", settings_source)
+        self.assertNotIn('v-model="draft[languageKey]" type="text"', profile_source)
+
+        options = [
+            row["value"]
+            for row in speech_settings.get_speech_ui_payload({"tts_backend": "pocket_tts"}).get(
+                "tts_backend_options", []
+            )
+        ]
+        self.assertIn("pocket_tts", options)
+        self.assertIn("qwen3_tts", options)
+        self.assertIn("omnivoice", options)
+        self.assertNotIn("kokoro", options)
+        self.assertNotIn("piper", options)
+
+        speech_ui = speech_settings.get_speech_ui_payload({"tts_backend": "qwen3_tts"})
+        qwen_models = [row["value"] for row in speech_ui["tts_model_options_by_backend"]["qwen3_tts"]]
+        self.assertEqual(
+            qwen_models,
+            [speech_settings.DEFAULT_QWEN_TTS_MODEL, speech_settings.QWEN_TTS_LARGE_MODEL],
+        )
+        self.assertEqual(
+            speech_ui["tts_language_options_by_backend"]["qwen3_tts"][0],
+            {"value": "Auto", "label": "Auto detect (recommended)"},
+        )
+        self.assertGreater(len(speech_ui["tts_language_options_by_backend"]["omnivoice"]), 600)
+        self.assertIn('effectiveBackend.value)', profile_source)
+        self.assertIn('"wyoming", "openai_compatible", "qwen3_tts"', profile_source)
 
 
 class AnnouncementTtsRuntimeTests(unittest.IsolatedAsyncioTestCase):
@@ -210,8 +220,8 @@ class AnnouncementTtsRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 "tts_backend": "omnivoice",
                 "tts_model": "direct-omni-model",
                 "tts_voice": "",
-                "omnivoice_tts_clone_audio": "/profiles/direct.wav",
-                "omnivoice_tts_clone_text": "Direct transcript",
+                "tts_clone_audio": "/profiles/direct.wav",
+                "tts_clone_text": "Direct transcript",
                 "omnivoice_tts_language": "English",
                 "omnivoice_tts_instruct": "Direct voice",
                 "acceleration": "cpu",
@@ -231,8 +241,8 @@ class AnnouncementTtsRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 "announcement_tts_backend": "qwen3_tts",
                 "announcement_tts_model": "announcement-qwen-model",
                 "announcement_tts_voice": "",
-                "announcement_qwen_tts_clone_audio": "/profiles/announcement.wav",
-                "announcement_qwen_tts_clone_text": "Announcement transcript",
+                "announcement_tts_clone_audio": "/profiles/announcement.wav",
+                "announcement_tts_clone_text": "Announcement transcript",
                 "announcement_qwen_tts_language": "Spanish",
                 "announcement_qwen_tts_instruct": "Announcement voice",
                 "acceleration": "cuda",
@@ -246,33 +256,14 @@ class AnnouncementTtsRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kwargs["managed_language"], "Spanish")
         self.assertEqual(kwargs["managed_instruct"], "Announcement voice")
 
-    async def test_built_in_chatterbox_announcement_uses_its_reference_audio(self) -> None:
-        kwargs = await self._synthesize(
-            "chatterbox_local",
-            {
-                "announcement_tts_backend": "chatterbox_local",
-                "announcement_tts_model": "ResembleAI/chatterbox-nano",
-                "announcement_tts_voice": "",
-                "announcement_chatterbox_local_tts_clone_audio": "/profiles/chatterbox.wav",
-                "announcement_chatterbox_tts_temperature": "0.7",
-                "announcement_chatterbox_tts_seed": "42",
-                "acceleration": "cpu",
-            },
-        )
-
-        self.assertEqual(kwargs["backend"], "chatterbox_local")
-        self.assertEqual(kwargs["model"], "ResembleAI/chatterbox-nano")
-        self.assertEqual(kwargs["clone_audio"], "/profiles/chatterbox.wav")
-        self.assertEqual(kwargs["chatterbox_temperature"], "0.7")
-        self.assertEqual(kwargs["chatterbox_seed"], "42")
 
     async def test_repeated_and_custom_messages_use_the_persistent_audio_cache(self) -> None:
         settings = {
             "tts_backend": "omnivoice",
             "tts_model": "voice-model",
             "tts_voice": "",
-            "omnivoice_tts_clone_audio": "/profiles/direct.wav",
-            "omnivoice_tts_clone_text": "Reference transcript",
+            "tts_clone_audio": "/profiles/direct.wav",
+            "tts_clone_text": "Reference transcript",
             "acceleration": "cpu",
         }
         cache = {}

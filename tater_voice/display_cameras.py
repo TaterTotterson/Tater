@@ -72,9 +72,11 @@ def _camera_rows(client: Any = None) -> List[Dict[str, Any]]:
     return result
 
 
-def build_camera_directory(*, client: Any = None) -> Dict[str, Any]:
+def build_camera_directory(*, client: Any = None, include_satellites: bool = True) -> Dict[str, Any]:
     cameras: List[Dict[str, Any]] = []
     for row in _camera_rows(client):
+        if not include_satellites and _text(row.get("integration_id")) == "tater_native":
+            continue
         actions = _actions(row)
         capabilities = {_text(item).lower() for item in list(row.get("capabilities") or []) if _text(item)}
         features = {_text(item).lower() for item in list(row.get("features") or []) if _text(item)}

@@ -30,10 +30,8 @@ const installed = computed<JsonRow[]>(() => allInstalled.value.filter((row: Json
 
 const providerOptions = [
   { value: "openai_compatible", label: "OpenAI-Compatible API", mark: "API", short: "Use a hosted or LAN multimodal endpoint." },
-  { value: "hf_transformers", label: "Hugging Face Transformers", mark: "HF", short: "Run a downloaded Transformers model locally." },
   { value: "llama_cpp", label: "llama.cpp Local", mark: "GGUF", short: "Run a downloaded quantized model in Tater." },
   { value: "llama_cpp_remote", label: "llama.cpp Remote", mark: "LAN", short: "Connect to a llama.cpp server on another machine." },
-  { value: "mlx_lm", label: "MLX LM", mark: "MLX", short: "Use Apple Silicon optimized local inference." },
 ];
 
 const modeOptions = computed(() => [
@@ -53,7 +51,7 @@ const kindMeta = computed(() => props.kind === "vision"
 function changed() { emit("dirty"); }
 function chooseMode(value: string) { props.draft[modeKey.value] = value; changed(); }
 function chooseProvider(value: string) { props.draft[providerKey.value] = value; changed(); }
-function local() { return ["hf_transformers", "llama_cpp", "mlx_lm"].includes(provider.value); }
+function local() { return provider.value === "llama_cpp"; }
 function api() { return ["openai_compatible", "llama_cpp_remote"].includes(provider.value); }
 function currentInstalled() { return allInstalled.value.some((model) => String(model.provider || "") === provider.value && String(model.model || "") === String(props.draft[modelKey.value] || "")); }
 </script>
@@ -80,7 +78,7 @@ function currentInstalled() { return allInstalled.value.some((model) => String(m
           <label class="tm-field"><span class="tm-field-label">API base URL</span><input v-model="draft[apiBaseKey]" type="url" placeholder="http://127.0.0.1:1234" @input="changed" /><small>Base URL for the compatible inference server.</small></label>
           <label class="tm-field"><span class="tm-field-label">API key</span><input v-model="draft[apiKeyKey]" type="password" autocomplete="off" placeholder="Optional" @input="changed" /><small>Stored locally and sent only to this endpoint.</small></label>
         </div>
-        <label v-if="local()" class="tm-field tm-field-wide"><span class="tm-field-label">Downloaded {{ kind }} model</span><select v-model="draft[modelKey]" @change="changed"><option value="">Select a downloaded model</option><option v-if="draft[modelKey] && !currentInstalled()" :value="draft[modelKey]">Current: {{ draft[modelKey] }}</option><option v-for="model in installed" :key="String(model.model)" :value="model.model">{{ model.model }}</option></select><small v-if="!installed.length">No compatible downloaded models were detected. Add one from the Hugging Face tab.</small><small v-else>{{ installed.length }} compatible downloaded model{{ installed.length === 1 ? "" : "s" }} available.</small></label>
+        <label v-if="local()" class="tm-field tm-field-wide"><span class="tm-field-label">Downloaded {{ kind }} model</span><select v-model="draft[modelKey]" @change="changed"><option value="">Select a downloaded model</option><option v-if="draft[modelKey] && !currentInstalled()" :value="draft[modelKey]">Current: {{ draft[modelKey] }}</option><option v-for="model in installed" :key="String(model.model)" :value="model.model">{{ model.model }}</option></select><small v-if="!installed.length">No compatible downloaded models were detected. Add one from the Models tab.</small><small v-else>{{ installed.length }} compatible downloaded model{{ installed.length === 1 ? "" : "s" }} available.</small></label>
         <label v-else class="tm-field tm-field-wide"><span class="tm-field-label">Model name or alias</span><input v-model="draft[modelKey]" type="text" placeholder="Model id or server alias" @input="changed" /><small>Use the exact model name exposed by the selected server.</small></label>
       </div>
     </section>

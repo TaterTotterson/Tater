@@ -31,7 +31,34 @@ class DisplayClimateSettingsTests(unittest.TestCase):
                 "message": "",
             },
             {},
+            {
+                "ready": True,
+                "options": [
+                    {"value": "", "label": "Automatic (recommended)"},
+                    {"value": "__none__", "label": "None — disable Climate panel"},
+                    {
+                        "label": "Ecobee HomeKit",
+                        "options": [
+                            {
+                                "value": "ecobee_homekit::thermostat:living-room",
+                                "label": "Living Room — Thermostat",
+                            }
+                        ],
+                    },
+                ],
+                "message": "",
+            },
         ) or {}
+
+    def test_native_screen_offers_thermostat_selector_before_room_temperatures(self) -> None:
+        fields = self._profile("crown").get("fields") or []
+        keys = [field.get("key") for field in fields]
+        thermostat = next(field for field in fields if field.get("key") == "thermostat")
+
+        self.assertLess(keys.index("thermostat"), keys.index("room_temp_1"))
+        self.assertEqual("", thermostat["value"])
+        self.assertEqual("Automatic (recommended)", thermostat["options"][0]["label"])
+        self.assertEqual("__none__", thermostat["options"][1]["value"])
 
     def test_checkers_and_crown_offer_six_room_temperature_slots(self) -> None:
         for screen_target in ("checkers", "crown"):
@@ -63,6 +90,7 @@ class DisplayClimateSettingsTests(unittest.TestCase):
         self.assertFalse(
             any(str(field.get("key") or "").startswith("room_temp_") for field in fields)
         )
+        self.assertFalse(any(field.get("key") == "thermostat" for field in fields))
 
 
 if __name__ == "__main__":

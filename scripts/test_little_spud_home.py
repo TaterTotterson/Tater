@@ -10,6 +10,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from little_spud_home import (  # noqa: E402
+    SATELLITE_THERMOSTAT_DISABLED,
     build_home_snapshot,
     build_satellite_climate_snapshot,
     home_action_payload,
@@ -114,6 +115,44 @@ class LittleSpudHomeTests(unittest.TestCase):
             [row["temperature"] for row in snapshot["room_temperatures"]],
             [72.5, 71],
         )
+
+    def test_satellite_climate_honors_explicit_thermostat_selection(self):
+        registry = sample_registry()
+        registry["devices"].append(
+            {
+                "integration_id": "homekit",
+                "id": "thermostat:living-room",
+                "name": "Downstairs Thermostat",
+                "room": "Living Room",
+                "room_id": "living_room",
+                "category_ids": ["climate"],
+                "actions": ["set_temperature", "set_hvac_mode"],
+                "details": {
+                    "current_temperature_f": 74,
+                    "target_temperature_f": 73,
+                    "target_hvac_mode": "cool",
+                },
+            }
+        )
+
+        snapshot = build_satellite_climate_snapshot(
+            registry,
+            thermostat_ref="homekit::thermostat:living-room",
+            preferred_room="Office",
+        )
+
+        self.assertTrue(snapshot["available"])
+        self.assertEqual("Living Room", snapshot["room_name"])
+        self.assertEqual(73, snapshot["target_temperature"])
+
+    def test_satellite_climate_can_be_disabled_per_satellite(self):
+        snapshot = build_satellite_climate_snapshot(
+            sample_registry(),
+            thermostat_ref=SATELLITE_THERMOSTAT_DISABLED,
+        )
+
+        self.assertFalse(snapshot["available"])
+        self.assertFalse(snapshot["can_set_temperature"])
 
     def test_satellite_climate_is_explicitly_unavailable_without_thermostat(self):
         registry = sample_registry()

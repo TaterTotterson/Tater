@@ -140,7 +140,7 @@ class MediaUnderstandingTests(unittest.TestCase):
     def test_models_tabs_follow_the_user_workflow_order(self):
         source = (ROOT / "frontend" / "src" / "settings" / "components" / "ModelsSettings.vue").read_text(encoding="utf-8")
         expected_tabs = (
-            '{ id: "huggingface", label: "Hugging Face"',
+            '{ id: "huggingface", label: "Models"',
             '{ id: "routing", label: "LLM"',
             '{ id: "speech", label: "Speech"',
             '{ id: "wake", label: "Wake Word"',

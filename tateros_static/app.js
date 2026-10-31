@@ -919,7 +919,6 @@ function createSettingsVueDescriptor(settings, redisStatus, redisEncryptionStatu
       modelsWyomingVoices: withBasePath("/api/settings/speech/wyoming-tts-voices"),
       modelsOpenAiVoices: withBasePath("/api/settings/speech/openai-compatible-tts-voices"),
       modelsOpenAiModels: withBasePath("/api/settings/speech/openai-compatible-tts-models"),
-      modelsChatterboxVoices: withBasePath("/api/settings/speech/chatterbox-tts-voices"),
       modelsSpeechWarmup: withBasePath("/api/settings/speech/warmup"),
       modelsCloneAudio: withBasePath("/api/settings/speech/clone-audio"),
       voiceRuntime: withBasePath("/api/settings/voice/runtime"),
@@ -1122,6 +1121,7 @@ async function mountVueAppShell() {
     initialAuthState: appShellAuthState(state.auth),
     authenticate: authenticateWebui,
     runtimeOptions: createRuntimeVueOptions(),
+    modelWarmupEndpoint: withBasePath("/api/settings/hf-llm/warmup"),
     loadView: (view, options) => loadVueShellView(view, options),
     onViewChange: (view) => handleVueShellViewChange(view),
     onSidebarChange: (collapsed) => {

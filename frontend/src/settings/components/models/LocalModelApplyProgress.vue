@@ -7,6 +7,7 @@ const props = defineProps<{
   open: boolean;
   snapshot: JsonRow;
   pollError?: string;
+  startup?: boolean;
 }>();
 
 const emit = defineEmits<{ close: [] }>();
@@ -17,6 +18,8 @@ const errors = computed<string[]>(() => [
   ...(props.pollError ? [props.pollError] : []),
 ].filter(Boolean));
 const running = computed(() => Boolean(props.snapshot.running));
+const startup = computed(() => Boolean(props.startup));
+const startupPending = computed(() => startup.value && Boolean(props.snapshot.startup_bootstrap_pending));
 const saving = computed(() => String(props.snapshot.ui_phase || "") === "saving");
 const activeKey = computed(() => String(props.snapshot.active_key || ""));
 const activeItem = computed<JsonRow | null>(() => items.value.find((item) => Boolean(item.active))
@@ -26,7 +29,7 @@ const loadDone = computed(() => items.value.length > 0 && items.value.every((ite
 const restart = computed<JsonRow>(() => props.snapshot.runtime_restart && typeof props.snapshot.runtime_restart === "object" ? props.snapshot.runtime_restart as JsonRow : {});
 const restartRunning = computed(() => Boolean(restart.value.running) || activeKey.value === "__runtime_restart__");
 const restartFinished = computed(() => Number(restart.value.finished_ts || 0) > 0);
-const complete = computed(() => !saving.value && !running.value);
+const complete = computed(() => !saving.value && !running.value && !startupPending.value);
 const successful = computed(() => complete.value && !errors.value.length);
 const progress = computed(() => {
   if (saving.value) return 6;
@@ -40,13 +43,13 @@ const itemProgress = computed(() => {
   return items.value.reduce((sum, item) => sum + clamp(item.progress), 0) / items.value.length;
 });
 const headline = computed(() => {
-  if (errors.value.length && complete.value) return "Model change needs attention";
+  if (errors.value.length && complete.value) return startup.value ? "Startup model needs attention" : "Model change needs attention";
   if (saving.value) return "Saving your model setup";
   if (activeKey.value === "__unload_previous__") return "Unloading the previous model";
   if (restartRunning.value) return "Refreshing Cores and Portals";
   if (activeItem.value) return `Loading ${String(activeItem.value.provider_label || providerLabel(activeItem.value.provider))}`;
   if (successful.value) return "Tater is ready";
-  return "Preparing local models";
+  return startupPending.value ? "Starting Tater" : "Preparing local models";
 });
 const headlineDetail = computed(() => {
   if (errors.value.length && complete.value) return errors.value[0];
@@ -54,7 +57,8 @@ const headlineDetail = computed(() => {
   if (activeKey.value === "__unload_previous__") return "Tater is releasing the old model cleanly before loading the new one.";
   if (restartRunning.value) return "The selected model is ready. Running surfaces are reconnecting to it now.";
   if (activeItem.value) return shortModel(activeItem.value);
-  if (successful.value) return "Models, Cores, and Portals are synchronized with your saved settings.";
+  if (successful.value) return startup.value ? "Your local model and Tater runtime are ready." : "Models, Cores, and Portals are synchronized with your saved settings.";
+  if (startupPending.value) return "The app is open while Tater prepares your saved local model and runtime.";
   return "Tater is preparing the selected local runtime.";
 });
 const statusText = computed(() => {
@@ -64,7 +68,7 @@ const statusText = computed(() => {
   if (activeItem.value) return String(activeItem.value.message || prettyStatus(activeItem.value.status));
   if (errors.value.length) return errors.value[0];
   if (successful.value) return "Model change complete";
-  return "Waiting for the model loader…";
+  return startupPending.value ? "Preparing the startup model loader…" : "Waiting for the model loader…";
 });
 const stages = computed(() => {
   const unloadTargets = Array.isArray(props.snapshot.unload_before) ? props.snapshot.unload_before : [];
@@ -74,6 +78,27 @@ const stages = computed(() => {
   const loaded = items.value.filter((item) => ["loaded", "downloaded"].includes(status(item))).length;
   const restartFailures = restartFailureCount(restart.value);
   const hasRestart = restartRunning.value || restartFinished.value || Number(restart.value.started_ts || 0) > 0;
+  if (startup.value) {
+    return [
+      {
+        id: "open", label: "Open Tater",
+        detail: "The control surface is available while startup continues.",
+        state: "done",
+      },
+      {
+        id: "load", label: "Load selected model",
+        detail: items.value.length
+          ? activeItem.value ? shortModel(activeItem.value) : `${loaded}/${items.value.length} ${items.value.length === 1 ? "model" : "models"} ready.`
+          : startupPending.value ? "Reading the saved local model selection." : "No local model load was needed.",
+        state: itemErrors.length ? "error" : activeItem.value ? "active" : loadDone.value ? "done" : startupPending.value ? "active" : "skipped",
+      },
+      {
+        id: "ready", label: errors.value.length ? "Needs attention" : "Ready",
+        detail: errors.value.length ? "Review the model message before trying again." : complete.value && !startupPending.value ? "Tater is ready to use." : "Finishes when the selected model is available.",
+        state: errors.value.length && complete.value ? "error" : complete.value && !startupPending.value ? "done" : "pending",
+      },
+    ];
+  }
   return [
     {
       id: "save", label: "Save settings",
@@ -115,7 +140,7 @@ function prettyStatus(value: unknown): string {
   return token.charAt(0).toUpperCase() + token.slice(1);
 }
 function providerLabel(value: unknown): string {
-  return ({ llama_cpp: "llama.cpp", hf_transformers: "Transformers", mlx_lm: "MLX LM" } as Record<string, string>)[String(value || "")] || "local model";
+  return String(value || "") === "llama_cpp" ? "llama.cpp" : "local model";
 }
 function shortModel(item: JsonRow): string {
   const value = String(item.filename || item.model || "Selected local model");
@@ -148,8 +173,8 @@ function restartDetail(value: JsonRow): string {
   <PopupTransition :open="open" backdrop-class="tv-modal-backdrop tset-modal tm-model-apply-backdrop" @close="emit('close')">
     <section class="tv-modal tm-model-apply" :class="{ running, complete, error: errors.length }" role="dialog" aria-modal="true" aria-labelledby="tm-model-apply-title">
       <header>
-        <div><span class="tv-eyebrow">Tater model loader</span><h2 id="tm-model-apply-title">Apply local model changes</h2><p>Live progress from the model runtime and every surface connected to it.</p></div>
-        <button class="tv-button" type="button" @click="emit('close')">{{ running || saving ? "Hide" : "Close" }}</button>
+        <div><span class="tv-eyebrow">Tater model loader</span><h2 id="tm-model-apply-title">{{ startup ? "Starting local intelligence" : "Apply local model changes" }}</h2><p>{{ startup ? "Live startup progress while the rest of Tater stays visible." : "Live progress from the model runtime and every surface connected to it." }}</p></div>
+        <button class="tv-button" type="button" @click="emit('close')">{{ running || saving || startupPending ? "Hide" : "Close" }}</button>
       </header>
 
       <section class="tm-model-apply-hero">
@@ -160,7 +185,7 @@ function restartDetail(value: JsonRow): string {
       <div class="tm-model-apply-overall">
         <div><strong>{{ statusText }}</strong><b>{{ Math.round(progress) }}%</b></div>
         <div class="tm-model-apply-track" role="progressbar" :aria-valuenow="Math.round(progress)" aria-valuemin="0" aria-valuemax="100"><span :style="{ width: `${progress}%` }" /></div>
-        <small>{{ running || saving ? "This continues safely if you hide the window or change tabs." : errors.length ? "The saved settings remain available; fix the reported issue and apply again." : "All model work for this save has finished." }}</small>
+        <small>{{ running || saving || startupPending ? "This continues safely if you hide the window or change tabs." : errors.length ? "The saved settings remain available; fix the reported issue and apply again." : startup ? "Startup model preparation has finished." : "All model work for this save has finished." }}</small>
       </div>
 
       <div class="tm-model-apply-stages" aria-label="Model apply stages">
@@ -184,7 +209,7 @@ function restartDetail(value: JsonRow): string {
 
       <div v-if="errors.length" class="tm-model-apply-errors" role="alert"><strong>What needs attention</strong><span v-for="message in errors" :key="message">{{ message }}</span></div>
 
-      <footer><span>{{ complete ? errors.length ? "Model changes finished with an issue." : "Your selected models are ready." : "Tater will keep working in the background." }}</span><button class="tv-button primary" type="button" @click="emit('close')">{{ complete ? "Done" : "Continue in background" }}</button></footer>
+      <footer><span>{{ complete && !startupPending ? errors.length ? "Model loading finished with an issue." : "Your selected models are ready." : "Tater will keep working in the background." }}</span><button class="tv-button primary" type="button" @click="emit('close')">{{ complete && !startupPending ? "Done" : "Continue in background" }}</button></footer>
     </section>
   </PopupTransition>
 </template>

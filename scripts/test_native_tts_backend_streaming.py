@@ -97,7 +97,7 @@ class NativeTtsPcmStreamTests(unittest.TestCase):
                             "id": "pocket",
                             "backend": "pocket_tts",
                             "text": "Hello",
-                            "selection": {"model": "default", "voice": "alba"},
+                            "selection": {"model": "default", "tts_clone_audio": "/voices/sample.wav"},
                             "max_bytes": 1024 * 1024,
                         }
                     )
@@ -114,111 +114,6 @@ class NativeTtsPcmStreamTests(unittest.TestCase):
         )
         model.generate_audio.assert_not_called()
 
-    def test_piper_yields_each_native_chunk(self) -> None:
-        class PiperVoice:
-            def synthesize(self, _text, *, syn_config):
-                self.syn_config = syn_config
-                yield SimpleNamespace(
-                    audio_int16_bytes=b"\x01\x02\x03\x04",
-                    sample_rate=22050,
-                    sample_width=2,
-                    sample_channels=1,
-                )
-                yield SimpleNamespace(
-                    audio_int16_bytes=b"\x05\x06",
-                    sample_rate=22050,
-                    sample_width=2,
-                    sample_channels=1,
-                )
-
-        voice = PiperVoice()
-        with (
-            mock.patch.object(backends, "_load_piper_voice_model", return_value=voice),
-            mock.patch.object(vp, "PiperSynthesisConfig", return_value=object()),
-            mock.patch.object(vp, "DEFAULT_PIPER_TAIL_PAD_SECONDS", 0.0),
-        ):
-            chunks = list(
-                backends._iter_native_tts_stream_response(
-                    {
-                        "id": "piper",
-                        "backend": "piper",
-                        "text": "Hello",
-                        "selection": {"model": "test"},
-                        "max_bytes": 1024 * 1024,
-                    }
-                )
-            )
-
-        self.assertEqual([chunks[0][44:], chunks[1]], [b"\x01\x02\x03\x04", b"\x05\x06"])
-
-    def test_kokoro_torch_yields_pipeline_results(self) -> None:
-        calls = []
-
-        def pipeline(text, **kwargs):
-            calls.append((text, kwargs))
-            yield SimpleNamespace(audio=np.asarray([-0.25, 0.25], dtype=np.float32))
-            yield SimpleNamespace(audio=np.asarray([0.5], dtype=np.float32))
-
-        with (
-            mock.patch.object(vp, "_kokoro_engine", return_value="torch"),
-            mock.patch.object(vp, "_kokoro_torch_device", return_value="cpu"),
-            mock.patch.object(backends, "_load_kokoro_pipeline", return_value=pipeline),
-            mock.patch.object(backends, "_kokoro_output_gain", return_value=1.0),
-        ):
-            chunks = list(
-                backends._iter_native_tts_stream_response(
-                    {
-                        "id": "kokoro",
-                        "backend": "kokoro",
-                        "text": "Hello. There.",
-                        "selection": {"model": "test", "voice": "af_heart"},
-                        "max_bytes": 1024 * 1024,
-                    }
-                )
-            )
-
-        self.assertEqual(len(chunks), 2)
-        self.assertEqual(chunks[0][44:], backends._float_audio_to_pcm16_bytes([-0.25, 0.25]))
-        self.assertEqual(chunks[1], backends._float_audio_to_pcm16_bytes([0.5]))
-        self.assertEqual(calls[0][0], "Hello. There.")
-
-    def test_chatterbox_local_streams_sentence_results_from_managed_worker(self) -> None:
-        calls = []
-
-        def synthesize(text, **kwargs):
-            calls.append((text, kwargs))
-            return b"\x01\x00", {"rate": 24000, "width": 2, "channels": 1}
-
-        with (
-            mock.patch.object(backends, "synthesize_managed_tts_pcm", side_effect=synthesize),
-            mock.patch.object(vp, "DEFAULT_PIPER_SENTENCE_PAUSE_SECONDS", 0.0),
-            mock.patch.object(vp, "DEFAULT_PIPER_TAIL_PAD_SECONDS", 0.0),
-            mock.patch.object(vp, "_voice_settings_with_shared_speech", return_value={"VOICE_ACCELERATION": "cpu"}),
-        ):
-            chunks = list(
-                backends._iter_native_tts_stream_response(
-                    {
-                        "id": "chatterbox-local",
-                        "backend": "chatterbox_local",
-                        "text": "Hello. There.",
-                        "selection": {
-                            "model": "ResembleAI/chatterbox-nano",
-                            "chatterbox_local_tts_clone_audio": "/voices/reference.wav",
-                            "chatterbox_temperature": "0.7",
-                            "chatterbox_seed": "42",
-                        },
-                        "max_bytes": 1024 * 1024,
-                    }
-                )
-            )
-
-        self.assertEqual([call[0] for call in calls], ["Hello.", "There."])
-        self.assertEqual(chunks[0][44:], b"\x01\x00")
-        self.assertEqual(chunks[1], b"\x01\x00")
-        self.assertEqual(calls[0][1]["clone_audio"], "/voices/reference.wav")
-        self.assertEqual(calls[0][1]["temperature"], "0.7")
-
-
 class NativeTtsRemoteStreamTests(unittest.TestCase):
     def test_stream_setup_failure_falls_back_to_wyoming_before_audio_starts(self) -> None:
         def failed_stream():
@@ -233,7 +128,7 @@ class NativeTtsRemoteStreamTests(unittest.TestCase):
             result = []
             async for chunk in routes._iter_sync_tts_stream_with_fallback(
                 failed_stream(),
-                {"backend": "piper"},
+                {"backend": "pocket_tts"},
             ):
                 result.append(chunk)
             return result

@@ -38,26 +38,23 @@ class ManagedTtsTests(unittest.TestCase):
             ("qwen", "qwen3_tts"),
             ("Qwen3-TTS", "qwen3_tts"),
             ("omni voice", "omnivoice"),
-            ("Chatterbox Built-in", "chatterbox_local"),
         ):
             self.assertEqual(managed_tts.normalize_managed_tts_backend(value), expected)
 
-    def test_chatterbox_runtime_is_pinned_to_an_exact_upstream_commit(self) -> None:
-        stack_id = managed_tts._stack_id(managed_tts.CHATTERBOX_LOCAL_TTS_BACKEND, "cpu")
-        self.assertIn(managed_tts._CHATTERBOX_COMMIT, stack_id)
-        self.assertIn("torch-2.6.0", stack_id)
 
-    def test_clone_audio_is_kept_inside_backend_profile(self) -> None:
+    def test_clone_audio_is_shared_across_voice_clone_backends(self) -> None:
         path = managed_tts.store_clone_audio(
             "qwen3_tts",
             filename="My Voice.WAV",
             data=b"RIFF-reference-data",
         )
-        self.assertEqual(Path(path).name, "reference.wav")
+        self.assertEqual(Path(path).name, "reference--My-Voice.wav")
         self.assertEqual(managed_tts.validate_clone_audio_path("qwen3_tts", path), path)
+        self.assertEqual(managed_tts.validate_clone_audio_path("pocket_tts", path), path)
+        self.assertEqual(managed_tts.validate_clone_audio_path("omnivoice", path), path)
         self.assertEqual(
-            managed_tts.clone_audio_info("qwen3_tts", path),
-            {"configured": True, "name": "reference.wav", "size": 19},
+            managed_tts.clone_audio_info("pocket_tts", path),
+            {"configured": True, "name": "My-Voice.wav", "size": 19},
         )
         with self.assertRaises(ValueError):
             managed_tts.validate_clone_audio_path("qwen3_tts", self.root / "outside.wav")
@@ -75,8 +72,8 @@ class ManagedTtsTests(unittest.TestCase):
             profile="announcement",
         )
 
-        self.assertEqual(Path(direct_path).name, "reference.wav")
-        self.assertEqual(Path(announcement_path).name, "announcement-reference.wav")
+        self.assertEqual(Path(direct_path).name, "reference--direct.wav")
+        self.assertEqual(Path(announcement_path).name, "announcement-reference--announcement.wav")
         self.assertEqual(Path(direct_path).read_bytes(), b"RIFF-direct")
         self.assertEqual(Path(announcement_path).read_bytes(), b"RIFF-announcement")
 
@@ -305,45 +302,37 @@ class ManagedTtsTests(unittest.TestCase):
         self.assertEqual(sample_rate, 24000)
         self.assertIsNone(model.prompt_args["ref_text"])
 
-    def test_chatterbox_local_uses_builtin_voice_and_generation_controls(self) -> None:
-        class FakeChatterboxModel:
-            sr = 24000
-            conds = "builtin-voice"
+    def test_omnivoice_worker_treats_auto_language_as_detection(self) -> None:
+        class FakeOmniVoiceModel:
+            sampling_rate = 24000
 
-            def __init__(self) -> None:
-                self.generation = {}
+            def create_voice_clone_prompt(self, **_kwargs):
+                return "clone-prompt"
 
             def generate(self, **kwargs):
                 self.generation = kwargs
-                return b"audio"
+                return [b"audio"]
 
-        model = FakeChatterboxModel()
-        managed_tts_worker._chatterbox_builtin_conditionals.clear()
-        managed_tts_worker._chatterbox_builtin_conditionals[
-            managed_tts.DEFAULT_CHATTERBOX_LOCAL_TTS_MODEL
-        ] = "builtin-voice"
-        fake_torch = mock.Mock(
-            manual_seed=mock.Mock(),
-            inference_mode=contextlib.nullcontext,
+        clone_path = managed_tts.store_clone_audio(
+            "omnivoice",
+            filename="auto-language.wav",
+            data=b"RIFF-reference-data",
         )
-        with (
-            mock.patch.object(managed_tts_worker, "_chatterbox_model", return_value=model),
-            mock.patch.dict(sys.modules, {"torch": fake_torch}),
-        ):
-            audio, sample_rate = managed_tts_worker._generate_chatterbox(
+        model = FakeOmniVoiceModel()
+        managed_tts_worker._clone_prompts.clear()
+        with mock.patch.object(managed_tts_worker, "_omnivoice_model", return_value=model):
+            managed_tts_worker._generate_omnivoice(
                 {
-                    "model": managed_tts.DEFAULT_CHATTERBOX_LOCAL_TTS_MODEL,
+                    "model": managed_tts.DEFAULT_OMNIVOICE_TTS_MODEL,
                     "text": "Hello",
-                    "temperature": "0.7",
-                    "seed": "42",
+                    "clone_audio": clone_path,
+                    "clone_text": "Hello",
+                    "language": "Auto",
                 }
             )
 
-        self.assertEqual(audio, b"audio")
-        self.assertEqual(sample_rate, 24000)
-        self.assertEqual(model.conds, "builtin-voice")
-        self.assertEqual(model.generation["temperature"], 0.7)
-        fake_torch.manual_seed.assert_called_once_with(42)
+        self.assertIsNone(model.generation["language"])
+
 
 
 if __name__ == "__main__":

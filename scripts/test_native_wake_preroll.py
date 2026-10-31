@@ -39,7 +39,7 @@ def _load_pipeline_boundary_helpers():
     tree = ast.parse(source)
     wanted = {
         "_native_wake_preroll_pending",
-        "_native_discard_wake_preroll",
+        "_native_record_wake_preroll",
         "_native_mark_wake_preroll_complete",
     }
     functions = [
@@ -169,21 +169,67 @@ class NativeWakePrerollTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(boundary_pending(session, 100.1))
         self.assertEqual(0.0, session.vad_startup_ignore_until_ts)
 
-    def test_pre_boundary_audio_is_accounted_but_not_added_to_stt(self) -> None:
+    def test_pre_boundary_audio_is_accounted_for_stt_retention(self) -> None:
         session = _VoiceSessionRuntime(
             last_audio_ts=0.0,
             wake_preroll_chunks=0,
             wake_preroll_bytes=0,
             audio_buffer=bytearray(b"existing-command"),
         )
-        discard = PIPELINE_HELPERS["_native_discard_wake_preroll"]
+        record = PIPELINE_HELPERS["_native_record_wake_preroll"]
 
-        discard(session, b"wake-word-audio", 123.5)
+        record(session, b"wake-word-audio", 123.5)
 
         self.assertEqual(123.5, session.last_audio_ts)
         self.assertEqual(1, session.wake_preroll_chunks)
         self.assertEqual(len(b"wake-word-audio"), session.wake_preroll_bytes)
         self.assertEqual(bytearray(b"existing-command"), session.audio_buffer)
+
+    def test_pre_boundary_path_continues_into_stt_capture(self) -> None:
+        source = (
+            REPO_ROOT / "tater_voice" / "voice_pipeline" / "__init__.py"
+        ).read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        subscriber = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.AsyncFunctionDef)
+            and node.name == "_esphome_subscribe_voice_assistant"
+        )
+        handle_audio = next(
+            node
+            for node in subscriber.body
+            if isinstance(node, ast.AsyncFunctionDef) and node.name == "_handle_audio"
+        )
+        boundary_branch = next(
+            node
+            for node in ast.walk(handle_audio)
+            if isinstance(node, ast.If)
+            and isinstance(node.test, ast.Name)
+            and node.test.id == "wake_boundary_pending"
+        )
+
+        self.assertTrue(
+            any(
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "_native_record_wake_preroll"
+                for node in ast.walk(boundary_branch)
+            )
+        )
+        self.assertFalse(
+            any(isinstance(node, ast.Return) for node in ast.walk(boundary_branch))
+        )
+
+    def test_wake_boundary_uses_separate_spud_stt_and_vad_paths(self) -> None:
+        source = (
+            REPO_ROOT / "tater_voice" / "voice_pipeline" / "__init__.py"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn(
+            "hub_stt_routed and not wake_preroll_boundary_expected",
+            source,
+        )
 
     def test_session_runtime_carries_boundary_state(self) -> None:
         source = (

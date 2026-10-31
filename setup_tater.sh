@@ -95,7 +95,7 @@ usage() {
   say ""
   say "Profiles:"
   say "  cpu     Local CPU-first install for most systems."
-  say "  macos   Native Apple Silicon/macOS install with MLX and MPS where supported."
+  say "  macos   Native Apple Silicon/macOS install with MPS where supported."
   say "  nvidia  Native desktop/server NVIDIA install for amd64 CUDA PCs."
   say "  rocm    Native AMD ROCm install for Radeon / Strix Halo systems."
   say "  jetson  Native Jetson install that uses JetPack/system AI packages."
@@ -114,7 +114,7 @@ choose_profile() {
   say "     Safe default. Works on normal Linux and generic ARM hosts."
   say ""
   say "  2) macOS Apple Silicon"
-  say "     Native Mac setup with MLX Whisper and PyTorch/MPS Kokoro."
+  say "     Native Mac setup with PyTorch/MPS speech acceleration."
   say ""
   say "  3) NVIDIA desktop/server"
   say "     Native amd64 CUDA setup for RTX/GTX machines."
@@ -1031,17 +1031,7 @@ filtered_nvidia_requirements() {
 
 filtered_macos_requirements() {
   output_file="$1"
-  awk '
-    /^[[:space:]]*($|#)/ { print; next }
-    {
-      line = $0
-      lower = tolower(line)
-      if (lower ~ /^[[:space:]]*pykokoro([[:space:]]|[=<>!~]|$)/) {
-        next
-      }
-      print line
-    }
-  ' "${REQUIREMENTS_FILE}" > "${output_file}"
+  cp "${REQUIREMENTS_FILE}" "${output_file}"
 }
 
 install_macos_bundled_native_wheels() {
@@ -1081,9 +1071,16 @@ cleanup_legacy_runtime() {
   legacy_packages=""
   for package_name in \
     aioesphomeapi \
+    mlx \
+    mlx-audio \
+    mlx-lm \
+    mlx-metal \
+    mlx-vlm \
+    mlx-whisper \
     nanowakeword \
     openwakeword \
-    noiseprotocol \
+    outlines \
+    outlines-core \
     scikit-learn \
     narwhals \
     threadpoolctl \
@@ -1109,6 +1106,13 @@ cleanup_legacy_runtime() {
       ;;
   esac
 
+  remove_obsolete_runtime_directory_if_present \
+    "${RUNTIME_DIR}/mlx-engine" \
+    "retired MLX engine checkout"
+  remove_obsolete_runtime_directory_if_present \
+    "${AGENT_ROOT}/models/tts/chatterbox-local/runtime" \
+    "retired Chatterbox managed environment"
+
   legacy_firmware_root="${AGENT_ROOT}/esphome"
   firmware_root="${AGENT_ROOT}/firmware"
   if [ -d "${legacy_firmware_root}" ] && [ ! -e "${firmware_root}" ]; then
@@ -1126,6 +1130,20 @@ remove_managed_venv_if_present() {
   fi
   info "Removing ${label}"
   rm -rf "${managed_venv}"
+}
+
+remove_obsolete_runtime_directory_if_present() {
+  obsolete_dir="$1"
+  label="$2"
+  if [ ! -d "${obsolete_dir}" ]; then
+    return
+  fi
+  case "${obsolete_dir}" in
+    "${RUNTIME_DIR}/"*|"${AGENT_ROOT}/"*) ;;
+    *) fail "Refusing to remove ${label} outside the Tater runtime." ;;
+  esac
+  info "Removing ${label}"
+  rm -rf "${obsolete_dir}"
 }
 
 pip_install_requirements() {
@@ -1391,37 +1409,6 @@ install_llama_cpp_native() {
   fi
 }
 
-install_mlx_engine_checkout() {
-  if [ "${TATER_SETUP_MLX_ENGINE:-1}" = "0" ]; then
-    warn "Skipping MLX engine checkout because TATER_SETUP_MLX_ENGINE=0."
-    return
-  fi
-  if [ "${TATER_MLX_ENGINE_PATH:-}" ] && [ -d "${TATER_MLX_ENGINE_PATH}/mlx_engine" ]; then
-    ok "Using MLX engine at ${TATER_MLX_ENGINE_PATH}"
-    return
-  fi
-  if ! command -v git >/dev/null 2>&1; then
-    warn "git was not found; skipping optional MLX engine checkout."
-    return
-  fi
-  mkdir -p "${RUNTIME_DIR}"
-  engine_dir="${RUNTIME_DIR}/mlx-engine"
-  if [ -d "${engine_dir}/mlx_engine" ]; then
-    ok "Using existing ${engine_dir}"
-    if [ -d "${engine_dir}/.git" ]; then
-      info "Updating optional MLX engine checkout"
-      git -C "${engine_dir}" pull --ff-only || warn "Could not update ${engine_dir}; using the existing checkout."
-    fi
-    return
-  fi
-  if [ -e "${engine_dir}" ]; then
-    warn "${engine_dir} exists but does not look like an mlx-engine checkout. Set TATER_MLX_ENGINE_PATH or remove it and rerun setup."
-    return
-  fi
-  info "Cloning optional MLX engine runtime"
-  git clone --depth 1 https://github.com/lmstudio-ai/mlx-engine.git "${engine_dir}" || warn "Could not clone mlx-engine; Tater will use mlx-lm/mlx-vlm directly."
-}
-
 install_macos() {
   venv_python="$1"
   tmp_req="$(mktemp "${TMPDIR:-/tmp}/tater-requirements-macos.XXXXXX")"
@@ -1449,27 +1436,6 @@ install_macos() {
   install_macos_bundled_native_wheels "${venv_python}"
   pip_install_requirements "${venv_python}" "${tmp_req}"
   install_llama_cpp_native macos
-  info "Installing Apple-native speech extras"
-  if ! "${venv_python}" -m pip install mlx-whisper kokoro; then
-    warn "Apple-native speech extras failed to install. Tater will still run with Faster Whisper/Kokoro CPU fallbacks."
-  fi
-  if [ "${is_apple_silicon}" = "1" ]; then
-    install_mlx_engine_checkout
-    mlx_engine_requirements="${TATER_MLX_ENGINE_PATH:-${RUNTIME_DIR}/mlx-engine}/requirements.txt"
-    if [ -f "${mlx_engine_requirements}" ]; then
-      info "Aligning Python packages with the selected MLX engine"
-      mlx_engine_runtime_requirements="$(mktemp "${TMPDIR:-/tmp}/tater-mlx-engine-requirements.XXXXXX")"
-      awk '
-        /^(mlx|mlx-metal)==/ ||
-        /^(mlx-lm|mlx-vlm|outlines) @/ ||
-        /^(outlines-core|dill|xxhash)==/ { print }
-      ' "${mlx_engine_requirements}" > "${mlx_engine_runtime_requirements}"
-      if [ -s "${mlx_engine_runtime_requirements}" ]; then
-        pip_install_requirements "${venv_python}" "${mlx_engine_runtime_requirements}"
-      fi
-      rm -f "${mlx_engine_runtime_requirements}"
-    fi
-  fi
   rm -f "${tmp_req}"
   trap - EXIT
 }
@@ -1516,10 +1482,6 @@ install_rocm() {
   info "Installing Tater dependencies"
   pip_install_requirements "${venv_python}" "${tmp_req}"
   install_llama_cpp_native rocm
-  info "Installing PyTorch Kokoro runtime"
-  if ! "${venv_python}" -m pip install kokoro; then
-    warn "Kokoro PyTorch failed to install. Tater will still run with CPU/ONNX TTS fallbacks."
-  fi
   rm -f "${tmp_req}"
   trap - EXIT
 }
@@ -1650,7 +1612,6 @@ verify_install() {
   TATER_SETUP_PROFILE="${profile}" \
   TATER_SETUP_REQUIRE_LOCAL_LLM="${TATER_SETUP_REQUIRE_LOCAL_LLM:-${require_local_llm_default}}" \
   TATER_REMOTE_ONLY="${TATER_REMOTE_ONLY:-${remote_only_default}}" \
-  TATER_MLX_ENGINE_PATH="${TATER_MLX_ENGINE_PATH:-}" \
   TATER_RUNTIME_DIR="${RUNTIME_DIR}" \
   TATER_AIRPLAY_CLI_PATH="${AIRPLAY_SENDER_BIN:-${TATER_AIRPLAY_CLI_PATH:-}}" \
   TATER_SHAIRPORT_SYNC_PATH="${AIRPLAY_RECEIVER_BIN:-${TATER_SHAIRPORT_SYNC_PATH:-}}" \
@@ -1658,9 +1619,7 @@ verify_install() {
   "${venv_python}" - <<'PY'
 import importlib.util
 import os
-import platform
 import subprocess
-import sys
 from pathlib import Path
 
 required = ["fastapi", "uvicorn", "redis", "pychromecast"]
@@ -1796,34 +1755,6 @@ else:
     if require_local_llm:
         raise SystemExit("Missing required llama.cpp server binary")
 
-if require_local_llm:
-    llm_modules = ["transformers", "accelerate"]
-    is_apple_silicon = platform.system() == "Darwin" and platform.machine() == "arm64"
-    if is_apple_silicon:
-        llm_modules.extend(["mlx_lm", "mlx_vlm", "outlines", "outlines_core", "dill", "xxhash"])
-    missing_llm = [name for name in llm_modules if importlib.util.find_spec(name) is None]
-    if missing_llm:
-        raise SystemExit("Missing required local LLM packages: " + ", ".join(missing_llm))
-    print("local_llm_imports ok")
-    if is_apple_silicon:
-        mlx_engine = os.getenv("TATER_MLX_ENGINE_PATH") or str(Path(os.getenv("TATER_RUNTIME_DIR", ".runtime")) / "mlx-engine")
-        if not (Path(mlx_engine) / "mlx_engine").is_dir():
-            raise SystemExit(f"Missing required MLX engine checkout: {mlx_engine}")
-        if mlx_engine not in sys.path:
-            sys.path.insert(0, mlx_engine)
-        try:
-            from mlx_engine.generate import create_generator, load_model, tokenize
-        except Exception as exc:
-            raise SystemExit(f"MLX engine import failed: {type(exc).__name__}: {exc}") from exc
-        print(f"mlx_engine_imports ok path={mlx_engine}")
-
-for name in ("mlx_whisper", "kokoro"):
-    try:
-        __import__(name)
-        print(f"{name}=available")
-    except Exception as exc:
-        print(f"{name}=unavailable: {exc}")
-
 if remote_only:
     import tateros_app
     from speech_settings import DEFAULT_STT_BACKEND
@@ -1877,7 +1808,7 @@ main() {
   elif [ "${profile}" = "rocm" ]; then
     warn "AMD ROCm profile is for native Linux Radeon / Strix Halo systems with ROCm installed."
   elif [ "${profile}" = "macos" ]; then
-    warn "macOS profile can use Apple Metal/MPS for PyTorch-backed SpeechBrain and Kokoro, plus MLX Whisper for STT."
+    warn "macOS profile can use Apple Metal/MPS for PyTorch-backed local speech models."
   elif [ "${profile}" = "edge" ]; then
     warn "Edge profile disables local model runtimes. Pair it as a Spudlet to use Spud Hub model routing, or configure standalone remote providers in TaterOS."
   fi

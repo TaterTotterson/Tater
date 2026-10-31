@@ -75,7 +75,7 @@ class MacOSLauncherShutdownTests(unittest.TestCase):
 
     def test_successful_setup_records_requirements_fingerprint(self) -> None:
         start = self.source.index("private func bootstrapIfNeeded")
-        end = self.source.index("private func localLLMPythonDependenciesReady", start)
+        end = self.source.index("private func localLLMRuntimesReady", start)
         implementation = self.source[start:end]
 
         status_guard = implementation.index("guard process.terminationStatus == 0")
@@ -92,6 +92,9 @@ class MacOSLauncherShutdownTests(unittest.TestCase):
         self.assertIn("cleanup_legacy_runtime", self.setup_source)
         self.assertIn("aioesphomeapi", self.setup_source)
         self.assertIn("nanowakeword", self.setup_source)
+        self.assertIn("mlx-whisper", self.setup_source)
+        self.assertIn("outlines-core", self.setup_source)
+        self.assertNotIn("\n    transformers \\", self.setup_source)
         self.assertIn('rm -rf "${managed_venv}"', self.setup_source)
 
         start = self.source.index("private func pinnedRuntimeDependenciesReady")
@@ -110,9 +113,33 @@ class MacOSLauncherShutdownTests(unittest.TestCase):
         self.assertIn('"aioesphomeapi"', implementation)
         self.assertIn('"nanowakeword"', implementation)
         self.assertIn('"openwakeword"', implementation)
+        self.assertIn('"mlx-lm"', implementation)
+        self.assertIn('"mlx-vlm"', implementation)
+        self.assertIn('"mlx-whisper"', implementation)
+        self.assertIn('"outlines"', implementation)
+        self.assertNotIn('"transformers"', implementation)
         self.assertIn('appendingPathComponent("models/face-id/venv/pyvenv.cfg")', implementation)
+        self.assertIn('runtimeDir.appendingPathComponent("mlx-engine", isDirectory: true)', implementation)
+        self.assertIn(
+            'agentRoot.appendingPathComponent("models/tts/chatterbox-local/runtime", isDirectory: true)',
+            implementation,
+        )
         self.assertIn('agentRoot.appendingPathComponent("esphome", isDirectory: true)', implementation)
         self.assertIn('agentRoot.appendingPathComponent("firmware", isDirectory: true)', implementation)
+
+    def test_required_noise_protocol_dependency_is_not_treated_as_obsolete(self) -> None:
+        self.assertIn("noiseprotocol==0.3.1", self.requirements)
+
+        swift_start = self.source.index("let obsoletePackages = [")
+        swift_end = self.source.index("]", swift_start)
+        self.assertNotIn('"noiseprotocol"', self.source[swift_start:swift_end])
+
+        cleanup_start = self.setup_source.index("cleanup_legacy_runtime()")
+        cleanup_end = self.setup_source.index("remove_managed_venv_if_present", cleanup_start)
+        self.assertNotIn("noiseprotocol", self.setup_source[cleanup_start:cleanup_end])
+
+    def test_macos_opens_web_ui_while_startup_bootstrap_continues(self) -> None:
+        self.assertIn('environment["TATER_EARLY_WEB_UI_ON_STARTUP"] = "1"', self.source)
 
     def test_native_firmware_workspace_has_a_current_name(self) -> None:
         self.assertIn('FIRMWARE_WORKSPACE_ROOT = agent_lab_path("firmware")', self.firmware_source)
@@ -138,24 +165,7 @@ class MacOSLauncherShutdownTests(unittest.TestCase):
         self.assertIn("self.endLifecycleOperation()", recovery_implementation)
         self.assertIn("private let lifecycleLock = NSLock()", self.source)
 
-    def test_mlx_engine_runtime_dependencies_are_installed_and_import_verified(self) -> None:
-        self.assertIn('dill==0.4.1; platform_system == "Darwin"', self.requirements)
-        self.assertIn('xxhash==3.8.1; platform_system == "Darwin"', self.requirements)
-        self.assertIn("from mlx_engine.generate import create_generator, load_model, tokenize", self.setup_source)
 
-        start = self.source.index("private func localLLMPythonDependenciesReady")
-        end = self.source.index("private func localLLMRuntimesReady", start)
-        implementation = self.source[start:end]
-        self.assertIn('"outlines_core", "dill", "xxhash"', implementation)
-        self.assertIn("from mlx_engine.generate import create_generator, load_model, tokenize", implementation)
-        self.assertIn("process.environment = backendEnvironment()", implementation)
-
-    def test_mlx_engine_import_error_explains_automatic_repair(self) -> None:
-        start = self.helpers_source.index("def _mlx_engine_import_helpers")
-        end = self.helpers_source.index("def _mlx_engine_config_json", start)
-        implementation = self.helpers_source[start:end]
-        self.assertIn("Restart Tater to let the macOS app repair its private runtime", implementation)
-        self.assertIn("isinstance(exc, ModuleNotFoundError) and exc.name", implementation)
 
     def test_termination_reply_runs_in_appkit_modal_run_loop(self) -> None:
         start = self.source.index("func applicationShouldTerminate(")
@@ -169,10 +179,13 @@ class MacOSLauncherShutdownTests(unittest.TestCase):
 
     def test_backend_cleans_stale_tater_llama_servers_before_redis_bootstrap(self) -> None:
         app_source = (ROOT / "tateros_app.py").read_text(encoding="utf-8")
-        startup = app_source[app_source.index("async def _startup_event()") :]
+        startup = app_source[
+            app_source.index("async def _complete_startup_bootstrap()") :
+            app_source.index("async def _run_background_startup_bootstrap()")
+        ]
 
         cleanup_index = startup.index("cleanup_stale_llama_cpp_servers")
-        redis_index = startup.index("_redis_reachable_for_startup()")
+        redis_index = startup.index("_redis_reachable_for_startup")
 
         self.assertLess(cleanup_index, redis_index)
 
