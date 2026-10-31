@@ -83,12 +83,12 @@ const activeContextTokens = computed(() => {
   const raw = Number(props.draft[activeContextConfig.value.key] || activeContextConfig.value.fallback);
   return Math.max(activeContextConfig.value.min, Math.min(activeContextMax.value, Number.isFinite(raw) ? Math.round(raw) : activeContextConfig.value.fallback));
 });
-const estimatedContextPerSlot = computed(() => Math.max(1, Math.floor(activeContextTokens.value / (llamaSlotMode.value === "per_head" ? 4 : 1))));
+const estimatedContextPerSlot = computed(() => Math.max(1, Math.floor(activeContextTokens.value / (llamaSlotMode.value === "per_head" ? 5 : 1))));
 const contextPoolHelp = computed(() => {
   if (llamaSlotMode.value !== "per_head") {
     return `The full ${contextTokenLabel(activeContextTokens.value)}-token pool belongs to the single shared slot.`;
   }
-  return `${contextTokenLabel(activeContextTokens.value)} tokens is the total unified KV pool. With all four slots equally active, that is about ${contextTokenLabel(estimatedContextPerSlot.value)} tokens each; active heads can use more while other slots are idle.`;
+  return `${contextTokenLabel(activeContextTokens.value)} tokens is the total unified KV pool. With all five slots equally active, that is about ${contextTokenLabel(estimatedContextPerSlot.value)} tokens each; active roles can use more while other slots are idle.`;
 });
 const contextWindow = computed<JsonRow>(() => contextEstimate.value.chat_context_window && typeof contextEstimate.value.chat_context_window === "object" ? contextEstimate.value.chat_context_window as JsonRow : {});
 const contextMinimum = computed(() => Math.max(0, Number(contextWindow.value.minimum_context_window || 0)));
@@ -158,7 +158,7 @@ function roleUsesBase(role: string): boolean { return String(props.draft[roleKey
 function roleEffectiveProvider(role: string): string { return roleUsesBase(role) ? provider(servers.value[0] || {}) : String(props.draft[roleKey(role, "provider")] || ""); }
 function roleProviderLabel(role: string): string { return roleUsesBase(role) ? "Base model" : providerOption(props.draft[roleKey(role, "provider")]).label; }
 function setLlamaSlotMode(mode: string) {
-  props.draft.hydra_llama_cpp_slot_count = mode === "per_head" ? "4" : "1";
+  props.draft.hydra_llama_cpp_slot_count = mode === "per_head" ? "5" : "1";
   changed();
 }
 function setRoleMode(role: string, mode: string) {
@@ -381,16 +381,16 @@ onMounted(() => { void refreshContextEstimate(); });
 
         <section class="tm-llm-context-card" :class="selectedRuntimeProviders.length ? contextTone : ''">
           <section class="tm-llm-context-slot-settings">
-            <header><div><span class="tv-eyebrow">Shared context layout</span><h4>Context slot mode</h4><p>Choose one shared conversation slot or stable logical slots for Base and every Hydra head.</p></div><span class="tm-llm-section-chip">{{ llamaSlotMode === "per_head" ? "4 slots" : "1 slot" }}</span></header>
+            <header><div><span class="tv-eyebrow">Shared context layout</span><h4>Context slot mode</h4><p>Choose one shared conversation slot or stable logical slots for Base, every Hydra head, and Vision.</p></div><span class="tm-llm-section-chip">{{ llamaSlotMode === "per_head" ? "5 slots" : "1 slot" }}</span></header>
             <div class="tm-llm-mode-picker tm-llm-slot-mode-picker">
               <button type="button" :class="{ active: llamaSlotMode === 'single' }" @click="setLlamaSlotMode('single')"><i>1</i><span><strong>Single shared slot</strong><small>One logical slot · lowest memory</small></span></button>
-              <button type="button" :class="{ active: llamaSlotMode === 'per_head' }" @click="setLlamaSlotMode('per_head')"><i>4</i><span><strong>Per-head slots</strong><small>Four logical slots · shared KV pool</small></span></button>
+              <button type="button" :class="{ active: llamaSlotMode === 'per_head' }" @click="setLlamaSlotMode('per_head')"><i>5</i><span><strong>Dedicated role slots</strong><small>Base + three Hydra heads + Vision</small></span></button>
             </div>
           </section>
           <template v-if="selectedRuntimeProviders.length">
             <header><div><span class="tv-eyebrow">Context estimator</span><h4>How much working memory does this model need?</h4><p>{{ selectedRuntimeModel ? `Estimate for ${selectedRuntimeModel}` : "Choose a model above to include its detected context limit." }}</p></div><button class="tv-button" type="button" :disabled="contextLoading" @click="refreshContextEstimate">{{ contextLoading ? "Refreshing…" : "Refresh estimate" }}</button></header>
             <div class="tm-llm-context-layout">
-              <div class="tm-llm-context-control"><div><strong>Context length</strong><b>{{ contextTokenLabel(activeContextTokens) }} shared tokens</b></div><input type="range" :min="activeContextConfig.min" :max="activeContextMax" step="256" :value="activeContextTokens" @input="setContextTokens" /><label><span>Exact shared token limit</span><input type="number" :min="activeContextConfig.min" :max="activeContextMax" step="256" :value="activeContextTokens" @input="setContextTokens" /></label><aside class="tm-llm-context-pool-note"><i>{{ llamaSlotMode === "per_head" ? "4×" : "1×" }}</i><span><strong>{{ llamaSlotMode === "per_head" ? `About ${contextTokenLabel(estimatedContextPerSlot)} each at equal load` : "Full pool for slot 0" }}</strong><small>{{ contextPoolHelp }}</small></span></aside><small>{{ selectedRuntimeModelRow?.max_context_tokens ? `Model maximum ${contextTokenLabel(activeContextMax)} from ${selectedRuntimeModelRow.context_source === 'gguf' ? 'GGUF metadata' : 'model config'}.` : `Model maximum is unknown; Tater uses a safe ${contextTokenLabel(activeContextMax)} slider cap.` }}</small></div>
+              <div class="tm-llm-context-control"><div><strong>Context length</strong><b>{{ contextTokenLabel(activeContextTokens) }} shared tokens</b></div><input type="range" :min="activeContextConfig.min" :max="activeContextMax" step="256" :value="activeContextTokens" @input="setContextTokens" /><label><span>Exact shared token limit</span><input type="number" :min="activeContextConfig.min" :max="activeContextMax" step="256" :value="activeContextTokens" @input="setContextTokens" /></label><aside class="tm-llm-context-pool-note"><i>{{ llamaSlotMode === "per_head" ? "5×" : "1×" }}</i><span><strong>{{ llamaSlotMode === "per_head" ? `About ${contextTokenLabel(estimatedContextPerSlot)} each at equal load` : "Full pool for slot 0" }}</strong><small>{{ contextPoolHelp }}</small></span></aside><small>{{ selectedRuntimeModelRow?.max_context_tokens ? `Model maximum ${contextTokenLabel(activeContextMax)} from ${selectedRuntimeModelRow.context_source === 'gguf' ? 'GGUF metadata' : 'model config'}.` : `Model maximum is unknown; Tater uses a safe ${contextTokenLabel(activeContextMax)} slider cap.` }}</small></div>
               <div class="tm-llm-context-fit"><div><span><i />Context fit</span><strong>{{ contextStatus }}</strong></div><div class="tm-llm-context-meter" aria-hidden="true"><span :style="{ width: `${contextFitPercent}%` }" /><i :style="{ left: `${contextSelectedPercent}%` }" /></div><h4>{{ contextRecommended ? `Recommended: ${contextTokenLabel(contextRecommended)} tokens` : "Building a recommendation" }}</h4><p>{{ contextRecommendation() }}</p><div class="tm-llm-context-facts"><span>Prompt <b>{{ contextTokenLabel(contextPrompt) }}</b></span><span>Reply <b>{{ contextTokenLabel(contextReply) }}</b></span><span>Minimum <b>{{ contextTokenLabel(contextMinimum) }}</b></span><span>Reserve <b>{{ contextTokenLabel(contextReserve) }}</b></span></div></div>
             </div>
           </template>

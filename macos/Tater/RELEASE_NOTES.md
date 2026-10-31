@@ -56,6 +56,8 @@ app release for Tater Echo Firmware v4.0.0.
   while retaining remote OpenAI-compatible, remote llama.cpp, and Spud Link
   routes. The Models browser now focuses on compatible GGUF downloads.
 - Refined llama.cpp context sizing, cache namespaces, multi-slot concurrency,
+  and a five-slot layout that gives Base, every Hydra head, and Vision stable
+  prompt-cache affinity inside the shared KV pool,
   speculative decoding controls, reasoning controls, process isolation, and
   runtime progress reporting.
 - Unified Chat, Settings, runtime status, authentication, and navigation under

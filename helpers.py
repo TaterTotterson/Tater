@@ -2113,15 +2113,16 @@ def _llama_cpp_slot_count() -> int:
     except Exception:
         value = DEFAULT_LLAMA_CPP_SLOT_COUNT
     # Tater exposes two intentional layouts: one shared context for minimum
-    # memory use, or four contexts for Base plus the three Hydra heads. Treat
-    # legacy/custom values below four as shared and values at or above four as
-    # per-head so routing never lands in an accidental partial layout.
-    return 4 if int(value) >= 4 else 1
+    # memory use, or five logical slots for Base, the three Hydra heads, and
+    # Vision.
+    # Migrate the unreleased four-slot layout to five so Vision receives a
+    # stable cache without leaving existing development settings behind.
+    return 5 if int(value) >= 4 else 1
 
 
 def _llama_cpp_slot_id(scope: str = "base", value: Any = None) -> int:
+    token = str(scope or "base").strip().lower().replace("-", "_")
     if value is None:
-        token = str(scope or "base").strip().lower().replace("-", "_")
         if token == "vision":
             raw = _safe_redis_text_get(HYDRA_LLAMA_CPP_VISION_SLOT_KEY) or os.getenv("TATER_LLAMA_CPP_VISION_SLOT")
         else:
@@ -2130,6 +2131,8 @@ def _llama_cpp_slot_id(scope: str = "base", value: Any = None) -> int:
         raw = value
     raw_text = "" if raw is None else str(raw).strip().lower()
     if not raw_text or raw_text in {"auto", "default", "none"}:
+        if token == "vision" and _llama_cpp_slot_count() >= 5:
+            return 4
         return DEFAULT_LLAMA_CPP_SLOT_ID
     try:
         parsed = int(float(raw_text))
@@ -2153,8 +2156,9 @@ def _llama_cpp_cache_namespace_slot(
 
     Hydra role pins override the automatic layout. Other explicit route pins
     remain authoritative for non-Hydra calls. With automatic settings, Base is
-    slot 0 and the three Hydra heads use slots 1 through 3, even when Beast
-    Mode is disabled and every head shares the Base model client.
+    slot 0, the three Hydra heads use slots 1 through 3, and Vision uses slot
+    4, even when Beast Mode is disabled and every head shares the Base model
+    client.
     """
     if vision:
         return _llama_cpp_slot_id("vision", configured_slot)
@@ -6673,7 +6677,8 @@ def _llama_cpp_native_server_command(
     ]
     cmd.append("--reasoning-preserve" if thinking_enabled else "--no-reasoning-preserve")
     # Be explicit: current llama.cpp interprets an omitted --parallel as auto,
-    # which creates four slots. Unified KV lets the logical slots share the
+    # which creates four slots. Tater sets its intentional one- or five-slot
+    # layout explicitly. Unified KV lets the logical slots share the
     # configured context pool dynamically while id_slot keeps role affinity.
     cmd.extend(
         [

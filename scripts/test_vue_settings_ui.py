@@ -346,7 +346,11 @@ class VueSettingsTests(unittest.TestCase):
         llm = (
             REPO_ROOT / "frontend" / "src" / "settings" / "components" / "models" / "LlmModels.vue"
         ).read_text(encoding="utf-8")
+        media = (
+            REPO_ROOT / "frontend" / "src" / "settings" / "components" / "models" / "MediaModelCard.vue"
+        ).read_text(encoding="utf-8")
         self.assertNotIn("Prompt cache slot", llm)
+        self.assertNotIn("Prompt cache slot", media)
         self.assertNotIn(":max=\"Math.max(0, Number(draft.hydra_llama_cpp_slot_count || 1) - 1)\"", llm)
         self.assertNotIn('v-if="llamaConfigured"', llm)
         self.assertNotIn("tm-llm-server-slots-card", llm)
@@ -357,8 +361,10 @@ class VueSettingsTests(unittest.TestCase):
         self.assertGreater(llm.index("Context slot mode"), llm.index('class="tm-form-card tm-llm-runtime-card"'))
         self.assertNotIn("<h3>Prompt cache mode</h3>", llm)
         self.assertIn("Single shared slot", llm)
-        self.assertIn("Per-head slots", llm)
-        self.assertIn("Four logical slots · shared KV pool", llm)
+        self.assertIn("Dedicated role slots", llm)
+        self.assertIn("Base + three Hydra heads + Vision", llm)
+        self.assertIn('"5 slots"', llm)
+        self.assertIn("Vision automatically uses the fifth slot", media)
         self.assertIn("function setLlamaSlotMode(mode: string)", llm)
         self.assertNotIn('<span class="tm-field-label">llama.cpp server slots</span>', llm)
         self.assertNotIn("automaticRoleSlot", llm)
@@ -366,7 +372,7 @@ class VueSettingsTests(unittest.TestCase):
         self.assertNotIn("The built-in runtime keeps host-RAM prompt snapshots disabled", llm)
         self.assertIn("Exact shared token limit", llm)
         self.assertIn("total unified KV pool", llm)
-        self.assertIn("active heads can use more while other slots are idle", llm)
+        self.assertIn("active roles can use more while other slots are idle", llm)
         self.assertIn("tm-llm-context-pool-note", llm)
         self.assertIn("Use Base model", llm)
         self.assertIn("Share the model with a stable role slot", llm)

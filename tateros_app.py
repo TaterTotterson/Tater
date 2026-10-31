@@ -22504,7 +22504,8 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
 
     def _llama_cpp_slot_count_from_updates() -> int:
         raw = updates.get("hydra_llama_cpp_slot_count", redis_client.get(HYDRA_LLAMA_CPP_SLOT_COUNT_KEY) or DEFAULT_LLAMA_CPP_SLOT_COUNT)
-        return _bounded_int(raw, default=DEFAULT_LLAMA_CPP_SLOT_COUNT, min_value=1, max_value=32)
+        configured = _bounded_int(raw, default=DEFAULT_LLAMA_CPP_SLOT_COUNT, min_value=1, max_value=32)
+        return 5 if configured >= 4 else 1
 
     def _normalize_llama_cpp_slot_payload_value(payload_key: str, value: Any) -> str:
         raw = "" if value is None else str(value).strip()
@@ -22775,6 +22776,11 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         allowed=LLAMA_CPP_SPECULATIVE_METHODS,
         default=DEFAULT_LLAMA_CPP_SPECULATIVE_METHOD,
     )
+    if "hydra_llama_cpp_slot_count" in updates:
+        updates["hydra_llama_cpp_slot_count"] = str(_llama_cpp_slot_count_from_updates())
+        # Slot affinity is automatic in both supported layouts. Clear the
+        # unreleased manual Vision override when the layout is saved.
+        updates["hydra_llama_cpp_vision_slot"] = ""
     _save_bounded_int_setting(
         "hydra_llama_cpp_mtp_draft_tokens",
         HYDRA_LLAMA_CPP_MTP_DRAFT_TOKENS_KEY,

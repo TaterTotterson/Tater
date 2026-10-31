@@ -399,12 +399,26 @@ class LlamaCppPerformanceTests(unittest.TestCase):
         self.assertEqual(helpers.DEFAULT_LLAMA_CPP_SLOT_COUNT, 1)
 
     def test_slot_count_normalizes_to_supported_modes(self):
-        for configured, expected in ((1, 1), (2, 1), (3, 1), (4, 4), (8, 4)):
+        for configured, expected in ((1, 1), (2, 1), (3, 1), (4, 5), (5, 5), (8, 5)):
             with (
                 mock.patch.object(helpers, "_safe_redis_text_get", return_value=str(configured)),
                 mock.patch.dict(helpers.os.environ, {}, clear=False),
             ):
                 self.assertEqual(helpers._llama_cpp_slot_count(), expected)
+
+    def test_five_slot_layout_reserves_slot_four_for_vision(self):
+        def setting(key):
+            return "5" if key == helpers.HYDRA_LLAMA_CPP_SLOT_COUNT_KEY else ""
+
+        with (
+            mock.patch.object(helpers, "_safe_redis_text_get", side_effect=setting),
+            mock.patch.dict(
+                helpers.os.environ,
+                {"TATER_LLAMA_CPP_SLOT_COUNT": "", "TATER_LLAMA_CPP_VISION_SLOT": ""},
+                clear=False,
+            ),
+        ):
+            self.assertEqual(helpers._llama_cpp_slot_id("vision"), 4)
 
     def test_ram_prompt_cache_defaults_off_and_allows_environment_override(self):
         with mock.patch.dict(
@@ -913,10 +927,10 @@ class LlamaCppPerformanceTests(unittest.TestCase):
                     return int(value)
                 except Exception:
                     return -1
-            return 1 if scope == "vision" else 0
+            return 4 if scope == "vision" else 0
 
         with (
-            mock.patch.object(helpers, "_llama_cpp_slot_count", return_value=4),
+            mock.patch.object(helpers, "_llama_cpp_slot_count", return_value=5),
             mock.patch.object(helpers, "_llama_cpp_slot_id", side_effect=slot_id),
             mock.patch.object(helpers, "_safe_redis_text_get", return_value=""),
         ):
@@ -958,13 +972,13 @@ class LlamaCppPerformanceTests(unittest.TestCase):
             )
             self.assertEqual(
                 helpers._llama_cpp_cache_namespace_slot(
-                    "hydra:hermes:final", configured_slot=1, vision=True
+                    "hydra:hermes:final", vision=True
                 ),
-                1,
+                4,
             )
 
         with (
-            mock.patch.object(helpers, "_llama_cpp_slot_count", return_value=4),
+            mock.patch.object(helpers, "_llama_cpp_slot_count", return_value=5),
             mock.patch.object(helpers, "_llama_cpp_slot_id", side_effect=slot_id),
             mock.patch.object(helpers, "_safe_redis_text_get", return_value="1"),
         ):

@@ -105,7 +105,7 @@ function sync(settings: ModelsSettingsPayload, preserveDirty = false) {
   const dirtySnapshot = { ...dirty };
   Object.keys(draft).forEach((key) => delete draft[key]);
   Object.assign(draft, clone(settings || {}));
-  draft.hydra_llama_cpp_slot_count = Number(draft.hydra_llama_cpp_slot_count || 1) >= 4 ? "4" : "1";
+  draft.hydra_llama_cpp_slot_count = Number(draft.hydra_llama_cpp_slot_count || 1) >= 4 ? "5" : "1";
   if (!Object.prototype.hasOwnProperty.call(draft, "hydra_llm_thinking_enabled")) {
     draft.hydra_llm_thinking_enabled = false;
   }
@@ -246,7 +246,7 @@ function mediaPayload(kinds: Array<"vision" | "audio" | "video">): JsonRow {
   });
   if (kinds.includes("vision")) {
     payload.hydra_llama_cpp_vision_context_tokens = draft.hydra_llama_cpp_vision_context_tokens;
-    payload.hydra_llama_cpp_vision_slot = draft.hydra_llama_cpp_vision_slot;
+    payload.hydra_llama_cpp_vision_slot = "";
   }
   payload.hydra_local_model_load_targets = dedupeTargets(targets);
   return payload;
