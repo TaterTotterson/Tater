@@ -1,7 +1,7 @@
 {
-  "version": "1.9.3",
-  "build": 213,
-  "url": "https://github.com/TaterTotterson/Tater/releases/download/v1.9.3/Tater-v1.9.3.zip",
-  "sha256": "2efaf10d28940ad3d003e61416504d8d5968d14fa803ebdd4e7b13ac737b033a",
-  "notes": "Tater macOS update v1.9.3."
+  "version": "2.0.0",
+  "build": 214,
+  "url": "https://github.com/TaterTotterson/Tater/releases/download/v2.0.0/Tater-v2.0.0.zip",
+  "sha256": "f9a551f19c25cdaa16b3a2424b98f521e68f5956a7968e82ec59445525de9202",
+  "notes": "Tater macOS update v2.0.0."
 }
