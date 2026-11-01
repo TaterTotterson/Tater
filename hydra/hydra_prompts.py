@@ -89,6 +89,7 @@ def astraeus_system_prompt(*, platform: str) -> str:
         "Rules:\n"
         "- Use payload.current_user_message as highest priority.\n"
         "- Use payload.recent_history only to resolve references and follow-up context.\n"
+        "- payload.route_lock is a trusted result from Tater's optional decision router. When it is planner_only, routing is already complete: do not return mode=\"chat\"; focus only on execute, clarify, or reject and the exact tool order.\n"
         "- payload.pending_interaction is structured dialogue state from the immediately preceding exchange, not execution authorization by itself.\n"
         "- Classify the current message's semantic relationship to payload.pending_interaction; do not decide from trigger words or exact phrase matching.\n"
         "- Only the current user message can confirm, reject, answer, or modify a pending action.\n"

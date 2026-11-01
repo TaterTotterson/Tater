@@ -54,6 +54,7 @@ const faceStatus = ref<JsonRow>({});
 const modelApplyOpen = ref(false);
 const modelWarmup = ref<JsonRow>({});
 const modelWarmupPollError = ref("");
+const localModelsRefreshing = ref(false);
 let faceTimer: number | null = null;
 let modelWarmupTimer: number | null = null;
 
@@ -61,7 +62,7 @@ const activeSpec = computed(() => tabs.find((tab) => tab.id === activeTab.value)
 const localModels = computed<JsonRow>(() => draft.local_llm_models && typeof draft.local_llm_models === "object" ? draft.local_llm_models as JsonRow : {});
 const actionSpec = computed(() => {
   switch (activeTab.value) {
-    case "routing": return { label: "Save & Apply LLM Settings", note: "Saves Base, Tater Open WebUI, Terminal, and Beast routes, then loads selected local models." };
+    case "routing": return { label: "Save & Apply LLM Settings", note: "Saves Base, Decision Router, Tater Open WebUI, Terminal, and Beast routes, then loads selected local models." };
     case "listening": return { label: "Save Listening Settings", note: "Saves speech recognition, processing hardware, VAD, and listening runtime settings." };
     case "speech": return { label: "Save Speech Settings", note: "Saves reply voice, announcement, and playback settings." };
     case "wake": return { label: "Apply To All Satellites", note: "Applies the wake model and verification mode together to every connected satellite." };
@@ -109,6 +110,9 @@ function sync(settings: ModelsSettingsPayload, preserveDirty = false) {
   if (!Object.prototype.hasOwnProperty.call(draft, "hydra_llm_thinking_enabled")) {
     draft.hydra_llm_thinking_enabled = false;
   }
+  if (!Object.prototype.hasOwnProperty.call(draft, "hydra_decision_router_mode")) draft.hydra_decision_router_mode = "off";
+  if (!Object.prototype.hasOwnProperty.call(draft, "hydra_decision_router_model")) draft.hydra_decision_router_model = "";
+  if (!Object.prototype.hasOwnProperty.call(draft, "hydra_decision_router_confidence")) draft.hydra_decision_router_confidence = 0.90;
   if (!Array.isArray(draft.hydra_base_servers) || !draft.hydra_base_servers.length) {
     draft.hydra_base_servers = [{
       provider: draft.hydra_llm_provider || "openai_compatible",
@@ -140,7 +144,20 @@ function select(tab: string) {
   error.value = "";
   notice.value = "";
   props.onTabChange?.(activeTab.value);
+  if (["routing", "vision", "audio-understanding"].includes(activeTab.value)) void refreshLocalModels();
   if (activeTab.value === "faceid") void refreshFaceStatus();
+}
+
+async function refreshLocalModels() {
+  if (localModelsRefreshing.value) return;
+  localModelsRefreshing.value = true;
+  try {
+    updateLocalModels(await getJson<JsonRow>(props.endpoints.modelsLocalLlm));
+  } catch (refreshError) {
+    error.value = refreshError instanceof Error ? refreshError.message : "Installed models could not be refreshed.";
+  } finally {
+    localModelsRefreshing.value = false;
+  }
 }
 
 function isLocalProvider(value: unknown) {
@@ -184,6 +201,7 @@ function llmPayload(): JsonRow {
     "hydra_llama_cpp_context_tokens", "hydra_llama_cpp_mtp_enabled", "hydra_llama_cpp_speculative_method", "hydra_llama_cpp_mtp_draft_tokens", "hydra_llama_cpp_mtp_draft_model", "hydra_llama_cpp_n_batch", "hydra_llama_cpp_n_ubatch", "hydra_llama_cpp_flash_attn", "hydra_llama_cpp_offload_kqv", "hydra_llama_cpp_slot_count",
     "spudex_llm_provider", "spudex_llm_host", "spudex_llm_model",
     "tater_open_webui_llm_provider", "tater_open_webui_llm_host", "tater_open_webui_llm_port", "tater_open_webui_llm_model", "tater_open_webui_llm_api_key", "tater_open_webui_llm_llama_cpp_slot",
+    "hydra_decision_router_mode", "hydra_decision_router_model", "hydra_decision_router_confidence",
     "hydra_beast_mode_enabled",
   ];
   const payload: JsonRow = Object.fromEntries(keys.map((key) => [key, draft[key]]));
@@ -194,6 +212,9 @@ function llmPayload(): JsonRow {
   const targets: Array<JsonRow | null> = servers.map((row) => loadTarget(row.provider, row.model, { roles: ["Base"] }));
   if (draft.tater_open_webui_llm_provider) targets.push(loadTarget(draft.tater_open_webui_llm_provider, draft.tater_open_webui_llm_model, { roles: ["Tater Open WebUI"] }));
   if (draft.spudex_llm_provider) targets.push(loadTarget(draft.spudex_llm_provider, draft.spudex_llm_model));
+  if (["observe", "active"].includes(String(draft.hydra_decision_router_mode || "off"))) {
+    targets.push(loadTarget("llama_cpp", draft.hydra_decision_router_model, { roles: ["Decision Router"] }));
+  }
   ["astraeus", "thanatos", "hermes"].forEach((role) => {
     ["provider", "host", "port", "model", "api_key", "llama_cpp_slot"].forEach((suffix) => {
       const value = draft[`hydra_llm_${role}_${suffix}`] ?? "";
@@ -211,6 +232,7 @@ function validateLlm(): string {
   if (missingServer >= 0) return `Choose a downloaded model for ${missingServer === 0 ? "the primary Base server" : `fallback server ${missingServer}`}.`;
   if (draft.tater_open_webui_llm_provider && !String(draft.tater_open_webui_llm_model || "").trim()) return "Choose a model for Tater Open WebUI.";
   if (draft.spudex_llm_provider && isLocalProvider(draft.spudex_llm_provider) && !String(draft.spudex_llm_model || "").trim()) return "Choose a downloaded model for Terminal.";
+  if (["observe", "active"].includes(String(draft.hydra_decision_router_mode || "off")) && !String(draft.hydra_decision_router_model || "").trim()) return "Choose a downloaded model for the Decision Router.";
   if (draft.hydra_beast_mode_enabled) {
     for (const role of ["astraeus", "thanatos", "hermes"]) {
       if (isLocalProvider(draft[`hydra_llm_${role}_provider`]) && !String(draft[`hydra_llm_${role}_model`] || "").trim()) return `Choose a downloaded model for ${role.charAt(0).toUpperCase() + role.slice(1)}.`;
@@ -435,7 +457,7 @@ onBeforeUnmount(() => {
     <div v-if="notice" class="tv-notice" aria-live="polite">{{ notice }}</div>
 
     <HuggingFaceModels v-if="activeTab === 'huggingface'" :local-models="localModels" :endpoints="endpoints" @local-models="updateLocalModels" @notify="(message, tone) => emit('notify', message, tone)" />
-    <LlmModels v-else-if="activeTab === 'routing'" :draft="draft" :local-models="localModels" :remote-models-endpoint="endpoints.modelsRemoteLlm" :context-estimate-endpoint="endpoints.modelsContextEstimate" @dirty="markDirty" />
+    <LlmModels v-else-if="activeTab === 'routing'" :draft="draft" :local-models="localModels" :remote-models-endpoint="endpoints.modelsRemoteLlm" :context-estimate-endpoint="endpoints.modelsContextEstimate" :decision-benchmark-endpoint="endpoints.modelsDecisionBenchmark" :decision-results-endpoint="endpoints.modelsDecisionResults" @dirty="markDirty" />
     <ListeningModels v-else-if="activeTab === 'listening'" ref="listeningPanel" :draft="draft" :speech-ui="draft.speech_ui || {}" :voice-model-ui="draft.voice_model_ui || {}" :warmup-endpoint="endpoints.modelsSpeechWarmup" @dirty="markDirty" />
     <SpeechModels v-else-if="activeTab === 'speech'" ref="speechPanel" :draft="draft" :speech-ui="draft.speech_ui || {}" :announcement-ui="draft.announcement_speech_ui || {}" :endpoints="endpoints" @dirty="markDirty" @notify="(message, tone) => emit('notify', message, tone)" />
     <WakeWordModels v-else-if="activeTab === 'wake'" ref="wakePanel" :runtime-endpoint="endpoints.modelsVoiceRuntime" :action-endpoint="endpoints.modelsVoiceAction" @dirty="markDirty" @notify="(message, tone) => emit('notify', message, tone)" />

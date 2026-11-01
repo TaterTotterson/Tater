@@ -654,6 +654,9 @@ _LLAMA_CPP_GENERATION_LOCKS: Dict[Tuple[Any, ...], threading.RLock] = {}
 _LLAMA_CPP_ENGINE_CACHE: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
 _LLAMA_CPP_ENGINE_CACHE_LOCK = threading.RLock()
 _LLAMA_CPP_ENGINE_GENERATION_LOCKS: Dict[Tuple[Any, ...], threading.RLock] = {}
+_LLAMA_CPP_DECISION_ENGINE_CACHE: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
+_LLAMA_CPP_DECISION_ENGINE_CACHE_LOCK = threading.RLock()
+_LLAMA_CPP_DECISION_ENGINE_GENERATION_LOCKS: Dict[Tuple[Any, ...], threading.RLock] = {}
 _LLAMA_CPP_PARTIAL_MODEL_DEL_PATCHED = False
 _LLAMA_CPP_VISION_FAILURE_COOLDOWNS: Dict[str, Dict[str, Any]] = {}
 _LLAMA_CPP_VISION_FAILURE_COOLDOWN_LOCK = threading.RLock()
@@ -3453,6 +3456,7 @@ def get_local_llm_loaded_models_snapshot(
     rows: List[Dict[str, Any]] = []
     cache_specs = (
         (HYDRA_LLM_PROVIDER_LLAMA_CPP, _LLAMA_CPP_ENGINE_CACHE, _LLAMA_CPP_ENGINE_CACHE_LOCK),
+        (HYDRA_LLM_PROVIDER_LLAMA_CPP, _LLAMA_CPP_DECISION_ENGINE_CACHE, _LLAMA_CPP_DECISION_ENGINE_CACHE_LOCK),
         (HYDRA_LLM_PROVIDER_LLAMA_CPP, _LLAMA_CPP_MODEL_CACHE, _LLAMA_CPP_MODEL_CACHE_LOCK),
     )
     for provider, cache, lock in cache_specs:
@@ -3543,6 +3547,7 @@ def unload_local_llm_models(
     removed_bundles: List[Dict[str, Any]] = []
     cache_specs = (
         (HYDRA_LLM_PROVIDER_LLAMA_CPP, _LLAMA_CPP_ENGINE_CACHE, _LLAMA_CPP_ENGINE_GENERATION_LOCKS, _LLAMA_CPP_ENGINE_CACHE_LOCK),
+        (HYDRA_LLM_PROVIDER_LLAMA_CPP, _LLAMA_CPP_DECISION_ENGINE_CACHE, _LLAMA_CPP_DECISION_ENGINE_GENERATION_LOCKS, _LLAMA_CPP_DECISION_ENGINE_CACHE_LOCK),
         (HYDRA_LLM_PROVIDER_LLAMA_CPP, _LLAMA_CPP_MODEL_CACHE, _LLAMA_CPP_GENERATION_LOCKS, _LLAMA_CPP_MODEL_CACHE_LOCK),
     )
 
@@ -5498,6 +5503,16 @@ def _llama_cpp_engine_cache_key(model_id: str) -> Tuple[Any, ...]:
     )
 
 
+def _llama_cpp_decision_engine_cache_key(model_id: str) -> Tuple[Any, ...]:
+    return (
+        str(model_id or "").strip(),
+        "systemone-v1",
+        _llama_cpp_n_gpu_layers(),
+        _llama_cpp_flash_attn_enabled(),
+        _llama_cpp_offload_kqv_enabled(),
+    )
+
+
 def _llama_cpp_install_chat_template_override(model: Any, template: str) -> Tuple[str, str]:
     _ = model, template
     return "", "llama.cpp chat templates are installed through the native llama-server engine."
@@ -5508,7 +5523,7 @@ _LLAMA_CPP_ENGINE_WORKER_ENV = "TATER_LLAMA_CPP_ENGINE_WORKER"
 _LLAMA_CPP_ENGINE_PROTOCOL_VERSION = 1
 _LLAMA_CPP_NATIVE_MEDIA_MARKER = "<__media__>"
 _LLAMA_CPP_HTTP_THREAD_LOCAL = threading.local()
-_TATER_LLAMA_CPP_MANAGED_ALIASES = frozenset({"tater-llama", "qwen3-asr"})
+_TATER_LLAMA_CPP_MANAGED_ALIASES = frozenset({"tater-llama", "tater-decision", "qwen3-asr"})
 
 
 def _macos_bundled_llama_server_candidates() -> List[Path]:
@@ -6543,7 +6558,7 @@ def _llama_cpp_native_shutdown_state(state: Dict[str, Any]) -> None:
         cleanup_result = _terminate_managed_llama_cpp_server_pids(
             [server_pid],
             server_bins=([server_bin] if server_bin else _llama_cpp_native_server_candidates()),
-            aliases={"tater-llama"},
+            aliases=set(_TATER_LLAMA_CPP_MANAGED_ALIASES),
             timeout=3.0,
         )
         if cleanup_result.get("remaining"):
@@ -6794,16 +6809,106 @@ def _llama_cpp_native_server_command(
     return cmd, metadata
 
 
+def _llama_cpp_native_decision_server_command(
+    *,
+    server_bin: str,
+    model_path: str,
+) -> Tuple[List[str], Dict[str, Any]]:
+    """Build a small, isolated llama-server for native decision models.
+
+    Decision models answer through /v1/systemone in one forward pass. They do
+    not need Tater's large shared chat context, role slots, speculative draft,
+    or host-RAM prompt snapshots.
+    """
+    try:
+        configured_context = int(float(os.getenv("TATER_LLAMA_CPP_DECISION_CONTEXT_TOKENS") or "2048"))
+    except Exception:
+        configured_context = 2048
+    n_ctx = max(512, min(8192, configured_context))
+    # System One scores the full state and every option in one pass. Do not
+    # inherit a small chat batch that can reject a normal tool catalog before
+    # the model gets a chance to classify it.
+    n_batch = max(512, min(n_ctx, max(2048, _llama_cpp_n_batch(vision=False))))
+    n_ubatch = max(128, min(n_batch, _llama_cpp_n_ubatch(vision=False) or n_batch))
+    n_gpu_layers = _llama_cpp_n_gpu_layers()
+    cmd = [
+        server_bin,
+        "--model",
+        model_path,
+        "--host",
+        "127.0.0.1",
+        "--port",
+        str(_llama_cpp_native_free_port()),
+        "--ctx-size",
+        str(n_ctx),
+        "--batch-size",
+        str(n_batch),
+        "--ubatch-size",
+        str(n_ubatch),
+        "--n-gpu-layers",
+        _llama_cpp_gpu_layers_argument(n_gpu_layers),
+        "--alias",
+        "tater-decision",
+        "--parallel",
+        "1",
+        "--kv-unified",
+        "--cache-ram",
+        "0",
+        "--no-cache-idle-slots",
+        "--no-ui",
+        "--jinja",
+        "--reasoning",
+        "off",
+        "--reasoning-budget",
+        "0",
+        "--reasoning-format",
+        "none",
+        "--no-reasoning-preserve",
+        "--no-context-shift",
+    ]
+    if _llama_cpp_flash_attn_enabled():
+        cmd.extend(["--flash-attn", "on"])
+    if not _llama_cpp_offload_kqv_enabled():
+        cmd.append("--no-kv-offload")
+    if _boolish(os.getenv("TATER_LLAMA_CPP_USE_MLOCK"), default=False):
+        cmd.append("--mlock")
+    return cmd, {
+        "profile": "decision",
+        "n_ctx": n_ctx,
+        "n_ctx_total": n_ctx,
+        "n_ctx_estimated_per_slot": n_ctx,
+        "n_gpu_layers": int(n_gpu_layers),
+        "n_batch": n_batch,
+        "n_ubatch": n_ubatch,
+        "cache_ram_mib": 0,
+        "kv_unified": True,
+        "configured_slot_count": 1,
+        "slot_count": 1,
+        "flash_attn": bool(_llama_cpp_flash_attn_enabled()),
+        "offload_kqv": bool(_llama_cpp_offload_kqv_enabled()),
+        "mtp_requested": False,
+        "mtp_enabled": False,
+        "speculative_enabled": False,
+        "thinking_enabled": False,
+    }
+
+
 def _llama_cpp_native_worker_load(
     state: Dict[str, Any],
     model_token: str,
     *,
     vision: bool,
     media_kind: str = "",
+    profile: str = "default",
     timeout: float,
 ) -> Dict[str, Any]:
+    profile_token = "decision" if str(profile or "").strip().lower() == "decision" else "default"
     requested_media_kind = _normalize_llama_cpp_media_kind(media_kind, vision=vision)
-    if str(state.get("model_token") or "") == model_token and state.get("process") is not None:
+    if (
+        str(state.get("model_token") or "") == model_token
+        and str(state.get("profile") or "default") == profile_token
+        and state.get("process") is not None
+    ):
         proc = state.get("process")
         if callable(getattr(proc, "poll", None)) and proc.poll() is None:
             return dict(state.get("metadata") or {})
@@ -6812,22 +6917,29 @@ def _llama_cpp_native_worker_load(
     server_bin = _llama_cpp_native_required_server_bin()
     model_path = _download_llama_cpp_model(model_token)
     mmproj_path = ""
-    try:
-        mmproj_path = _download_llama_cpp_mmproj(model_token, model_path=model_path)
-    except Exception as exc:
-        logger.debug("[llama-cpp-native] no mmproj loaded for %s: %s", model_token, exc)
-        mmproj_path = ""
+    if profile_token != "decision":
+        try:
+            mmproj_path = _download_llama_cpp_mmproj(model_token, model_path=model_path)
+        except Exception as exc:
+            logger.debug("[llama-cpp-native] no mmproj loaded for %s: %s", model_token, exc)
+            mmproj_path = ""
 
     temp_dir = tempfile.mkdtemp(prefix="tater-llama-native-")
     previous_active = os.environ.get("TATER_LLAMA_CPP_ACTIVE_MODEL")
     os.environ["TATER_LLAMA_CPP_ACTIVE_MODEL"] = model_token
     try:
-        cmd, load_metadata = _llama_cpp_native_server_command(
-            server_bin=server_bin,
-            model_path=model_path,
-            mmproj_path=mmproj_path,
-            temp_dir=temp_dir,
-        )
+        if profile_token == "decision":
+            cmd, load_metadata = _llama_cpp_native_decision_server_command(
+                server_bin=server_bin,
+                model_path=model_path,
+            )
+        else:
+            cmd, load_metadata = _llama_cpp_native_server_command(
+                server_bin=server_bin,
+                model_path=model_path,
+                mmproj_path=mmproj_path,
+                temp_dir=temp_dir,
+            )
     finally:
         if previous_active is None:
             os.environ.pop("TATER_LLAMA_CPP_ACTIVE_MODEL", None)
@@ -6839,7 +6951,13 @@ def _llama_cpp_native_worker_load(
     base_url = f"http://127.0.0.1:{port}"
     stdout_tail: List[str] = []
     stderr_tail: List[str] = []
-    logger.info("[llama-cpp-native] starting llama-server model=%s mmproj=%s mtp=%s", model_token, bool(mmproj_path), load_metadata.get("mtp_enabled"))
+    logger.info(
+        "[llama-cpp-native] starting llama-server model=%s profile=%s mmproj=%s mtp=%s",
+        model_token,
+        profile_token,
+        bool(mmproj_path),
+        load_metadata.get("mtp_enabled"),
+    )
     server_env = dict(os.environ)
     server_env["LLAMA_MEDIA_MARKER"] = _llama_cpp_native_media_marker()
     proc = subprocess.Popen(
@@ -6869,6 +6987,7 @@ def _llama_cpp_native_worker_load(
             "process": proc,
             "base_url": base_url,
             "model_token": model_token,
+            "profile": profile_token,
             "temp_dir": temp_dir,
             "stdout_tail": stdout_tail,
             "stderr_tail": stderr_tail,
@@ -7031,6 +7150,32 @@ def _llama_cpp_native_worker_chat(
         model_token=model_token,
         response=completion_response,
         generation_elapsed=generation_elapsed,
+    )
+
+
+def _llama_cpp_native_worker_decision(
+    state: Dict[str, Any],
+    model_token: str,
+    decision_state: Any,
+    questions: Dict[str, Any],
+    *,
+    timeout: float,
+) -> Dict[str, Any]:
+    if not isinstance(questions, dict) or not questions:
+        raise RuntimeError("Decision routing requires at least one typed question.")
+    _llama_cpp_native_worker_load(
+        state,
+        model_token,
+        vision=False,
+        profile="decision",
+        timeout=max(30.0, timeout or 300.0),
+    )
+    base_url = str(state.get("base_url") or "").strip()
+    return _llama_cpp_native_json_post(
+        base_url,
+        "/v1/systemone",
+        {"state": decision_state, "questions": questions},
+        timeout=max(5.0, timeout or 30.0),
     )
 
 
@@ -7248,7 +7393,7 @@ class _TaterLlamaCppEngineProcess:
                 _llama_cpp_native_managed_server_pids(
                     _llama_cpp_native_process_rows(),
                     server_bins=server_bins,
-                    aliases={"tater-llama"},
+                    aliases=set(_TATER_LLAMA_CPP_MANAGED_ALIASES),
                     descendant_of=int(proc.pid),
                 )
             )
@@ -7283,7 +7428,7 @@ class _TaterLlamaCppEngineProcess:
         cleanup_result = _terminate_managed_llama_cpp_server_pids(
             list(server_pids),
             server_bins=server_bins,
-            aliases={"tater-llama"},
+            aliases=set(_TATER_LLAMA_CPP_MANAGED_ALIASES),
             timeout=3.0,
         )
         if cleanup_result.get("remaining"):
@@ -7419,6 +7564,139 @@ def _load_llama_cpp_engine_bundle(
             },
         )
         return bundle
+
+
+def _load_llama_cpp_decision_engine_bundle(
+    model_id: str,
+    *,
+    progress_callback: Optional[HFProgressCallback] = None,
+) -> Dict[str, Any]:
+    model_token = str(model_id or "").strip()
+    if not model_token:
+        raise RuntimeError("A downloaded decision GGUF model is required.")
+    cache_key = _llama_cpp_decision_engine_cache_key(model_token)
+    with _LLAMA_CPP_DECISION_ENGINE_CACHE_LOCK:
+        cached = _LLAMA_CPP_DECISION_ENGINE_CACHE.get(cache_key)
+        cached_engine = cached.get("engine") if isinstance(cached, dict) else None
+        if (
+            isinstance(cached, dict)
+            and callable(getattr(cached_engine, "alive", None))
+            and cached_engine.alive()
+        ):
+            return cached
+        if isinstance(cached, dict):
+            shutdown_engine = getattr(cached.get("engine"), "shutdown", None)
+            if callable(shutdown_engine):
+                try:
+                    shutdown_engine()
+                except Exception:
+                    pass
+            _LLAMA_CPP_DECISION_ENGINE_CACHE.pop(cache_key, None)
+
+        _emit_hf_llm_progress(
+            progress_callback,
+            {
+                "event": "start",
+                "stage": "load",
+                "description": "Starting the decision router",
+                "progress": 0.0,
+            },
+        )
+        engine = _TaterLlamaCppEngineProcess(cache_key=cache_key, model_token=model_token)
+        try:
+            load_timeout = max(30.0, float(os.getenv("TATER_LLAMA_CPP_ENGINE_LOAD_TIMEOUT_SECONDS") or "900"))
+        except Exception:
+            load_timeout = 900.0
+        try:
+            metadata = engine.request(
+                "load",
+                {"model": model_token, "profile": "decision"},
+                timeout=load_timeout,
+            )
+        except Exception:
+            engine.shutdown()
+            raise
+        if not isinstance(metadata, dict):
+            engine.shutdown()
+            raise RuntimeError("The decision router returned invalid load metadata.")
+        generation_lock = _LLAMA_CPP_DECISION_ENGINE_GENERATION_LOCKS.get(cache_key)
+        if generation_lock is None:
+            generation_lock = threading.RLock()
+            _LLAMA_CPP_DECISION_ENGINE_GENERATION_LOCKS[cache_key] = generation_lock
+        bundle = dict(metadata)
+        bundle.update(
+            {
+                "engine": engine,
+                "lock": generation_lock,
+                "runtime": "tater-llama-decision-engine",
+                "profile": "decision",
+                "loaded_ts": float(metadata.get("loaded_ts") or time.time()),
+            }
+        )
+        _LLAMA_CPP_DECISION_ENGINE_CACHE[cache_key] = bundle
+        _emit_hf_llm_progress(
+            progress_callback,
+            {
+                "event": "complete",
+                "stage": "load",
+                "description": "Decision router loaded",
+                "progress": 100.0,
+                "device": str(bundle.get("device") or ""),
+            },
+        )
+        return bundle
+
+
+def preload_llama_cpp_decision_model(
+    model_id: str,
+    *,
+    progress_callback: Optional[HFProgressCallback] = None,
+) -> Dict[str, Any]:
+    bundle = _load_llama_cpp_decision_engine_bundle(
+        model_id,
+        progress_callback=progress_callback,
+    )
+    return {
+        "ok": True,
+        "model": str(model_id or "").strip(),
+        "device": str(bundle.get("device") or ""),
+        "model_root": str(bundle.get("model_root") or _llama_cpp_model_root()),
+        "model_path": str(bundle.get("model_path") or ""),
+        "gpu_backend": str(bundle.get("gpu_backend") or ""),
+        "n_ctx": int(bundle.get("n_ctx") or 0),
+        "n_ctx_total": int(bundle.get("n_ctx_total") or bundle.get("n_ctx") or 0),
+        "slot_count": 1,
+        "runtime": str(bundle.get("runtime") or "tater-llama-decision-engine"),
+        "profile": "decision",
+        "supports_decisions": True,
+    }
+
+
+def run_llama_cpp_decision_model(
+    model_id: str,
+    *,
+    state: Any,
+    questions: Dict[str, Any],
+    timeout: float = 30.0,
+) -> Dict[str, Any]:
+    model_token = str(model_id or "").strip()
+    bundle = _load_llama_cpp_decision_engine_bundle(model_token)
+    engine = bundle.get("engine")
+    if not callable(getattr(engine, "request", None)):
+        raise RuntimeError("The decision router is not loaded.")
+    result = engine.request(
+        "decision",
+        {
+            "model": model_token,
+            "state": state,
+            "questions": dict(questions or {}),
+            "timeout": max(5.0, float(timeout or 30.0)),
+        },
+        timeout=max(10.0, float(timeout or 30.0) + 5.0),
+    )
+    if not isinstance(result, dict):
+        raise RuntimeError("The decision router returned an invalid response.")
+    return result
 
 
 def _llama_cpp_engine_chat_completion(
@@ -11455,6 +11733,7 @@ def _llama_cpp_engine_worker_main() -> int:
     current_model = ""
     current_vision = False
     current_media_kind = ""
+    current_profile = "default"
     native_state: Dict[str, Any] = {}
     return_code = 0
     state_lock = threading.RLock()
@@ -11468,12 +11747,23 @@ def _llama_cpp_engine_worker_main() -> int:
         with reply_lock:
             _llama_cpp_engine_worker_reply(protocol_out, payload)
 
-    def _ensure_loaded(model_token: str, *, vision: bool, media_kind: str = "") -> Dict[str, Any]:
-        nonlocal current_model, current_vision, current_media_kind
+    def _ensure_loaded(
+        model_token: str,
+        *,
+        vision: bool,
+        media_kind: str = "",
+        profile: str = "default",
+    ) -> Dict[str, Any]:
+        nonlocal current_model, current_vision, current_media_kind, current_profile
         with state_lock:
+            desired_profile = "decision" if str(profile or "").strip().lower() == "decision" else "default"
             desired_media_kind = _normalize_llama_cpp_media_kind(media_kind, vision=vision)
             desired_vision = desired_media_kind == "vision"
-            if current_model == model_token and native_state.get("process") is not None:
+            if (
+                current_model == model_token
+                and current_profile == desired_profile
+                and native_state.get("process") is not None
+            ):
                 proc = native_state.get("process")
                 if callable(getattr(proc, "poll", None)) and proc.poll() is None:
                     metadata = dict(native_state.get("metadata") or {})
@@ -11491,11 +11781,13 @@ def _llama_cpp_engine_worker_main() -> int:
                 model_token,
                 vision=desired_vision,
                 media_kind=desired_media_kind,
+                profile=desired_profile,
                 timeout=max(60.0, float(os.getenv("TATER_LLAMA_CPP_ENGINE_LOAD_TIMEOUT_SECONDS") or "900")),
             )
             current_model = model_token
             current_vision = desired_vision
             current_media_kind = desired_media_kind
+            current_profile = desired_profile
             if desired_media_kind and not _llama_cpp_metadata_supports_media(bundle, desired_media_kind):
                 label = "images" if desired_media_kind == "vision" else desired_media_kind
                 raise RuntimeError(f"This llama.cpp model does not advertise support for {label} input.")
@@ -11562,6 +11854,35 @@ def _llama_cpp_engine_worker_main() -> int:
                 }
             )
 
+    def _handle_decision(request_id: str, payload: Dict[str, Any]) -> None:
+        try:
+            model_token = str((payload or {}).get("model") or "").strip()
+            if not model_token:
+                with state_lock:
+                    model_token = str(current_model or "").strip()
+            if not model_token:
+                raise RuntimeError("llama.cpp decision engine needs a loaded model.")
+            questions = (payload or {}).get("questions")
+            if not isinstance(questions, dict):
+                questions = {}
+            _ensure_loaded(model_token, vision=False, profile="decision")
+            result = _llama_cpp_native_worker_decision(
+                native_state,
+                model_token,
+                (payload or {}).get("state"),
+                questions,
+                timeout=float((payload or {}).get("timeout") or 30.0),
+            )
+            _reply({"id": request_id, "ok": True, "result": result})
+        except Exception as exc:
+            _reply(
+                {
+                    "id": request_id,
+                    "ok": False,
+                    "error": str(exc) or exc.__class__.__name__,
+                }
+            )
+
     for line in sys.stdin:
         request_id = ""
         try:
@@ -11584,10 +11905,16 @@ def _llama_cpp_engine_worker_main() -> int:
                     (payload or {}).get("media_kind"),
                     vision=requested_vision,
                 )
+                requested_profile = (
+                    "decision"
+                    if str((payload or {}).get("profile") or "").strip().lower() == "decision"
+                    else "default"
+                )
                 bundle = _ensure_loaded(
                     model_token,
                     vision=requested_media_kind == "vision",
                     media_kind=requested_media_kind,
+                    profile=requested_profile,
                 )
                 result = _llama_cpp_public_bundle_metadata(bundle)
                 result["runtime"] = "tater-llama-engine"
@@ -11595,6 +11922,9 @@ def _llama_cpp_engine_worker_main() -> int:
                 continue
             if op == "chat":
                 chat_executor.submit(_handle_chat, request_id, dict(payload or {}))
+                continue
+            if op == "decision":
+                chat_executor.submit(_handle_decision, request_id, dict(payload or {}))
                 continue
             raise RuntimeError(f"Unknown llama.cpp engine op: {op or 'missing'}")
         except Exception as exc:

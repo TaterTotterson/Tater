@@ -98,12 +98,20 @@ from admin_gate import (
     origin_is_admin,
     resolve_admin_status,
 )
-from hydra import estimate_hydra_chat_context_window, get_active_chat_jobs_snapshot, run_hydra_turn
+from hydra import (
+    estimate_hydra_chat_context_window,
+    get_active_chat_jobs_snapshot,
+    run_decision_router_benchmark,
+    run_hydra_turn,
+)
 from hydra import (
     HYDRA_ASTRAEUS_PLAN_REVIEW_ENABLED_KEY,
     HYDRA_AUTO_CONTINUE_INCOMPLETE_FINAL_ENABLED_KEY,
     HYDRA_BEAST_CONFIG_ROLE_IDS,
     HYDRA_BEAST_MODE_ENABLED_KEY,
+    HYDRA_DECISION_ROUTER_CONFIDENCE_KEY,
+    HYDRA_DECISION_ROUTER_MODE_KEY,
+    HYDRA_DECISION_ROUTER_MODEL_KEY,
     HYDRA_LLM_HOST_KEY,
     HYDRA_LLM_MODEL_KEY,
     HYDRA_LLM_PORT_KEY,
@@ -111,6 +119,8 @@ from hydra import (
     HYDRA_ROLE_LLM_KEY_PREFIX,
     DEFAULT_ASTRAEUS_PLAN_REVIEW_ENABLED,
     DEFAULT_AUTO_CONTINUE_INCOMPLETE_FINAL_ENABLED,
+    DEFAULT_HYDRA_DECISION_ROUTER_CONFIDENCE,
+    DEFAULT_HYDRA_DECISION_ROUTER_MODE,
     DEFAULT_MAX_LEDGER_ITEMS,
 )
 from emoji_responder import get_emoji_settings as get_core_emoji_settings, save_emoji_settings as save_core_emoji_settings
@@ -175,6 +185,7 @@ from helpers import (
     get_llm_client_from_env,
     llm_request_context,
     preload_llama_cpp_llm_model,
+    preload_llama_cpp_decision_model,
     migrate_current_redis_to_internal,
     redis_blob_client as shared_redis_blob_client,
     redis_client as shared_redis_client,
@@ -1385,9 +1396,26 @@ def _current_media_local_warmup_targets(kind: str) -> List[Dict[str, Any]]:
 
 
 def _active_local_llm_startup_targets(base_rows: List[Dict[str, str]]) -> List[Dict[str, Any]]:
+    decision_targets: List[Dict[str, Any]] = []
+    try:
+        decision_mode = str(
+            redis_client.get(HYDRA_DECISION_ROUTER_MODE_KEY) or DEFAULT_HYDRA_DECISION_ROUTER_MODE
+        ).strip().lower()
+        decision_model = str(redis_client.get(HYDRA_DECISION_ROUTER_MODEL_KEY) or "").strip()
+        if decision_mode in {"observe", "active"} and decision_model:
+            decision_targets.append(
+                _hf_llm_warmup_base_item(
+                    HYDRA_LLM_PROVIDER_LLAMA_CPP,
+                    decision_model,
+                    role="Decision Router",
+                )
+            )
+    except Exception:
+        decision_targets = []
     return _dedupe_hf_llm_warmup_targets(
         [
             *_hf_llm_warmup_models(base_rows, role="Base"),
+            *decision_targets,
             *_current_vision_local_warmup_targets(),
             *_current_media_local_warmup_targets("audio"),
             *_current_media_local_warmup_targets("video"),
@@ -1824,6 +1852,8 @@ def _run_hf_llm_warmup(
             for value in row.get("media_kinds", [])
             if str(value or "").strip().lower() in {"vision", "audio", "video"}
         ]
+        roles = [str(value or "").strip().lower() for value in row.get("roles", []) if str(value or "").strip()]
+        decision_target = "decision router" in roles
         requested_media_kind = media_kinds[0] if media_kinds else ""
         with hf_llm_warmup_lock:
             hf_llm_warmup_state["active_key"] = key
@@ -1835,12 +1865,18 @@ def _run_hf_llm_warmup(
             if _hf_llm_warmup_cancel_requested(provider, model):
                 raise HfLlmDownloadCancelled("Local model download cancelled.")
             if load_models:
-                loaded = preload_llama_cpp_llm_model(
-                    model,
-                    progress_callback=_hf_llm_warmup_progress_callback(provider, model),
-                    vision=requested_media_kind == "vision",
-                    media_kind=requested_media_kind,
-                )
+                if decision_target:
+                    loaded = preload_llama_cpp_decision_model(
+                        model,
+                        progress_callback=_hf_llm_warmup_progress_callback(provider, model),
+                    )
+                else:
+                    loaded = preload_llama_cpp_llm_model(
+                        model,
+                        progress_callback=_hf_llm_warmup_progress_callback(provider, model),
+                        vision=requested_media_kind == "vision",
+                        media_kind=requested_media_kind,
+                    )
                 unsupported = [
                     media_kind
                     for media_kind in media_kinds
@@ -1873,6 +1909,8 @@ def _run_hf_llm_warmup(
                 row["supports_audio"] = bool(loaded.get("supports_audio"))
             if "supports_video" in loaded:
                 row["supports_video"] = bool(loaded.get("supports_video"))
+            if "supports_decisions" in loaded:
+                row["supports_decisions"] = bool(loaded.get("supports_decisions"))
             provider_warning = str(loaded.get("warning") or "").strip()
             if provider_warning:
                 row["warning"] = provider_warning
@@ -1893,6 +1931,7 @@ def _run_hf_llm_warmup(
                 supports_vision=bool(row.get("supports_vision")),
                 supports_audio=bool(row.get("supports_audio")),
                 supports_video=bool(row.get("supports_video")),
+                supports_decisions=bool(row.get("supports_decisions") or decision_target),
                 capabilities_observed=bool(load_models),
                 mmproj_path=str(row.get("mmproj_path") or ""),
             )
@@ -2271,23 +2310,45 @@ def _hf_browser_models_api_url(
 ) -> str:
     library = _hf_browser_provider_library(provider)
     app_filter = _hf_browser_provider_app_filter(provider, task)
+    model_filter = _hf_browser_provider_model_filter(provider, task)
     pipeline_tag = _hf_browser_provider_pipeline_filter(provider, task)
+    task_token = _normalize_hf_browser_task(task)
     params: Dict[str, Any] = {
         "sort": sort,
         "direction": "-1",
         "limit": str(max(1, min(100, int(limit or 24)))),
-        "full": "true",
-        "cardData": "true",
     }
+    if task_token == "decision":
+        # Native llama.cpp support is encoded in the parsed GGUF metadata. Hub
+        # expand fields let us verify it without downloading every candidate.
+        params["expand[]"] = [
+            "author",
+            "cardData",
+            "downloads",
+            "gated",
+            "gguf",
+            "lastModified",
+            "library_name",
+            "likes",
+            "pipeline_tag",
+            "private",
+            "siblings",
+            "tags",
+        ]
+    else:
+        params["full"] = "true"
+        params["cardData"] = "true"
     if pipeline_tag:
         params["pipeline_tag"] = pipeline_tag
     if library:
         params["library"] = library
     if app_filter:
         params["apps"] = app_filter
+    if model_filter:
+        params["filter"] = model_filter
     if search:
         params["search"] = search
-    return f"https://huggingface.co/api/models?{urlencode(params)}"
+    return f"https://huggingface.co/api/models?{urlencode(params, doseq=True)}"
 
 
 def _hf_browser_fetch_models_page(url: str) -> Tuple[List[Any], str]:
@@ -2665,6 +2726,7 @@ def _hf_browser_tater_pick_summary(row: Dict[str, Any]) -> Dict[str, Any]:
         "gated": "",
         "compatible": True,
         "supports_vision": bool(row.get("supports_vision")),
+        "supports_decisions": bool(row.get("supports_decisions")),
         "provider": provider_token,
         "provider_label": _hydra_llm_provider_label(provider_token),
         "tater_pick": True,
@@ -2739,6 +2801,8 @@ def _hf_browser_tater_pick_models_from_hub(*, query: str, task: str, limit: int,
             continue
         if task_token == "video-text-to-text" and not bool(summary.get("supports_video")):
             continue
+        if task_token == "decision" and not bool(summary.get("supports_decisions")):
+            continue
         if not _hf_browser_tater_pick_matches_query(summary, query):
             continue
         rows.append(summary)
@@ -2770,14 +2834,19 @@ def _hf_browser_provider_app_filter(provider: str, task: str = "text-generation"
     return "llama.cpp"
 
 
+def _hf_browser_provider_model_filter(provider: str, task: str = "text-generation") -> str:
+    _ = provider
+    return "decision-model" if _normalize_hf_browser_task(task) == "decision" else ""
+
+
 def _hf_browser_provider_library(provider: str) -> str:
     _ = provider
     return ""
 
 
 def _hf_browser_provider_pipeline_filter(provider: str, task: str = "text-generation") -> str:
-    _ = provider, task
-    return ""
+    _ = provider
+    return "text-classification" if _normalize_hf_browser_task(task) == "decision" else ""
 
 
 def _hf_browser_text_generation_tokens() -> Tuple[str, ...]:
@@ -2796,6 +2865,8 @@ def _normalize_hf_browser_task(value: Any) -> str:
         return "audio-text-to-text"
     if token in {"video", "video-text", "video-text-to-text", "video-understanding"}:
         return "video-text-to-text"
+    if token in {"decision", "decision-model", "router", "routing", "jev", "systemone"}:
+        return "decision"
     return "text-generation"
 
 
@@ -2874,6 +2945,64 @@ def _hf_browser_is_video_model(model: Any) -> bool:
     ).lower()
     audio_only = any(token in haystack for token in ("music-flamingo", "musicflamingo", "ultravox", "voxtral", "qwen3-asr"))
     return (not audio_only and _hf_browser_is_vision_model(model)) or "video-text-to-text" in haystack or "video" in haystack
+
+
+def _hf_browser_gguf_metadata(model: Any) -> Dict[str, Any]:
+    gguf = _hf_browser_object_value(model, "gguf", None)
+    if isinstance(gguf, dict):
+        return dict(gguf)
+    if gguf is None:
+        return {}
+    data = getattr(gguf, "__dict__", None)
+    return dict(data) if isinstance(data, dict) else {}
+
+
+def _hf_browser_decision_type(model: Any) -> str:
+    metadata = _hf_browser_gguf_metadata(model)
+    return str(metadata.get("decision_type") or metadata.get("decisionType") or "").strip().lower()
+
+
+def _hf_browser_primary_pipeline_tag(model: Any) -> str:
+    pipeline_tag = str(_hf_browser_object_value(model, "pipeline_tag") or "").strip().lower()
+    if pipeline_tag:
+        return pipeline_tag
+    card_data = _hf_browser_object_value(model, "cardData", None) or _hf_browser_object_value(
+        model,
+        "card_data",
+        None,
+    )
+    if isinstance(card_data, dict):
+        return str(card_data.get("pipeline_tag") or "").strip().lower()
+    return str(getattr(card_data, "pipeline_tag", "") or "").strip().lower()
+
+
+def _hf_browser_repo_gguf_metadata(repo_id: str) -> Dict[str, Any]:
+    repo = str(repo_id or "").strip()
+    if not repo or "/" not in repo:
+        return {}
+    query = urlencode([("expand[]", "gguf")])
+    url = f"https://huggingface.co/api/models/{quote(repo, safe='/')}?{query}"
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": "Tater-HuggingFace-Decision-Model-Check",
+    }
+    token = _hf_browser_token()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(url, headers=headers, method="GET")
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            payload = json.loads(response.read().decode("utf-8", "replace"))
+    except Exception as exc:
+        raise RuntimeError(f"Could not verify the GGUF metadata for {repo}: {exc}") from exc
+    return _hf_browser_gguf_metadata(payload)
+
+
+def _hf_browser_is_decision_model(model: Any) -> bool:
+    return bool(
+        _hf_browser_decision_type(model)
+        and _hf_browser_primary_pipeline_tag(model) == "text-classification"
+    )
 
 
 def _hf_browser_provider_matches(model: Any, provider: str) -> bool:
@@ -2990,6 +3119,8 @@ def _hf_browser_model_summary(model: Any, *, provider: str) -> Dict[str, Any]:
     supports_vision = _hf_browser_is_vision_model(model) or "mmproj" in lower_files
     supports_audio = _hf_browser_is_audio_model(model)
     supports_video = _hf_browser_is_video_model(model)
+    decision_type = _hf_browser_decision_type(model)
+    supports_decisions = bool(decision_type)
     compatible = (
         "llama.cpp" in provider_haystack
         or "llama-cpp" in provider_haystack
@@ -3019,6 +3150,8 @@ def _hf_browser_model_summary(model: Any, *, provider: str) -> Dict[str, Any]:
         "supports_vision": supports_vision,
         "supports_audio": supports_audio,
         "supports_video": supports_video,
+        "supports_decisions": supports_decisions,
+        "decision_type": decision_type,
         "provider": provider_token,
         "provider_label": _hydra_llm_provider_label(provider_token),
     }
@@ -3250,8 +3383,11 @@ def _gguf_skip_value(handle, value_type: int) -> None:
         count = _gguf_read_u64(handle)
         if count > 1_000_000:
             raise ValueError("gguf array too large")
-        for _ in range(int(count)):
-            _gguf_skip_value(handle, item_type)
+        if item_type in scalar_sizes:
+            handle.seek(scalar_sizes[item_type] * int(count), os.SEEK_CUR)
+        else:
+            for _ in range(int(count)):
+                _gguf_skip_value(handle, item_type)
     else:
         raise ValueError(f"unknown gguf metadata type {value_type}")
 
@@ -3269,25 +3405,76 @@ def _gguf_read_context_value(handle, value_type: int) -> int:
     return 0
 
 
-def _local_llm_context_from_gguf(path: Path) -> int:
-    if not path.exists() or not path.is_file() or path.suffix.lower() != ".gguf":
-        return 0
+_LOCAL_LLM_GGUF_METADATA_CACHE_LIMIT = 256
+_local_llm_gguf_metadata_cache_lock = threading.RLock()
+_local_llm_gguf_metadata_cache: Dict[Tuple[str, int, int], Tuple[int, Optional[bool]]] = {}
+
+
+def _local_llm_gguf_metadata_cache_key(path: Path) -> Optional[Tuple[str, int, int]]:
     try:
-        with path.open("rb") as handle:
-            if handle.read(4) != b"GGUF":
-                return 0
-            _version = _gguf_read_u32(handle)
-            _tensor_count = _gguf_read_u64(handle)
-            metadata_count = min(_gguf_read_u64(handle), 10000)
-            for _ in range(int(metadata_count)):
-                key = _gguf_read_string(handle)
-                value_type = _gguf_read_u32(handle)
-                if key.endswith(".context_length") or key in {"context_length", "general.context_length"}:
-                    return _local_llm_context_value(_gguf_read_context_value(handle))
-                _gguf_skip_value(handle, value_type)
+        stat_result = path.stat()
+        return (str(path.resolve()), int(stat_result.st_size), int(stat_result.st_mtime_ns))
     except Exception:
-        return 0
-    return 0
+        return None
+
+
+def _local_llm_metadata_from_gguf(path: Path) -> Tuple[int, Optional[bool]]:
+    """Read the GGUF header once and share it across settings requests.
+
+    The fingerprint makes replacements invalidate automatically. Holding the
+    lock during a cache miss also prevents several simultaneous Settings loads
+    from walking the same large tokenizer metadata arrays in parallel.
+    """
+    if not path.exists() or not path.is_file() or path.suffix.lower() != ".gguf":
+        return 0, None
+    cache_key = _local_llm_gguf_metadata_cache_key(path)
+    if cache_key is None:
+        return 0, None
+    with _local_llm_gguf_metadata_cache_lock:
+        cached = _local_llm_gguf_metadata_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        result: Tuple[int, Optional[bool]] = (0, None)
+        try:
+            context_tokens = 0
+            has_decision_type = False
+            has_systemone_template = False
+            with path.open("rb") as handle:
+                if handle.read(4) != b"GGUF":
+                    return result
+                _version = _gguf_read_u32(handle)
+                _tensor_count = _gguf_read_u64(handle)
+                metadata_count = min(_gguf_read_u64(handle), 10000)
+                for _ in range(int(metadata_count)):
+                    key = _gguf_read_string(handle)
+                    value_type = _gguf_read_u32(handle)
+                    if not context_tokens and (
+                        key.endswith(".context_length")
+                        or key in {"context_length", "general.context_length"}
+                    ):
+                        context_tokens = _local_llm_context_value(_gguf_read_context_value(handle, value_type))
+                        continue
+                    if key.endswith(".decision.type"):
+                        has_decision_type = True
+                    elif key == "tokenizer.chat_template.systemone":
+                        has_systemone_template = True
+                    _gguf_skip_value(handle, value_type)
+            result = (context_tokens, bool(has_decision_type and has_systemone_template))
+        except Exception:
+            result = (0, None)
+        _local_llm_gguf_metadata_cache[cache_key] = result
+        while len(_local_llm_gguf_metadata_cache) > _LOCAL_LLM_GGUF_METADATA_CACHE_LIMIT:
+            _local_llm_gguf_metadata_cache.pop(next(iter(_local_llm_gguf_metadata_cache)))
+        return result
+
+
+def _local_llm_context_from_gguf(path: Path) -> int:
+    return int(_local_llm_metadata_from_gguf(path)[0] or 0)
+
+
+def _local_llm_decision_support_from_gguf(path: Path) -> Optional[bool]:
+    """Read native System One support from the GGUF metadata header."""
+    return _local_llm_metadata_from_gguf(path)[1]
 
 
 def _local_llm_repo_snapshot_path(model_root: str, repo_id: str) -> Path:
@@ -3364,6 +3551,7 @@ def _local_llm_provider_cache_rows(provider: str) -> List[Dict[str, Any]]:
                 model_root=str(root),
                 repo_id=repo_id,
             )
+            native_decision_support = _local_llm_decision_support_from_gguf(gguf)
             rows.append(
                 {
                     "provider": provider_token,
@@ -3387,6 +3575,7 @@ def _local_llm_provider_cache_rows(provider: str) -> List[Dict[str, Any]]:
                         token in f"{repo_id} {rel}".lower()
                         for token in ("music-flamingo", "musicflamingo", "ultravox", "voxtral", "qwen3-asr")
                     ),
+                    "supports_decisions": bool(native_decision_support),
                     "mmproj_filename": mmproj_rel,
                     "mmproj_path": str(mmproj_path) if mmproj_path else "",
                 }
@@ -3526,12 +3715,18 @@ def _normalize_local_llm_model_row(row: Dict[str, Any]) -> Dict[str, Any]:
     supports_vision = bool(row.get("supports_vision"))
     supports_audio = bool(row.get("supports_audio"))
     supports_video = bool(row.get("supports_video"))
+    supports_decisions = bool(row.get("supports_decisions"))
     capabilities_observed = bool(row.get("capabilities_observed"))
+    decision_metadata_observed = False
     mmproj_filename = str(row.get("mmproj_filename") or "").strip()
     mmproj_path = str(row.get("mmproj_path") or "").strip()
     if provider == HYDRA_LLM_PROVIDER_LLAMA_CPP:
         path_obj = Path(str(row.get("model_path") or "")).expanduser()
         if path_obj.exists():
+            native_decision_support = _local_llm_decision_support_from_gguf(path_obj)
+            if native_decision_support is not None:
+                decision_metadata_observed = True
+                supports_decisions = bool(native_decision_support)
             detected_mmproj = _local_llm_mmproj_for_gguf(path_obj)
             if detected_mmproj:
                 supports_vision = True
@@ -3539,6 +3734,8 @@ def _normalize_local_llm_model_row(row: Dict[str, Any]) -> Dict[str, Any]:
                 if not mmproj_filename:
                     mmproj_filename = detected_mmproj.name
     identifier = f"{model} {repo_id} {filename}".lower()
+    if provider == HYDRA_LLM_PROVIDER_LLAMA_CPP and not decision_metadata_observed:
+        supports_decisions = False
     if provider == HYDRA_LLM_PROVIDER_LLAMA_CPP and not capabilities_observed and not supports_audio:
         supports_audio = any(
             token in identifier
@@ -3577,6 +3774,7 @@ def _normalize_local_llm_model_row(row: Dict[str, Any]) -> Dict[str, Any]:
         "supports_vision": supports_vision,
         "supports_audio": supports_audio,
         "supports_video": supports_video,
+        "supports_decisions": supports_decisions,
         "capabilities_observed": capabilities_observed,
         "mmproj_filename": mmproj_filename,
         "mmproj_path": mmproj_path,
@@ -3604,7 +3802,7 @@ def _local_llm_model_dedupe_key(row: Dict[str, Any]) -> Tuple[str, str]:
     return (provider, model)
 
 
-def _local_llm_model_row_score(row: Dict[str, Any]) -> Tuple[int, int, int, float]:
+def _local_llm_model_row_score(row: Dict[str, Any]) -> Tuple[int, int, int, int, float]:
     provider = _normalize_hydra_llm_provider(row.get("provider"))
     model = str(row.get("model") or "").strip()
     filename = str(row.get("filename") or "").strip()
@@ -3614,8 +3812,9 @@ def _local_llm_model_row_score(row: Dict[str, Any]) -> Tuple[int, int, int, floa
     path_exists = bool(model_path and Path(model_path).expanduser().exists())
     return (
         1 if explicit_file else 0,
-        1 if cache_scan else 0,
         1 if path_exists else 0,
+        0 if cache_scan else 1,
+        1 if bool(row.get("capabilities_observed")) else 0,
         float(row.get("downloaded_ts") or 0.0),
     )
 
@@ -3715,6 +3914,7 @@ def _record_downloaded_local_llm_model(
     supports_vision: bool = False,
     supports_audio: bool = False,
     supports_video: bool = False,
+    supports_decisions: bool = False,
     capabilities_observed: bool = False,
     mmproj_path: str = "",
 ) -> None:
@@ -3737,6 +3937,7 @@ def _record_downloaded_local_llm_model(
         "supports_vision": bool(supports_vision),
         "supports_audio": bool(supports_audio),
         "supports_video": bool(supports_video),
+        "supports_decisions": bool(supports_decisions),
         "capabilities_observed": bool(capabilities_observed),
         "mmproj_path": str(mmproj_path or "").strip(),
     }
@@ -3783,12 +3984,15 @@ def _record_downloaded_local_llm_model(
                 merged_row["supports_vision"] = bool(row.get("supports_vision"))
                 merged_row["supports_audio"] = bool(row.get("supports_audio"))
                 merged_row["supports_video"] = bool(row.get("supports_video"))
+                merged_row["supports_decisions"] = bool(row.get("supports_decisions"))
             if not bool(merged_row.get("capabilities_observed")) and not bool(merged_row.get("supports_vision")) and bool(row.get("supports_vision")):
                 merged_row["supports_vision"] = True
             if not bool(merged_row.get("capabilities_observed")) and not bool(merged_row.get("supports_audio")) and bool(row.get("supports_audio")):
                 merged_row["supports_audio"] = True
             if not bool(merged_row.get("capabilities_observed")) and not bool(merged_row.get("supports_video")) and bool(row.get("supports_video")):
                 merged_row["supports_video"] = True
+            if not bool(merged_row.get("supports_decisions")) and bool(row.get("supports_decisions")):
+                merged_row["supports_decisions"] = True
             if not str(merged_row.get("mmproj_path") or "").strip() and str(row.get("mmproj_path") or "").strip():
                 merged_row["mmproj_path"] = str(row.get("mmproj_path") or "").strip()
             if not str(merged_row.get("mmproj_filename") or "").strip() and str(row.get("mmproj_filename") or "").strip():
@@ -10136,6 +10340,11 @@ class LlamaCppRemoteModelsRequest(BaseModel):
     api_key: Optional[str] = None
 
 
+class DecisionRouterBenchmarkRequest(BaseModel):
+    model: Optional[str] = None
+    threshold: Optional[float] = None
+
+
 class HfLlmWarmupCancelRequest(BaseModel):
     key: Optional[str] = None
     provider: Optional[str] = None
@@ -10273,6 +10482,9 @@ class AppSettingsRequest(BaseModel):
     hydra_base_servers: Optional[List[Dict[str, Any]]] = None
     hydra_local_model_load_targets: Optional[List[Dict[str, Any]]] = None
     hydra_beast_mode_enabled: Optional[bool] = None
+    hydra_decision_router_mode: Optional[str] = None
+    hydra_decision_router_model: Optional[str] = None
+    hydra_decision_router_confidence: Optional[float] = None
     hydra_llm_astraeus_provider: Optional[str] = None
     hydra_llm_astraeus_host: Optional[str] = None
     hydra_llm_astraeus_port: Optional[str] = None
@@ -20896,6 +21108,20 @@ def get_settings() -> Dict[str, Any]:
         spudex_settings = {}
     tater_open_webui_llm_settings = _tater_open_webui_llm_settings()
     hydra_beast_mode_enabled = _as_bool_flag(redis_client.get(HYDRA_BEAST_MODE_ENABLED_KEY), default=False)
+    hydra_decision_router_mode = str(
+        redis_client.get(HYDRA_DECISION_ROUTER_MODE_KEY) or DEFAULT_HYDRA_DECISION_ROUTER_MODE
+    ).strip().lower()
+    if hydra_decision_router_mode not in {"off", "observe", "active"}:
+        hydra_decision_router_mode = DEFAULT_HYDRA_DECISION_ROUTER_MODE
+    hydra_decision_router_model = str(redis_client.get(HYDRA_DECISION_ROUTER_MODEL_KEY) or "").strip()
+    try:
+        hydra_decision_router_confidence = float(
+            redis_client.get(HYDRA_DECISION_ROUTER_CONFIDENCE_KEY)
+            or DEFAULT_HYDRA_DECISION_ROUTER_CONFIDENCE
+        )
+    except Exception:
+        hydra_decision_router_confidence = DEFAULT_HYDRA_DECISION_ROUTER_CONFIDENCE
+    hydra_decision_router_confidence = max(0.50, min(0.99, hydra_decision_router_confidence))
     hydra_role_model_values: Dict[str, str] = {}
     for role in HYDRA_BEAST_CONFIG_ROLE_IDS:
         raw_role_provider = str(redis_client.get(_hydra_role_llm_key(role, "provider")) or "").strip()
@@ -20946,6 +21172,9 @@ def get_settings() -> Dict[str, Any]:
         "hydra_llama_cpp_base_slot": "",
         "hydra_llama_cpp_vision_slot": "",
         "hydra_beast_mode_enabled": False,
+        "hydra_decision_router_mode": DEFAULT_HYDRA_DECISION_ROUTER_MODE,
+        "hydra_decision_router_model": "",
+        "hydra_decision_router_confidence": DEFAULT_HYDRA_DECISION_ROUTER_CONFIDENCE,
         "hydra_max_ledger_items": int(DEFAULT_MAX_LEDGER_ITEMS),
         "hydra_astraeus_plan_review_enabled": bool(DEFAULT_ASTRAEUS_PLAN_REVIEW_ENABLED),
         "hydra_auto_continue_incomplete_final_enabled": bool(DEFAULT_AUTO_CONTINUE_INCOMPLETE_FINAL_ENABLED),
@@ -21184,6 +21413,9 @@ def get_settings() -> Dict[str, Any]:
         "tater_open_webui_llm_llama_cpp_slot": str(tater_open_webui_llm_settings.get("llama_cpp_slot") or ""),
         "hydra_base_servers": hydra_base_servers,
         "hydra_beast_mode_enabled": hydra_beast_mode_enabled,
+        "hydra_decision_router_mode": hydra_decision_router_mode,
+        "hydra_decision_router_model": hydra_decision_router_model,
+        "hydra_decision_router_confidence": hydra_decision_router_confidence,
         "hydra_max_ledger_items": _read_positive_int(HYDRA_MAX_LEDGER_ITEMS_KEY, DEFAULT_MAX_LEDGER_ITEMS),
         "hydra_astraeus_plan_review_enabled": _as_bool_flag(
             redis_client.get(HYDRA_ASTRAEUS_PLAN_REVIEW_ENABLED_KEY),
@@ -21714,6 +21946,119 @@ def get_llama_cpp_remote_model_options(request: LlamaCppRemoteModelsRequest) -> 
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
+@app.post("/api/settings/decision-router/benchmark")
+async def benchmark_decision_router(request: DecisionRouterBenchmarkRequest) -> Dict[str, Any]:
+    model = str(request.model or "").strip()
+    if not model:
+        raise HTTPException(status_code=400, detail="Choose a downloaded decision model before testing.")
+    row = next(
+        (
+            item
+            for item in (_local_llm_models_payload().get("models") or [])
+            if isinstance(item, dict)
+            and _normalize_hydra_llm_provider(item.get("provider")) == HYDRA_LLM_PROVIDER_LLAMA_CPP
+            and str(item.get("model") or "").strip() == model
+        ),
+        {},
+    )
+    if not row:
+        raise HTTPException(status_code=400, detail="The selected Decision Router model is not downloaded.")
+    if not bool(row.get("supports_decisions")):
+        raise HTTPException(
+            status_code=400,
+            detail="The selected GGUF does not contain native System One decision metadata.",
+        )
+    threshold = (
+        float(request.threshold)
+        if request.threshold is not None
+        else DEFAULT_HYDRA_DECISION_ROUTER_CONFIDENCE
+    )
+    if threshold != threshold or threshold < 0.50 or threshold > 0.99:
+        raise HTTPException(status_code=400, detail="Decision Router confidence must be between 0.50 and 0.99.")
+    try:
+        return await run_decision_router_benchmark(
+            model=model,
+            confidence_threshold=threshold,
+        )
+    except Exception as exc:
+        logger.exception("[decision-router] benchmark failed model=%s", model)
+        raise HTTPException(status_code=400, detail=str(exc) or "Decision Router benchmark failed.") from exc
+
+
+def _recent_decision_router_results(limit: int = 12) -> Dict[str, Any]:
+    max_limit = max(1, min(int(limit or 12), 30))
+    scan_limit = min(300, max(60, max_limit * 12))
+    results: List[Dict[str, Any]] = []
+    for row in _load_hydra_ledger_entries("all", scan_limit):
+        astraeus_debug = row.get("astraeus_debug") if isinstance(row.get("astraeus_debug"), dict) else {}
+        decision = (
+            astraeus_debug.get("decision_router")
+            if isinstance(astraeus_debug.get("decision_router"), dict)
+            else {}
+        )
+        mode = str(decision.get("mode") or "off").strip().lower()
+        choice = str(decision.get("choice") or "").strip().lower()
+        if choice in {"needs_astraeus", "tool", "use_tool"}:
+            choice = "needs_tool"
+        outcome = str(decision.get("outcome") or "").strip().lower()
+        if mode not in {"observe", "active"} and not choice:
+            continue
+        try:
+            probability = max(0.0, min(1.0, float(decision.get("probability") or 0.0)))
+        except Exception:
+            probability = 0.0
+        try:
+            confidence = max(0.0, min(1.0, float(decision.get("confidence") or 0.0)))
+        except Exception:
+            confidence = 0.0
+        try:
+            threshold = max(0.50, min(0.99, float(decision.get("threshold") or DEFAULT_HYDRA_DECISION_ROUTER_CONFIDENCE)))
+        except Exception:
+            threshold = DEFAULT_HYDRA_DECISION_ROUTER_CONFIDENCE
+        above_threshold = choice in {"chat", "needs_tool"} and probability >= threshold
+        if mode == "observe":
+            if above_threshold and choice == "chat":
+                route_effect = "Would skip Astraeus"
+            elif above_threshold and choice == "needs_tool":
+                route_effect = "Would use tool planning"
+            else:
+                route_effect = "Would use full Astraeus"
+        elif outcome == "chat":
+            route_effect = "Astraeus skipped"
+        elif outcome == "planner_only":
+            route_effect = "Tool planning only"
+        else:
+            route_effect = "Full Astraeus"
+        timestamp = float(row.get("timestamp") or 0.0)
+        results.append(
+            {
+                "timestamp": timestamp,
+                "time": datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S") if timestamp else "",
+                "platform": str(row.get("platform") or ""),
+                "message": str(row.get("user_message") or "")[:500],
+                "mode": mode,
+                "model": str(decision.get("model") or ""),
+                "choice": choice,
+                "probability": round(probability, 4),
+                "confidence": round(confidence, 4),
+                "threshold": round(threshold, 4),
+                "above_threshold": above_threshold,
+                "outcome": outcome,
+                "route_effect": route_effect,
+                "elapsed_ms": max(0, int(decision.get("elapsed_ms") or 0)),
+                "error": str(decision.get("error") or "")[:300],
+            }
+        )
+        if len(results) >= max_limit:
+            break
+    return {"ok": True, "count": len(results), "rows": results}
+
+
+@app.get("/api/settings/decision-router/results")
+def recent_decision_router_results(limit: int = 12) -> Dict[str, Any]:
+    return _recent_decision_router_results(limit)
+
+
 @app.get("/api/settings/llama-cpp/chat-template")
 def get_llama_cpp_chat_template(model: str) -> Dict[str, Any]:
     return _llama_cpp_chat_template_model_info(model)
@@ -21834,6 +22179,8 @@ def get_huggingface_models(
                     if task_token == "audio-text-to-text"
                     else _hf_browser_is_video_model(model)
                     if task_token == "video-text-to-text"
+                    else _hf_browser_is_decision_model(model)
+                    if task_token == "decision"
                     else _hf_browser_is_text_generation_model(model)
                 )
                 and _hf_browser_provider_matches(model, provider_token)
@@ -21897,6 +22244,19 @@ def get_huggingface_model_detail(
 
     files = _hf_browser_file_rows(info, fallback_files)
     summary = _hf_browser_model_summary(info, provider=provider_token)
+    try:
+        gguf_metadata = _hf_browser_repo_gguf_metadata(repo)
+    except Exception as exc:
+        logger.warning("[huggingface-browser] could not verify GGUF metadata for %s: %s", repo, exc)
+        gguf_metadata = {}
+    decision_type = str(
+        gguf_metadata.get("decision_type")
+        or gguf_metadata.get("decisionType")
+        or summary.get("decision_type")
+        or ""
+    ).strip().lower()
+    summary["decision_type"] = decision_type
+    summary["supports_decisions"] = bool(decision_type)
     preferred_gguf = _hf_browser_preferred_gguf(files)
     preferred_mmproj = _hf_browser_preferred_mmproj(files, preferred_gguf)
     effective_model_id = _hf_browser_effective_model_id(provider_token, repo, preferred_gguf)
@@ -21908,6 +22268,8 @@ def get_huggingface_model_detail(
         "preferred_gguf": preferred_gguf,
         "preferred_mmproj": preferred_mmproj,
         "supports_vision": bool(summary.get("supports_vision") or preferred_mmproj),
+        "supports_decisions": bool(decision_type),
+        "decision_type": decision_type,
         "effective_model_id": effective_model_id,
         "integration": integration_status,
     }
@@ -21921,6 +22283,7 @@ def start_huggingface_model_download(request: HfModelDownloadRequest) -> Dict[st
 
     targets: List[Dict[str, Any]] = []
     requested: List[Dict[str, Any]] = []
+    decision_repo_types: Dict[str, str] = {}
     for item in requested_items:
         provider_token = _hf_browser_download_provider(
             item.provider,
@@ -21934,6 +22297,30 @@ def start_huggingface_model_download(request: HfModelDownloadRequest) -> Dict[st
         model_id = str(item.model_id or "").strip()
         filename = str(item.filename or "").strip()
         task_token = _normalize_hf_browser_task(item.task)
+        if task_token == "decision":
+            if not repo:
+                raise HTTPException(status_code=400, detail="Decision model downloads require a Hugging Face repository id.")
+            if repo not in decision_repo_types:
+                try:
+                    gguf_metadata = _hf_browser_repo_gguf_metadata(repo)
+                except Exception as exc:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Tater could not verify native System One support for {repo}: {exc}",
+                    ) from exc
+                decision_repo_types[repo] = str(
+                    gguf_metadata.get("decision_type")
+                    or gguf_metadata.get("decisionType")
+                    or ""
+                ).strip().lower()
+            if not decision_repo_types[repo]:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"{repo} is not a native llama.cpp System One decision model. "
+                        "Wrapper-based and ordinary text-classification GGUFs cannot be used by Tater's Decision Router."
+                    ),
+                )
         effective_model_id = model_id or _hf_browser_effective_model_id(provider_token, repo, filename)
         if not effective_model_id:
             raise HTTPException(status_code=400, detail="Every queued download needs a model id.")
@@ -21945,6 +22332,8 @@ def start_huggingface_model_download(request: HfModelDownloadRequest) -> Dict[st
         target: Dict[str, Any] = {"provider": provider_token, "model": effective_model_id}
         if media_kind:
             target["media_kind"] = media_kind
+        if task_token == "decision":
+            target["roles"] = ["Decision Router"]
         targets.append(target)
         requested.append(
             {
@@ -22700,6 +23089,13 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
             targets.extend(_single_local_model_target(role_provider, role_model))
         return _dedupe_hf_llm_warmup_targets(targets)
 
+    def _current_decision_router_local_targets() -> List[Dict[str, Any]]:
+        mode = str(redis_client.get(HYDRA_DECISION_ROUTER_MODE_KEY) or DEFAULT_HYDRA_DECISION_ROUTER_MODE).strip().lower()
+        model = str(redis_client.get(HYDRA_DECISION_ROUTER_MODEL_KEY) or "").strip()
+        if mode == "off" or not model:
+            return []
+        return [_hf_llm_warmup_base_item(HYDRA_LLM_PROVIDER_LLAMA_CPP, model, role="Decision Router")]
+
     def _current_vision_local_targets() -> List[Dict[str, str]]:
         return _current_vision_local_warmup_targets()
 
@@ -22714,6 +23110,7 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         "audio_understanding": _current_media_understanding_local_targets("audio"),
         "video_understanding": _current_media_understanding_local_targets("video"),
         "beast": _current_beast_local_targets(),
+        "decision_router": _current_decision_router_local_targets(),
     }
     touched_local_model_scopes: set[str] = set()
     if any(key in updates for key in base_settings_keys):
@@ -22733,6 +23130,8 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         for field in ("provider", "host", "port", "model", "api_key", "llama_cpp_slot")
     ):
         touched_local_model_scopes.add("beast")
+    if any(key in updates for key in ("hydra_decision_router_mode", "hydra_decision_router_model")):
+        touched_local_model_scopes.add("decision_router")
 
     protected_local_model_keys = {
         str(target.get("key") or _hf_llm_warmup_item_key(target.get("provider", ""), target.get("model", ""))).strip()
@@ -23613,6 +24012,76 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
 
     # Remove deprecated legacy key if it exists.
     redis_client.delete("tater:hydra:llm_url")
+
+    if any(
+        key in updates
+        for key in (
+            "hydra_decision_router_mode",
+            "hydra_decision_router_model",
+            "hydra_decision_router_confidence",
+        )
+    ):
+        decision_mode = str(
+            updates.get(
+                "hydra_decision_router_mode",
+                redis_client.get(HYDRA_DECISION_ROUTER_MODE_KEY) or DEFAULT_HYDRA_DECISION_ROUTER_MODE,
+            )
+            or DEFAULT_HYDRA_DECISION_ROUTER_MODE
+        ).strip().lower()
+        if decision_mode not in {"off", "observe", "active"}:
+            raise HTTPException(status_code=400, detail="hydra_decision_router_mode must be off, observe, or active.")
+        decision_model = str(
+            updates.get(
+                "hydra_decision_router_model",
+                redis_client.get(HYDRA_DECISION_ROUTER_MODEL_KEY) or "",
+            )
+            or ""
+        ).strip()
+        if decision_model:
+            decision_model = _require_downloaded_local_model(
+                HYDRA_LLM_PROVIDER_LLAMA_CPP,
+                decision_model,
+                "Decision Router",
+            )
+            decision_row = next(
+                (
+                    row
+                    for row in _downloaded_local_model_rows()
+                    if _normalize_hydra_llm_provider(row.get("provider")) == HYDRA_LLM_PROVIDER_LLAMA_CPP
+                    and str(row.get("model") or "").strip() == decision_model
+                ),
+                {},
+            )
+            if decision_row and not bool(decision_row.get("supports_decisions")):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Decision Router model must be a System One compatible decision GGUF from the Models tab.",
+                )
+        if decision_mode != "off" and not decision_model:
+            raise HTTPException(status_code=400, detail="Choose a downloaded decision model before enabling the Decision Router.")
+        raw_confidence = updates.get(
+            "hydra_decision_router_confidence",
+            redis_client.get(HYDRA_DECISION_ROUTER_CONFIDENCE_KEY)
+            or DEFAULT_HYDRA_DECISION_ROUTER_CONFIDENCE,
+        )
+        try:
+            decision_confidence = float(raw_confidence)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=400,
+                detail="Decision Router confidence must be a number between 0.50 and 0.99.",
+            ) from exc
+        if decision_confidence != decision_confidence or decision_confidence < 0.50 or decision_confidence > 0.99:
+            raise HTTPException(
+                status_code=400,
+                detail="Decision Router confidence must be between 0.50 and 0.99.",
+            )
+        redis_client.set(HYDRA_DECISION_ROUTER_MODE_KEY, decision_mode)
+        redis_client.set(HYDRA_DECISION_ROUTER_CONFIDENCE_KEY, f"{decision_confidence:.2f}")
+        if decision_model:
+            redis_client.set(HYDRA_DECISION_ROUTER_MODEL_KEY, decision_model)
+        else:
+            redis_client.delete(HYDRA_DECISION_ROUTER_MODEL_KEY)
 
     beast_mode_enabled_value: Optional[bool] = None
     if "hydra_beast_mode_enabled" in updates:

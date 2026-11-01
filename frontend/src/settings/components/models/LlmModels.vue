@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { getJson, postJson } from "../../../shared/api";
 import type { JsonRow } from "../../types";
 
@@ -8,6 +8,8 @@ const props = defineProps<{
   localModels: JsonRow;
   remoteModelsEndpoint: string;
   contextEstimateEndpoint: string;
+  decisionBenchmarkEndpoint: string;
+  decisionResultsEndpoint: string;
 }>();
 
 const emit = defineEmits<{ dirty: [] }>();
@@ -19,6 +21,14 @@ const remoteError = ref("");
 const contextEstimate = ref<JsonRow>({});
 const contextLoading = ref(false);
 const contextError = ref("");
+const decisionBenchmarkBusy = ref(false);
+const decisionBenchmarkError = ref("");
+const decisionBenchmark = ref<JsonRow>({});
+const decisionResultsBusy = ref(false);
+const decisionResultsError = ref("");
+const decisionResults = ref<JsonRow>({});
+let decisionResultsTimer: number | null = null;
+let decisionResultsPending = false;
 
 const providerOptions = [
   { value: "openai_compatible", label: "OpenAI-Compatible", short: "Connect to an API", mark: "API", local: false },
@@ -42,6 +52,12 @@ const speculativeMethods: Record<string, { label: string; tokens: number; help: 
 };
 
 const installed = computed<JsonRow[]>(() => Array.isArray(props.localModels?.models) ? props.localModels.models : []);
+const decisionModels = computed<JsonRow[]>(() => rawModelsFor("llama_cpp").filter((model) => isDecisionModel(model)));
+const decisionConfidence = computed(() => Math.max(0.50, Math.min(0.99, Number(props.draft.hydra_decision_router_confidence ?? 0.90))));
+const decisionConfidencePercent = computed(() => Math.round(decisionConfidence.value * 100));
+const decisionBenchmarkRows = computed<JsonRow[]>(() => Array.isArray(decisionBenchmark.value.rows) ? decisionBenchmark.value.rows as JsonRow[] : []);
+const decisionBenchmarkMisses = computed<JsonRow[]>(() => decisionBenchmarkRows.value.filter((row) => !row.correct));
+const decisionResultRows = computed<JsonRow[]>(() => Array.isArray(decisionResults.value.rows) ? decisionResults.value.rows as JsonRow[] : []);
 const servers = computed<JsonRow[]>(() => {
   if (!Array.isArray(props.draft.hydra_base_servers) || !props.draft.hydra_base_servers.length) {
     props.draft.hydra_base_servers = [{
@@ -147,6 +163,20 @@ watch(() => selectedRuntimeProviders.value.map((option) => option.value).join("|
 }, { immediate: true });
 
 function changed() { emit("dirty"); }
+function clearDecisionBenchmark() {
+  decisionBenchmark.value = {};
+  decisionBenchmarkError.value = "";
+}
+function decisionModelChanged() {
+  clearDecisionBenchmark();
+  changed();
+}
+function setDecisionConfidence(event: Event) {
+  const value = Number((event.target as HTMLInputElement).value || 0.90);
+  props.draft.hydra_decision_router_confidence = Math.max(0.50, Math.min(0.99, Number.isFinite(value) ? value : 0.90));
+  clearDecisionBenchmark();
+  changed();
+}
 function provider(row: JsonRow): string { return String(row.provider || "openai_compatible"); }
 function providerOption(value: unknown) { return providerOptions.find((option) => option.value === String(value || "")) || providerOptions[0]; }
 function local(providerValue: unknown): boolean { return String(providerValue || "") === "llama_cpp"; }
@@ -203,6 +233,9 @@ function isSpeculativeDraft(model: JsonRow): boolean {
   const identity = modelIdentity(model).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
   return /(^|-)(draft|sidecar|speculator|speculative)(-|$)/.test(identity);
 }
+function isDecisionModel(model: JsonRow): boolean {
+  return model.supports_decisions === true;
+}
 function modelFamilyTokens(model: JsonRow): string[] {
   const noise = new Set(["gguf", "mtp", "dflash", "dspark", "draft", "sidecar", "speculator", "speculative", "nothink", "think", "imatrix", "ud", "k", "m", "s", "l", "xs", "xxs"]);
   return modelIdentity(model)
@@ -224,7 +257,7 @@ function draftMatchesBase(candidate: JsonRow, base: JsonRow): boolean {
 }
 function modelsFor(providerValue: unknown): JsonRow[] {
   const rows = rawModelsFor(providerValue);
-  return String(providerValue || "") === "llama_cpp" ? rows.filter((model) => !isSpeculativeDraft(model)) : rows;
+  return String(providerValue || "") === "llama_cpp" ? rows.filter((model) => !isSpeculativeDraft(model) && !isDecisionModel(model)) : rows;
 }
 function modelInstalled(providerValue: unknown, modelValue: unknown): boolean {
   return rawModelsFor(providerValue).some((model) => String(model.model || "") === String(modelValue || ""));
@@ -323,17 +356,80 @@ async function discover(key: string, row: JsonRow) {
   } catch (error) { remoteError.value = error instanceof Error ? error.message : "Remote llama.cpp models could not be loaded."; }
   finally { remoteBusy.value = ""; }
 }
+async function runDecisionBenchmark() {
+  const model = String(props.draft.hydra_decision_router_model || "").trim();
+  if (!model || !props.decisionBenchmarkEndpoint || decisionBenchmarkBusy.value) return;
+  decisionBenchmarkBusy.value = true;
+  decisionBenchmarkError.value = "";
+  decisionBenchmark.value = {};
+  try {
+    decisionBenchmark.value = await postJson<JsonRow>(props.decisionBenchmarkEndpoint, {
+      model,
+      threshold: decisionConfidence.value,
+    });
+  } catch (error) {
+    decisionBenchmarkError.value = error instanceof Error ? error.message : "The Decision Router benchmark could not finish.";
+  } finally {
+    decisionBenchmarkBusy.value = false;
+  }
+}
 
-onMounted(() => { void refreshContextEstimate(); });
+function decisionPercent(value: unknown): string {
+  const amount = Math.max(0, Math.min(1, Number(value) || 0));
+  return `${Math.round(amount * 100)}%`;
+}
+function decisionChoiceLabel(value: unknown): string {
+  const choice = String(value || "").trim().toLowerCase();
+  if (choice === "needs_tool") return "Needs tool";
+  if (choice === "chat") return "Chat";
+  return "No choice";
+}
+function decisionResultTime(row: JsonRow): string {
+  const timestamp = Number(row.timestamp || 0);
+  if (!timestamp) return String(row.time || "");
+  return new Date(timestamp * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" });
+}
+async function refreshDecisionResults(silent = false) {
+  if (!props.decisionResultsEndpoint || decisionResultsPending) return;
+  decisionResultsPending = true;
+  if (!silent) decisionResultsBusy.value = true;
+  decisionResultsError.value = "";
+  try {
+    decisionResults.value = await getJson<JsonRow>(`${props.decisionResultsEndpoint}?limit=12`);
+  } catch (error) {
+    decisionResultsError.value = error instanceof Error ? error.message : "Recent Decision Router results could not be loaded.";
+  } finally {
+    decisionResultsPending = false;
+    if (!silent) decisionResultsBusy.value = false;
+  }
+}
+
+watch(area, (value) => {
+  if (value === "decision" && String(props.draft.hydra_decision_router_mode || "off") !== "off") void refreshDecisionResults();
+});
+watch(() => props.draft.hydra_decision_router_mode, (value) => {
+  if (area.value === "decision" && String(value || "off") !== "off") void refreshDecisionResults();
+});
+
+onMounted(() => {
+  void refreshContextEstimate();
+  decisionResultsTimer = window.setInterval(() => {
+    if (area.value === "decision" && String(props.draft.hydra_decision_router_mode || "off") !== "off") void refreshDecisionResults(true);
+  }, 5000);
+});
+onBeforeUnmount(() => {
+  if (decisionResultsTimer !== null) window.clearInterval(decisionResultsTimer);
+});
 </script>
 
 <template>
   <section class="tm-stack tm-llm-workspace">
     <nav class="tv-tabs tm-inner-tabs tm-llm-tabs" aria-label="LLM model areas">
       <button type="button" :class="{ active: area === 'base' }" @click="area = 'base'">Base model pool</button>
+      <button type="button" :class="{ active: area === 'decision' }" @click="area = 'decision'">Decision Router</button>
+      <button type="button" :class="{ active: area === 'beast' }" @click="area = 'beast'">Beast mode</button>
       <button type="button" :class="{ active: area === 'tater-open-webui' }" @click="area = 'tater-open-webui'">Tater Open WebUI</button>
       <button type="button" :class="{ active: area === 'spudex' }" @click="area = 'spudex'">Terminal</button>
-      <button type="button" :class="{ active: area === 'beast' }" @click="area = 'beast'">Beast mode</button>
     </nav>
     <div v-if="remoteError" class="tv-notice error">{{ remoteError }}</div>
 
@@ -439,6 +535,65 @@ onMounted(() => { void refreshContextEstimate(); });
         <label v-if="local(draft.spudex_llm_provider)" class="tm-field tm-field-wide"><span class="tm-field-label">Local model</span><select v-model="draft.spudex_llm_model" @change="changed"><option value="">Select a local model</option><option v-if="draft.spudex_llm_model && !modelInstalled(draft.spudex_llm_provider, draft.spudex_llm_model)" :value="draft.spudex_llm_model">Current: {{ draft.spudex_llm_model }}</option><option v-for="model in modelsFor(draft.spudex_llm_provider)" :key="String(model.model)" :value="model.model">{{ model.label || model.model }}</option></select></label>
         <label v-else-if="draft.spudex_llm_provider !== 'spud_link'" class="tm-field tm-field-wide"><span class="tm-field-label">Model id or alias</span><input v-model="draft.spudex_llm_model" type="text" @input="changed" /></label>
       </div></article>
+    </template>
+
+    <template v-else-if="area === 'decision'">
+      <article class="tm-form-card tm-llm-special-card">
+        <header><div><span class="tv-eyebrow">Optional fast routing check</span><h3>Decision Router</h3><p>A small native decision model scores whether the current request matches one of Tater's available tools. It never chooses or runs the tool, and uncertain results use the normal route.</p></div><span class="tm-llm-section-chip">llama.cpp · System One</span></header>
+        <div class="tm-llm-mode-picker tm-llm-mode-picker-three" role="group" aria-label="Decision Router mode">
+          <button type="button" :class="{ active: String(draft.hydra_decision_router_mode || 'off') === 'off' }" @click="draft.hydra_decision_router_mode = 'off'; changed()"><i>0</i><span><strong>Off</strong><small>Use the normal Hydra path</small></span></button>
+          <button type="button" :class="{ active: draft.hydra_decision_router_mode === 'observe' }" @click="draft.hydra_decision_router_mode = 'observe'; changed()"><i>◎</i><span><strong>Observe</strong><small>Measure decisions without changing routing</small></span></button>
+          <button type="button" :class="{ active: draft.hydra_decision_router_mode === 'active' }" @click="draft.hydra_decision_router_mode = 'active'; changed()"><i>✓</i><span><strong>Active</strong><small>Route only high-score decisions</small></span></button>
+        </div>
+      </article>
+      <article v-if="String(draft.hydra_decision_router_mode || 'off') !== 'off'" class="tm-form-card tm-llm-special-card">
+        <header><div><span class="tv-eyebrow">Decision model</span><h3>Choose a downloaded router</h3><p>Decision models use their own small context and one slot. They do not consume a Base or Hydra role slot.</p></div><span class="tm-llm-section-chip">Route at {{ decisionConfidencePercent }}%+</span></header>
+        <div class="tm-field-grid">
+          <label class="tm-field tm-field-wide"><span class="tm-field-label">Downloaded decision model</span><select v-model="draft.hydra_decision_router_model" @change="decisionModelChanged"><option value="">Select a decision model</option><option v-if="draft.hydra_decision_router_model && !modelInstalled('llama_cpp', draft.hydra_decision_router_model)" :value="draft.hydra_decision_router_model">Current: {{ draft.hydra_decision_router_model }} (not installed)</option><option v-for="model in decisionModels" :key="String(model.model)" :value="model.model">{{ model.label || model.filename || model.model }}</option></select><small v-if="!decisionModels.length">No native decision model is downloaded. In Models, choose Decision routing and download a verified System One GGUF.</small><small v-else>{{ decisionModels.length }} native System One model{{ decisionModels.length === 1 ? "" : "s" }} available.</small></label>
+        </div>
+        <section class="tm-decision-threshold">
+          <div><span class="tv-eyebrow">Route score threshold</span><strong>{{ decisionConfidencePercent }}%</strong><p>Only route scores at or above this value can take the fast route. Model confidence is reported separately below.</p></div>
+          <label><span>50%</span><input :value="decisionConfidence" type="range" min="0.50" max="0.99" step="0.01" aria-label="Decision Router route score threshold" @input="setDecisionConfidence" /><span>99%</span></label>
+        </section>
+        <aside class="tm-llm-thinking-advice"><i>i</i><span><strong>{{ draft.hydra_decision_router_mode === 'observe' ? "Observe is risk-free" : "Active keeps the normal-route safety net" }}</strong><small>{{ draft.hydra_decision_router_mode === 'observe' ? "Every turn still follows the normal route while the score and timing are recorded in the Hydra ledger." : "High-confidence chat or unsupported requests go directly to the response model. High-confidence tool matches go to tool planning, and uncertain or failed decisions use the normal route." }}</small></span></aside>
+      </article>
+      <article v-if="String(draft.hydra_decision_router_mode || 'off') !== 'off'" class="tm-form-card tm-decision-benchmark-card">
+        <header><div><span class="tv-eyebrow">Model check</span><h3>Test this router before it routes</h3><p>Run everyday chat, single-tool, multi-tool, follow-up, and unsupported-action prompts against a fixed 31-tool catalog. No tools are executed and no conversations are changed.</p></div><button class="tv-button primary" type="button" :disabled="decisionBenchmarkBusy || !String(draft.hydra_decision_router_model || '').trim()" @click="runDecisionBenchmark">{{ decisionBenchmarkBusy ? "Testing prompts…" : "Run router test" }}</button></header>
+        <div v-if="decisionBenchmarkBusy" class="tm-decision-benchmark-running"><span class="tm-decision-spinner" aria-hidden="true" /><div><strong>Scoring the standard benchmark</strong><small>The first run may also load the model. Larger routers can take a little while.</small></div></div>
+        <div v-if="decisionBenchmarkError" class="tv-notice error" aria-live="polite">{{ decisionBenchmarkError }}</div>
+        <template v-if="decisionBenchmark.total">
+          <section class="tm-decision-verdict" :class="String(decisionBenchmark.verdict || '')"><div><span>{{ decisionBenchmark.verdict === 'great' ? '✓' : decisionBenchmark.verdict === 'unsafe' ? '!' : '◎' }}</span><div><strong>{{ decisionBenchmark.verdict === 'great' ? 'Great fit' : decisionBenchmark.verdict === 'promising' ? 'Promising' : decisionBenchmark.verdict === 'unsafe' ? 'Unsafe at this threshold' : 'Needs tuning' }}</strong><small>{{ decisionBenchmark.verdict_text }}</small></div></div><b>{{ decisionBenchmark.correct }}/{{ decisionBenchmark.total }}</b></section>
+          <div class="tm-decision-metrics">
+            <article><span>Raw accuracy</span><strong>{{ decisionBenchmark.accuracy_percent }}%</strong><small>All {{ decisionBenchmark.total }} choices</small></article>
+            <article><span>Normal chat</span><strong>{{ decisionBenchmark.chat_correct }}/{{ decisionBenchmark.chat_total }}</strong><small>Everyday conversation choices</small></article>
+            <article><span>Tool requests</span><strong>{{ decisionBenchmark.tool_correct }}/{{ decisionBenchmark.tool_total }}</strong><small>Available-tool choices</small></article>
+            <article><span>Multi-tool requests</span><strong>{{ decisionBenchmark.multi_tool_correct }}/{{ decisionBenchmark.multi_tool_total }}</strong><small>Requests spanning multiple tools</small></article>
+            <article><span>Fast-route coverage</span><strong>{{ decisionBenchmark.coverage_percent }}%</strong><small>{{ decisionBenchmark.routed }} above {{ Math.round(Number(decisionBenchmark.threshold) * 100) }}%</small></article>
+            <article><span>Routed precision</span><strong>{{ decisionBenchmark.routed ? `${decisionBenchmark.precision_percent}%` : '—' }}</strong><small>{{ decisionBenchmark.routed_wrong }} confident mistakes</small></article>
+            <article><span>Model confidence</span><strong>{{ decisionBenchmark.average_confidence_percent }}%</strong><small>Average confidence across tests</small></article>
+            <article><span>Average decision</span><strong>{{ Math.round(Number(decisionBenchmark.average_latency_ms) || 0) }} ms</strong><small>P95 {{ decisionBenchmark.p95_latency_ms }} ms</small></article>
+          </div>
+          <details class="tm-decision-results" :open="Boolean(decisionBenchmarkMisses.length)"><summary><span>{{ decisionBenchmarkMisses.length ? `${decisionBenchmarkMisses.length} missed prompt${decisionBenchmarkMisses.length === 1 ? '' : 's'}` : 'All prompts classified correctly' }}</span><small>See every score, confidence, and route</small></summary><div><article v-for="(row, index) in decisionBenchmarkRows" :key="index" :class="{ miss: !row.correct, unsafe: row.unsafe }"><i>{{ row.correct ? '✓' : '×' }}</i><div><strong>{{ row.message }}</strong><small>{{ row.category === 'chat' ? 'Normal chat' : row.category === 'multi_tool' ? 'Multi-tool request' : 'Tool request' }} · expected {{ row.expected === 'needs_tool' ? 'Needs tool' : 'Chat' }} · chose {{ row.actual === 'needs_tool' ? 'Needs tool' : 'Chat' }} · route score {{ decisionPercent(row.probability) }} · confidence {{ decisionPercent(row.confidence) }} · {{ row.elapsed_ms }} ms</small></div><b>{{ row.would_route ? 'Would route' : 'Fallback' }}</b></article></div></details>
+        </template>
+      </article>
+      <article v-if="String(draft.hydra_decision_router_mode || 'off') !== 'off'" class="tm-form-card tm-decision-live-card">
+        <header><div><span class="tv-eyebrow">Recent live decisions</span><h3>See what the router is choosing</h3><p>Review the latest real requests from every Hydra platform. Observe mode shows what would have happened while still sending every request through normal Hydra.</p></div><button class="tv-button" type="button" :disabled="decisionResultsBusy" @click="refreshDecisionResults()">{{ decisionResultsBusy ? "Refreshing…" : "Refresh" }}</button></header>
+        <div v-if="decisionResultsError" class="tv-notice error" aria-live="polite">{{ decisionResultsError }}</div>
+        <div v-if="decisionResultsBusy && !decisionResultRows.length" class="tm-decision-benchmark-running"><span class="tm-decision-spinner" aria-hidden="true" /><div><strong>Loading recent decisions</strong><small>Reading the Decision Router results recorded in the Hydra ledger.</small></div></div>
+        <div v-else-if="!decisionResultRows.length" class="tm-decision-live-empty"><strong>No decisions recorded yet</strong><small>Send a request through Tater with Observe or Active enabled. Results refresh automatically while this tab is open.</small></div>
+        <div v-else class="tm-decision-live-results">
+          <article v-for="(row, index) in decisionResultRows" :key="`${row.timestamp || index}-${index}`" :class="{ routed: row.above_threshold, fallback: !row.above_threshold }">
+            <header><span :class="String(row.choice || '')">{{ decisionChoiceLabel(row.choice) }}</span><strong>{{ row.message || row.error || "Decision Router result" }}</strong><time>{{ decisionResultTime(row) }}</time></header>
+            <div class="tm-decision-live-metrics">
+              <span><small>Route score</small><b>{{ decisionPercent(row.probability) }}</b></span>
+              <span><small>Model confidence</small><b>{{ decisionPercent(row.confidence) }}</b></span>
+              <span><small>Recorded threshold</small><b>{{ decisionPercent(row.threshold) }}</b></span>
+              <span><small>Decision time</small><b>{{ row.elapsed_ms }} ms</b></span>
+            </div>
+            <footer><span>{{ row.platform || "unknown" }} · {{ row.mode === "observe" ? "Observe" : "Active" }} · {{ row.outcome || "recorded" }}</span><b>{{ row.route_effect }}</b></footer>
+          </article>
+        </div>
+      </article>
     </template>
 
     <template v-else>

@@ -37,6 +37,7 @@ from helpers import (
     looks_like_tool_markup,
     parse_function_json,
     redis_client as default_redis,
+    run_llama_cpp_decision_model,
 )
 from conversation_artifacts import (
     load_conversation_artifacts,
@@ -223,6 +224,11 @@ HYDRA_LLM_PROVIDER_LLAMA_CPP = "llama_cpp"
 HYDRA_LLM_PROVIDER_LLAMA_CPP_REMOTE = "llama_cpp_remote"
 CHAT_HISTORY_MAX_ITEMS_KEY = "tater:max_llm"
 HYDRA_BEAST_MODE_ENABLED_KEY = "tater:hydra:beast_mode_enabled"
+HYDRA_DECISION_ROUTER_MODE_KEY = "tater:hydra:decision_router:mode"
+HYDRA_DECISION_ROUTER_MODEL_KEY = "tater:hydra:decision_router:model"
+HYDRA_DECISION_ROUTER_CONFIDENCE_KEY = "tater:hydra:decision_router:confidence"
+DEFAULT_HYDRA_DECISION_ROUTER_MODE = "off"
+DEFAULT_HYDRA_DECISION_ROUTER_CONFIDENCE = 0.90
 HYDRA_BEAST_ROLE_IDS = (
     "ai_calls",
     "astraeus",
@@ -1187,6 +1193,27 @@ def _configured_auto_continue_incomplete_final_enabled(redis_client: Any = None)
     )
 
 
+def _configured_decision_router(redis_client: Any = None) -> Dict[str, Any]:
+    r = redis_client or default_redis
+    try:
+        mode = str(r.get(HYDRA_DECISION_ROUTER_MODE_KEY) or DEFAULT_HYDRA_DECISION_ROUTER_MODE).strip().lower()
+        model = str(r.get(HYDRA_DECISION_ROUTER_MODEL_KEY) or "").strip()
+        confidence = float(
+            r.get(HYDRA_DECISION_ROUTER_CONFIDENCE_KEY)
+            or DEFAULT_HYDRA_DECISION_ROUTER_CONFIDENCE
+        )
+    except Exception:
+        mode = DEFAULT_HYDRA_DECISION_ROUTER_MODE
+        model = ""
+        confidence = DEFAULT_HYDRA_DECISION_ROUTER_CONFIDENCE
+    if mode not in {"off", "observe", "active"}:
+        mode = DEFAULT_HYDRA_DECISION_ROUTER_MODE
+    if not model:
+        mode = "off"
+    confidence = max(0.50, min(0.99, float(confidence)))
+    return {"mode": mode, "model": model, "confidence": confidence}
+
+
 def _normalize_token_limit(
     value: Optional[int],
     *,
@@ -1567,6 +1594,51 @@ def _enabled_tool_mini_index(
         plugin_supports_platform_fn=verba_supports_platform,
         plugin_usage_text_fn=_plugin_usage_text,
         tool_purpose_fn=_tool_purpose,
+    )
+
+
+def _compact_tool_capabilities(tool_index: str) -> List[Dict[str, str]]:
+    """Reduce the execution index to stable ids and one-line descriptions."""
+    capabilities: List[Dict[str, str]] = []
+    seen: set[str] = set()
+    for raw_line in str(tool_index or "").splitlines():
+        line = raw_line.strip()
+        if not line.startswith("- id:"):
+            continue
+        body = line[len("- id:") :].strip()
+        tool_id, separator, remainder = body.partition(" | description:")
+        tool_id = tool_id.strip()
+        if not separator or not tool_id or tool_id in seen:
+            continue
+        description = remainder.split(" | usage:", 1)[0].strip()
+        seen.add(tool_id)
+        capabilities.append(
+            {
+                "id": tool_id,
+                "description": description or tool_id.replace("_", " "),
+            }
+        )
+    return capabilities
+
+
+def _chat_capability_context(capabilities: List[Dict[str, str]]) -> str:
+    rows: List[str] = []
+    for item in capabilities or []:
+        if not isinstance(item, dict):
+            continue
+        tool_id = _short_text(item.get("id"), limit=80).strip()
+        description = _short_text(item.get("description"), limit=160).strip()
+        if tool_id:
+            rows.append(f"- {tool_id}: {description or tool_id.replace('_', ' ')}")
+    available = "\n".join(rows) if rows else "- (none)"
+    return (
+        "Available tools on this platform (capability summary only):\n"
+        f"{available}\n"
+        "Chat capability rules:\n"
+        "- Never claim an external action happened unless this turn includes a successful tool result.\n"
+        "- If the user requests an action or external/current/private information and no listed tool can provide it, "
+        "say that Tater cannot currently do it.\n"
+        "- Do not invent a tool, imply that an unavailable capability exists, or expose this internal list unless the user asks."
     )
 
 
@@ -2656,6 +2728,293 @@ def _generic_chat_fallback_text(text: str) -> str:
     return "I'm here and ready to talk or help."
 
 
+async def _run_decision_router(
+    *,
+    model: str,
+    current_user_text: str,
+    platform: str,
+    available_tools: List[Dict[str, str]],
+) -> Dict[str, Any]:
+    del platform
+    capability_rows: List[str] = []
+    for item in available_tools or []:
+        if not isinstance(item, dict):
+            continue
+        tool_id = _short_text(item.get("id"), limit=80).strip()
+        description = _short_text(item.get("description"), limit=120).strip()
+        if tool_id:
+            capability_rows.append(f"{tool_id}: {description or tool_id.replace('_', ' ')}")
+    capability_summary = "\n".join(f"- {row}" for row in capability_rows) if capability_rows else "- (none)"
+    # System One models place a small per-option budget on choice descriptions.
+    # Keep the choices short and put the reusable routing policy in shared state.
+    routing_policy = (
+        "Routing policy:\n"
+        "- Choose needs_tool only when the message clearly requests an external action, state change, retrieval, "
+        "or live lookup that a listed tool can directly fulfill.\n"
+        "- Choose chat for social conversation, acknowledgments, refusals, greetings, thanks, opinions, ordinary "
+        "knowledge, writing, reasoning, math, and unsupported requests.\n"
+        "- Do not infer an unstated action or invent a tool request from a short or context-dependent conversational "
+        "fragment.\n"
+        "- A context-dependent follow-up still needs a tool when it clearly expresses an action that a listed tool "
+        "can fulfill.\n"
+        "- If no listed tool clearly fulfills the message, choose chat."
+    )
+    state = (
+        f"Current user message:\n{str(current_user_text or '')}\n\n"
+        f"{routing_policy}\n\n"
+        f"Available Tater tools:\n{capability_summary}"
+    )
+    questions = {
+        "route": {
+            "type": "choice",
+            "instructions": "Decide whether the message needs a listed tool or should be handled as normal chat.",
+            "criteria": {
+                "chat": "No clear listed-tool action or live lookup is requested.",
+                "needs_tool": "A listed tool directly fulfills a clear action or live lookup in the message.",
+            },
+        }
+    }
+    started = time.perf_counter()
+    response = await asyncio.to_thread(
+        run_llama_cpp_decision_model,
+        model,
+        state=state,
+        questions=questions,
+        timeout=30.0,
+    )
+    elapsed_ms = int(max(0.0, (time.perf_counter() - started) * 1000.0))
+    answers = response.get("answers") if isinstance(response.get("answers"), dict) else {}
+    route = answers.get("route") if isinstance(answers.get("route"), dict) else {}
+    choice = str(route.get("choice") or "").strip().lower()
+    probabilities = route.get("probabilities") if isinstance(route.get("probabilities"), dict) else {}
+    try:
+        probability = float(probabilities.get(choice) or 0.0)
+    except Exception:
+        probability = 0.0
+    try:
+        confidence = float(route.get("confidence") or 0.0)
+    except Exception:
+        confidence = 0.0
+    return {
+        "choice": choice if choice in {"chat", "needs_tool"} else "",
+        "probability": max(0.0, min(1.0, probability)),
+        "confidence": max(0.0, min(1.0, confidence)),
+        "elapsed_ms": elapsed_ms,
+        "usage": response.get("usage") if isinstance(response.get("usage"), dict) else {},
+    }
+
+
+DECISION_ROUTER_BENCHMARK_TOOLS: List[Dict[str, str]] = [
+    {"id": "homeassistant", "description": "Read and control Home Assistant lights, switches, fans, scenes, and devices"},
+    {"id": "websearch", "description": "Search the web for current information, weather, news, and live service status"},
+    {"id": "voicepe_remote_timer", "description": "Create, inspect, and cancel timers on voice satellites"},
+    {"id": "overseerr_request", "description": "Request a movie or television series in Overseerr"},
+    {"id": "overseerr_details", "description": "Look up movie and television title details in Overseerr"},
+    {"id": "overseerr_trending", "description": "Find trending and upcoming movies and television series"},
+    {"id": "youtube_summary", "description": "Read and summarize a YouTube video"},
+    {"id": "find_my_phone", "description": "Ring or locate a linked phone"},
+    {"id": "network_device_status", "description": "Check whether a named network device or game console is online"},
+    {"id": "joke_api", "description": "Fetch a joke"},
+    {"id": "broadcast", "description": "Broadcast a spoken announcement to one or more satellites"},
+    {"id": "do_not_disturb", "description": "Enable or disable satellite do-not-disturb mode"},
+    {"id": "entry_sensor_status", "description": "Read door and window sensor state"},
+    {"id": "camera_control", "description": "Inspect cameras and capture a current snapshot"},
+    {"id": "comfyui_image_plugin", "description": "Generate an image from a text description"},
+    {"id": "comfyui_image_edit", "description": "Edit an existing image from instructions"},
+    {"id": "comfyui_image_video", "description": "Animate an image into a video"},
+    {"id": "comfyui_audio_ace", "description": "Generate music or audio"},
+    {"id": "device_compare", "description": "Compare specifications and features of consumer devices"},
+    {"id": "jackett_search_torrents", "description": "Search configured torrent indexers"},
+    {"id": "premiumize_add_transfer", "description": "Add a download to Premiumize"},
+    {"id": "premiumize_check_transfer", "description": "Check progress of a Premiumize transfer"},
+    {"id": "premiumize_get_links", "description": "Get playable or downloadable links from Premiumize"},
+    {"id": "premiumize_list_transfers", "description": "List current Premiumize transfers"},
+    {"id": "inspect_webpage", "description": "Read and inspect a specific web page"},
+    {"id": "memory", "description": "Remember or recall durable user information"},
+    {"id": "music", "description": "Play, pause, skip, and control music playback"},
+    {"id": "satellite_volume", "description": "Read or change voice satellite volume"},
+    {"id": "people", "description": "Look up linked people and presence information"},
+    {"id": "notifications", "description": "Send a notification through a configured destination"},
+    {"id": "system_status", "description": "Inspect Tater host and service health"},
+]
+
+
+DECISION_ROUTER_BENCHMARK_CASES: List[Dict[str, str]] = [
+    {"message": "turn on the kitchen lights", "expected": "needs_tool"},
+    {"message": "turn them back on", "expected": "needs_tool"},
+    {"message": "set a timer for twelve minutes", "expected": "needs_tool"},
+    {"message": "request The Matrix for me", "expected": "needs_tool"},
+    {"message": "summarize this YouTube video", "expected": "needs_tool"},
+    {"message": "find my phone", "expected": "needs_tool"},
+    {"message": "is the PlayStation online", "expected": "needs_tool"},
+    {"message": "what's the weather today", "expected": "needs_tool"},
+    {"message": "tell me a joke", "expected": "needs_tool"},
+    {"message": "announce that dinner is ready everywhere", "expected": "needs_tool"},
+    {"message": "turn on do not disturb in the bedroom", "expected": "needs_tool"},
+    {"message": "is the front door open", "expected": "needs_tool"},
+    {"message": "show me a current snapshot from the driveway camera", "expected": "needs_tool"},
+    {"message": "make an image of a potato astronaut", "expected": "needs_tool"},
+    {"message": "edit this photo to remove the background", "expected": "needs_tool"},
+    {"message": "search for a Linux ISO torrent", "expected": "needs_tool"},
+    {"message": "skip this song", "expected": "needs_tool"},
+    {"message": "remember that my favorite color is green", "expected": "needs_tool"},
+    {
+        "message": "turn on the kitchen lights and tell me the weather",
+        "expected": "needs_tool",
+        "category": "multi_tool",
+    },
+    {
+        "message": "set a timer for twelve minutes and start some music",
+        "expected": "needs_tool",
+        "category": "multi_tool",
+    },
+    {
+        "message": "is the front door open and show me the driveway camera",
+        "expected": "needs_tool",
+        "category": "multi_tool",
+    },
+    {
+        "message": "remember that my favorite color is green and turn on the bedroom fan",
+        "expected": "needs_tool",
+        "category": "multi_tool",
+    },
+    {"message": "chillen", "expected": "chat"},
+    {"message": "five hundred divided by seventy", "expected": "chat"},
+    {"message": "explain why the sky looks blue", "expected": "chat"},
+    {"message": "write a short poem about autumn", "expected": "chat"},
+    {"message": "rewrite this sentence to sound friendlier", "expected": "chat"},
+    {"message": "brainstorm names for a coffee shop", "expected": "chat"},
+    {"message": "what does ephemeral mean", "expected": "chat"},
+    {"message": "help me think through a difficult conversation", "expected": "chat"},
+    {"message": "translate good morning into Spanish", "expected": "chat"},
+    {"message": "what are some healthy breakfast ideas", "expected": "chat"},
+    {"message": "can you explain recursion simply", "expected": "chat"},
+    {"message": "make this paragraph more concise", "expected": "chat"},
+    {"message": "I had a rough day", "expected": "chat"},
+    {"message": "what should I pack for a weekend trip", "expected": "chat"},
+    {"message": "hey, how are you doing", "expected": "chat"},
+    {"message": "what are you up to", "expected": "chat"},
+    {"message": "that's cool", "expected": "chat"},
+    {"message": "not at the moment", "expected": "chat"},
+    {"message": "good morning", "expected": "chat"},
+    {"message": "thanks, I appreciate it", "expected": "chat"},
+    {"message": "book me a flight to Chicago", "expected": "chat"},
+    {"message": "order a large pepperoni pizza", "expected": "chat"},
+    {"message": "send an email to the entire company", "expected": "chat"},
+    {"message": "schedule a dentist appointment next Tuesday", "expected": "chat"},
+]
+
+
+async def run_decision_router_benchmark(
+    *,
+    model: str,
+    confidence_threshold: float = DEFAULT_HYDRA_DECISION_ROUTER_CONFIDENCE,
+) -> Dict[str, Any]:
+    """Score a decision model without running Hydra or executing any tools."""
+    threshold = max(0.50, min(0.99, float(confidence_threshold)))
+    rows: List[Dict[str, Any]] = []
+    latencies: List[int] = []
+    input_tokens = 0
+    for case in DECISION_ROUTER_BENCHMARK_CASES:
+        result = await _run_decision_router(
+            model=model,
+            current_user_text=case["message"],
+            platform="benchmark",
+            available_tools=DECISION_ROUTER_BENCHMARK_TOOLS,
+        )
+        actual = str(result.get("choice") or "")
+        expected = str(case.get("expected") or "")
+        probability = float(result.get("probability") or 0.0)
+        elapsed_ms = int(result.get("elapsed_ms") or 0)
+        correct = actual == expected
+        would_route = probability >= threshold
+        usage = result.get("usage") if isinstance(result.get("usage"), dict) else {}
+        input_tokens += int(usage.get("input_tokens") or 0)
+        latencies.append(elapsed_ms)
+        rows.append(
+            {
+                "message": case["message"],
+                "category": str(case.get("category") or ("tool" if expected == "needs_tool" else "chat")),
+                "expected": expected,
+                "actual": actual,
+                "probability": round(probability, 4),
+                "confidence": round(float(result.get("confidence") or 0.0), 4),
+                "elapsed_ms": elapsed_ms,
+                "correct": correct,
+                "would_route": would_route,
+                "unsafe": bool(would_route and not correct and actual == "chat" and expected == "needs_tool"),
+            }
+        )
+
+    total = len(rows)
+    correct_count = sum(1 for row in rows if row["correct"])
+    chat_rows = [row for row in rows if row["expected"] == "chat"]
+    tool_rows = [row for row in rows if row["expected"] == "needs_tool"]
+    multi_tool_rows = [row for row in rows if row["category"] == "multi_tool"]
+    chat_correct = sum(1 for row in chat_rows if row["correct"])
+    tool_correct = sum(1 for row in tool_rows if row["correct"])
+    multi_tool_correct = sum(1 for row in multi_tool_rows if row["correct"])
+    routed_rows = [row for row in rows if row["would_route"]]
+    routed_correct = sum(1 for row in routed_rows if row["correct"])
+    routed_wrong = len(routed_rows) - routed_correct
+    unsafe_count = sum(1 for row in rows if row["unsafe"])
+    ordered_latencies = sorted(latencies)
+    median_ms = ordered_latencies[len(ordered_latencies) // 2] if ordered_latencies else 0
+    p95_index = min(len(ordered_latencies) - 1, int(len(ordered_latencies) * 0.95)) if ordered_latencies else 0
+    p95_ms = ordered_latencies[p95_index] if ordered_latencies else 0
+    accuracy = (correct_count / total * 100.0) if total else 0.0
+    coverage = (len(routed_rows) / total * 100.0) if total else 0.0
+    precision = (routed_correct / len(routed_rows) * 100.0) if routed_rows else 0.0
+    if unsafe_count:
+        verdict = "unsafe"
+        verdict_text = "This threshold would bypass tool planning for at least one tool request."
+    elif accuracy >= 90.0 and precision >= 95.0 and len(routed_rows) >= max(1, total // 4):
+        verdict = "great"
+        verdict_text = "Strong accuracy with a useful amount of confident routing."
+    elif accuracy >= 80.0 and routed_wrong == 0:
+        verdict = "promising"
+        verdict_text = "The model is accurate, but this threshold may route only a small share of requests."
+    else:
+        verdict = "needs_tuning"
+        verdict_text = "Try another model or adjust the threshold, then test again before Active mode."
+    return {
+        "ok": True,
+        "model": str(model or "").strip(),
+        "threshold": threshold,
+        "total": total,
+        "correct": correct_count,
+        "accuracy_percent": round(accuracy, 1),
+        "chat_total": len(chat_rows),
+        "chat_correct": chat_correct,
+        "tool_total": len(tool_rows),
+        "tool_correct": tool_correct,
+        "multi_tool_total": len(multi_tool_rows),
+        "multi_tool_correct": multi_tool_correct,
+        "routed": len(routed_rows),
+        "routed_correct": routed_correct,
+        "routed_wrong": routed_wrong,
+        "unsafe": unsafe_count,
+        "coverage_percent": round(coverage, 1),
+        "precision_percent": round(precision, 1),
+        "average_latency_ms": round(sum(latencies) / len(latencies), 1) if latencies else 0.0,
+        "median_latency_ms": median_ms,
+        "p95_latency_ms": p95_ms,
+        "average_input_tokens": round(input_tokens / total, 1) if total else 0.0,
+        "average_route_score_percent": round(
+            sum(float(row["probability"]) for row in rows) / total * 100.0,
+            1,
+        ) if total else 0.0,
+        "average_confidence_percent": round(
+            sum(float(row["confidence"]) for row in rows) / total * 100.0,
+            1,
+        ) if total else 0.0,
+        "tool_count": len(DECISION_ROUTER_BENCHMARK_TOOLS),
+        "verdict": verdict,
+        "verdict_text": verdict_text,
+        "rows": rows,
+    }
+
+
 async def _run_astraeus_plan(
     *,
     llm_client: Any,
@@ -2672,6 +3031,7 @@ async def _run_astraeus_plan(
     available_tool_ids: set[str],
     platform_preamble: str,
     max_tokens: Optional[int],
+    operating_mode: str = "full",
     debug_out: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     fallback_goal = _short_text(turn_request_text or current_user_text, limit=220) or "Fulfill the user request."
@@ -2693,6 +3053,7 @@ async def _run_astraeus_plan(
     dynamic_payload = {
         "current_user_message": str(current_user_text or ""),
         "recent_history": recent_history,
+        "route_lock": "planner_only" if str(operating_mode or "").strip().lower() == "planner_only" else "full",
     }
     dynamic_payload["current_local_datetime"] = _current_datetime_context_message().removeprefix(
         "Current Local Date and Time: "
@@ -5496,6 +5857,7 @@ async def _run_hydra_turn_impl(
     chat_history_max_items = _configured_chat_history_max_items(r)
     astraeus_plan_review_enabled = _configured_astraeus_plan_review_enabled(r)
     auto_continue_incomplete_final_enabled = _configured_auto_continue_incomplete_final_enabled(r)
+    decision_router_config = _configured_decision_router(r)
     turn_started_at = time.perf_counter()
     astraeus_ms_total = 0.0
     astraeus_route_ms_total = 0.0
@@ -5566,6 +5928,8 @@ async def _run_hydra_turn_impl(
         enabled_predicate=enabled_predicate,
         origin=origin_payload,
     )
+    tool_capabilities = _compact_tool_capabilities(tool_index)
+    chat_capability_context = _chat_capability_context(tool_capabilities)
     astraeus_capability_catalog = _astraeus_capability_catalog(
         platform=platform,
         registry=registry,
@@ -5604,6 +5968,9 @@ async def _run_hydra_turn_impl(
         user_text=current_user_turn_text,
         request_text=turn_request_text,
     )
+    chat_context_message = "\n\n".join(
+        item for item in (chat_capability_context, chat_context_message) if item
+    )
     hermes_context_message = _core_system_prompt_message(
         role="hermes",
         platform=platform,
@@ -5613,6 +5980,9 @@ async def _run_hydra_turn_impl(
         memory_context_payload=memory_context_payload,
         user_text=current_user_turn_text,
         request_text=turn_request_text,
+    )
+    hermes_context_message = "\n\n".join(
+        item for item in (chat_capability_context, hermes_context_message) if item
     )
     queued_retry_tool_for_ledger: Optional[Dict[str, Any]] = None
     structured_plan_queue: List[Dict[str, str]] = []
@@ -5625,39 +5995,112 @@ async def _run_hydra_turn_impl(
     astraeus_goal = _short_text(turn_request_text or current_user_turn_text, limit=220) or "Fulfill the user request."
     astraeus_topic_shift = False
     completed_tool_steps: List[Dict[str, str]] = []
-    try:
-        astraeus_started = time.perf_counter()
-        astraeus_result = await _run_astraeus_plan(
-            llm_client=llm_client_astraeus,
-            platform=platform,
-            current_user_text=current_user_turn_text,
-            turn_request_text=turn_request_text,
-            topic_seed=astraeus_topic,
-            topic_shift_seed=astraeus_topic_shift,
-            history=history,
-            prior_state=prior_state,
-            pending_interaction=pending_interaction,
-            memory_context=tool_memory_context_payload,
-            capability_catalog=astraeus_capability_catalog,
-            available_tool_ids=available_execution_tool_ids,
-            platform_preamble=tool_platform_preamble,
-            max_tokens=None,
-            debug_out=astraeus_debug,
-        )
-        astraeus_route_elapsed_ms = (time.perf_counter() - astraeus_started) * 1000.0
-        astraeus_debug["wall_ms"] = int(max(0.0, astraeus_route_elapsed_ms))
-        astraeus_ms_total += astraeus_route_elapsed_ms
-        astraeus_route_ms_total += astraeus_route_elapsed_ms
-    except Exception:
+    astraeus_operating_mode = "full"
+    bypass_astraeus = False
+    decision_mode = str(decision_router_config.get("mode") or "off")
+    decision_model = str(decision_router_config.get("model") or "")
+    decision_threshold = max(
+        0.50,
+        min(
+            0.99,
+            float(decision_router_config.get("confidence") or DEFAULT_HYDRA_DECISION_ROUTER_CONFIDENCE),
+        ),
+    )
+    decision_debug: Dict[str, Any] = {
+        "mode": decision_mode,
+        "model": decision_model,
+        "threshold": decision_threshold,
+        "outcome": "disabled" if decision_mode == "off" else "fallback_full",
+    }
+    if decision_mode != "off" and pending_interaction:
+        decision_debug["outcome"] = "pending_interaction_full"
+    elif decision_mode != "off" and decision_model:
+        try:
+            decision_result = await _run_decision_router(
+                model=decision_model,
+                current_user_text=current_user_turn_text,
+                platform=platform,
+                available_tools=tool_capabilities,
+            )
+            decision_debug.update(decision_result)
+            decision_elapsed_ms = float(decision_result.get("elapsed_ms") or 0.0)
+            astraeus_ms_total += decision_elapsed_ms
+            choice = str(decision_result.get("choice") or "")
+            probability = float(decision_result.get("probability") or 0.0)
+            high_confidence = probability >= decision_threshold
+            if decision_mode == "observe":
+                decision_debug["outcome"] = "observed_full"
+            elif high_confidence and choice == "chat":
+                bypass_astraeus = True
+                decision_debug["outcome"] = "chat"
+            elif high_confidence and choice == "needs_tool":
+                astraeus_operating_mode = "planner_only"
+                decision_debug["outcome"] = "planner_only"
+            else:
+                decision_debug["outcome"] = "uncertain_full"
+        except Exception as exc:
+            decision_debug["outcome"] = "error_full"
+            decision_debug["error"] = _short_text(str(exc) or exc.__class__.__name__, limit=500)
+    astraeus_debug["decision_router"] = decision_debug
+
+    if bypass_astraeus:
         astraeus_result = {
-            "mode": "unknown",
+            "mode": "chat",
             "relation": "standalone",
+            "topic": astraeus_topic,
             "topic_shift": False,
             "goal": astraeus_goal,
             "question": "",
             "pending_interaction": None,
             "steps": [],
         }
+        astraeus_debug["bypassed"] = True
+        astraeus_debug["wall_ms"] = 0
+    else:
+        try:
+            astraeus_started = time.perf_counter()
+            astraeus_result = await _run_astraeus_plan(
+                llm_client=llm_client_astraeus,
+                platform=platform,
+                current_user_text=current_user_turn_text,
+                turn_request_text=turn_request_text,
+                topic_seed=astraeus_topic,
+                topic_shift_seed=astraeus_topic_shift,
+                history=history,
+                prior_state=prior_state,
+                pending_interaction=pending_interaction,
+                memory_context=tool_memory_context_payload,
+                capability_catalog=astraeus_capability_catalog,
+                available_tool_ids=available_execution_tool_ids,
+                platform_preamble=tool_platform_preamble,
+                max_tokens=None,
+                operating_mode=astraeus_operating_mode,
+                debug_out=astraeus_debug,
+            )
+            if (
+                astraeus_operating_mode == "planner_only"
+                and str((astraeus_result or {}).get("mode") or "").strip().lower() == "chat"
+            ):
+                # Astraeus is the authoritative planner. If it finds that no
+                # executable tool step exists, accept chat without paying for
+                # a second identical planning pass.
+                decision_debug["outcome"] = "planner_lock_conflict_chat"
+                astraeus_operating_mode = "planner_only_chat"
+            astraeus_route_elapsed_ms = (time.perf_counter() - astraeus_started) * 1000.0
+            astraeus_debug["wall_ms"] = int(max(0.0, astraeus_route_elapsed_ms))
+            astraeus_debug["operating_mode"] = astraeus_operating_mode
+            astraeus_ms_total += astraeus_route_elapsed_ms
+            astraeus_route_ms_total += astraeus_route_elapsed_ms
+        except Exception:
+            astraeus_result = {
+                "mode": "unknown",
+                "relation": "standalone",
+                "topic_shift": False,
+                "goal": astraeus_goal,
+                "question": "",
+                "pending_interaction": None,
+                "steps": [],
+            }
     if isinstance(astraeus_result, dict):
         astraeus_mode = str(astraeus_result.get("mode") or "unknown").strip().lower() or "unknown"
         astraeus_relation = str(astraeus_result.get("relation") or "standalone").strip().lower() or "standalone"

@@ -171,6 +171,8 @@ export interface SettingsMountOptions {
     modelsHfWarmupCancel: string;
     modelsRemoteLlm: string;
     modelsContextEstimate: string;
+    modelsDecisionBenchmark: string;
+    modelsDecisionResults: string;
     modelsFaceStatus: string;
     modelsSpeechPreview: string;
     modelsWyomingVoices: string;

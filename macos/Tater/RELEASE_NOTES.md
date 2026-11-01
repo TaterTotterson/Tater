@@ -1,47 +1,47 @@
-# Tater v2.0.1
+# Tater v2.0.2
 
-Tater v2.0.1 improves wake-to-command audio boundaries, removes an unnecessary
-Sendspin music-start delay, and makes Hydra conversations faster and more
-cache-friendly while keeping full time awareness and action offers intact.
+Tater v2.0.2 adds an optional, dedicated Decision Router for faster Hydra
+routing experiments, along with focused model discovery, testing, and live
+diagnostics that make router behavior easy to tune and verify.
 
 ## What's Changed
 
-### Cleaner Wake-to-Command Audio
+### Optional Decision Router
 
-- Treats the native firmware wake-boundary marker as authoritative. Audio from
-  before that marker is excluded from both speech recognition and command VAD,
-  preventing nearby speech or other sound before the wake word from leaking
-  into the user's request.
-- Starts command capture with the first buffered frame after the marker instead
-  of using a fixed delay, so users can still begin speaking immediately after
-  the wake word without losing the opening word of the command.
-- Lets Spud Link speech recognition and endpointing safely share the same
-  post-boundary command stream, with clearer diagnostics for excluded wake
-  audio.
+- Adds Off, Observe, and Active modes for a lightweight model that scores each
+  request as normal chat or needing an available tool.
+- Keeps tool choice and execution inside Astraeus. The router only chooses the
+  path, and uncertain decisions safely fall back to the normal full Hydra flow.
+- Lets high-confidence chat bypass Astraeus and sends high-confidence tool
+  requests to a focused planner-only Astraeus path.
+- Runs the router in its own isolated llama.cpp process and context so it does
+  not consume Base or Hydra prompt-cache slots.
+- Adds an adjustable confidence threshold for tuning the tradeoff between speed
+  and fallback safety.
 
-### Faster Sendspin Music Starts
+### Router Testing and Diagnostics
 
-- Starts playback preparation as soon as a satellite reports that its player is
-  synchronized instead of waiting for eight clock exchanges on every fresh
-  Sendspin session.
-- Clock exchanges continue in the background, preserving timestamped playback
-  and multi-satellite synchronization without the previous roughly 15-second
-  startup wait on affected Noise sessions.
-- Removes the extra post-handshake pause from live and paired PCM streaming,
-  improving play, skip, and other fresh-stream music commands.
+- Adds a built-in benchmark covering normal chat, single-tool requests,
+  follow-up commands, unsupported actions, and multi-tool requests.
+- Reports overall and per-category accuracy, routing coverage, precision,
+  unsafe routes, latency, route score, and confidence.
+- Shows recent live decisions in both Observe and Active modes, including the
+  threshold and the route effect applied to each request.
 
-### Faster Hydra Chat and Better Prompt Caching
+### Focused Model Discovery
 
-- Makes Astraeus the sole owner of tool selection and structured pending-action
-  state. Hermes now receives only the human-readable action guidance it needs,
-  rather than the complete capability catalog and internal tool IDs.
-- Returns normal Hermes chat as streamable plain text instead of wrapping every
-  conversational response in a structured JSON envelope, reducing prompt and
-  completion overhead for simple chat.
-- Keeps stable instructions and Astraeus's execution catalog at the reusable
-  front of each prompt. Conversation history follows the stable prefix, while
-  changing memory, action guidance, and the current local date, time, and
-  timezone are placed in the dynamic per-turn area.
-- Preserves full time awareness on every turn and keeps Astraeus-created action
-  offers available for the user's next confirmation without exposing internal
-  tool metadata to Hermes.
+- Adds a Decision routing section to the model downloader for native System One
+  text-classification GGUF models.
+- Filters out multimodal, wrapper, and ordinary classification models that are
+  not compatible with Tater's router.
+- Refreshes installed model metadata after downloads and removals so compatible
+  router models appear without restarting Tater.
+- Leaves Tater's router recommendations empty until curated picks are published
+  instead of presenting an unverified default.
+
+### Cleaner Model Settings
+
+- Moves Decision Router into the second LLM tab, directly after Base and before
+  Beast mode.
+- Keeps the router threshold, benchmark, model selection, and recent results
+  together in one focused settings area.

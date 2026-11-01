@@ -914,6 +914,8 @@ function createSettingsVueDescriptor(settings, redisStatus, redisEncryptionStatu
       modelsHfWarmupCancel: withBasePath("/api/settings/hf-llm/warmup/cancel"),
       modelsRemoteLlm: withBasePath("/api/settings/llama-cpp/remote-models"),
       modelsContextEstimate: withBasePath("/api/runtime/context-estimate"),
+      modelsDecisionBenchmark: withBasePath("/api/settings/decision-router/benchmark"),
+      modelsDecisionResults: withBasePath("/api/settings/decision-router/results"),
       modelsFaceStatus: withBasePath("/api/settings/face-id/status"),
       modelsSpeechPreview: withBasePath("/api/settings/speech/tts-preview"),
       modelsWyomingVoices: withBasePath("/api/settings/speech/wyoming-tts-voices"),
