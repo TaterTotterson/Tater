@@ -264,6 +264,18 @@ class PendingInteractionStateTests(unittest.TestCase):
         self.assertEqual(branch, "reject")
         self.assertIsNone(interaction)
 
+        offered = dict(pending)
+        offered["kind"] = "action_offer"
+        branch, interaction = hydra_pending_interaction.resolve_turn_branch(
+            planned_mode="chat",
+            relation="standalone",
+            has_executable_steps=False,
+            current_interaction=None,
+            next_interaction=offered,
+        )
+        self.assertEqual(branch, "chat")
+        self.assertEqual(interaction, offered)
+
     def test_clarification_is_rendered_from_structured_fields(self):
         self.assertEqual(
             hydra_pending_interaction.clarification_text(self.interaction()),
@@ -2545,7 +2557,6 @@ class PromptCacheLayoutTests(unittest.TestCase):
     def test_native_thanatos_prompt_uses_provider_interface(self):
         prompt = hydra_prompts.thanatos_native_tools_system_prompt(
             platform="webui",
-            now_text="Friday, July 17, 2026 at 10:30 PM",
             ascii_only_platforms=(),
         )
 
@@ -2556,15 +2567,6 @@ class PromptCacheLayoutTests(unittest.TestCase):
     def test_native_astraeus_prompts_leave_json_formatting_to_schema(self):
         planner = hydra_prompts.astraeus_native_system_prompt(platform="webui")
         reviewer = hydra_prompts.astraeus_plan_review_native_system_prompt(platform="webui")
-        chat = hydra_prompts.chat_response_envelope_native_system_prompt(
-            platform="webui",
-            platform_label="Web UI",
-            now_text="Friday, July 17, 2026 at 10:30 PM",
-            first_name="Tater",
-            last_name="Totterson",
-            personality="friendly",
-            ascii_only_platforms=(),
-        )
 
         self.assertIn("resolve this turn against any structured pending interaction", planner)
         self.assertNotIn("strict JSON", planner)
@@ -2572,9 +2574,6 @@ class PromptCacheLayoutTests(unittest.TestCase):
         self.assertIn("execution-plan quality review", reviewer)
         self.assertNotIn("strict JSON", reviewer)
         self.assertNotIn('{"goal":"clear goal"', reviewer)
-        self.assertIn("Structured dialogue-state rules", chat)
-        self.assertNotIn("strict JSON", chat)
-        self.assertNotIn('{"response":"natural user-facing reply"', chat)
 
     def test_astraeus_uses_semantic_native_prompt_then_unchanged_legacy_fallback(self):
         legacy_result = {
@@ -2698,7 +2697,56 @@ class PromptCacheLayoutTests(unittest.TestCase):
         payload = json.loads(client.calls[0]["messages"][-1]["content"])
         self.assertEqual(payload["pending_interaction"]["missing_details"], ["artist"])
 
-    def test_chat_response_carries_pending_interaction_in_structured_envelope(self):
+    def test_astraeus_owns_chat_action_offer_tool_state(self):
+        pending = {
+            "kind": "action_offer",
+            "goal": "Play relaxing music for the user",
+            "tool_hint": "play_music",
+            "known_details": ["the user is relaxing"],
+            "missing_details": ["music choice"],
+            "choices": ["reggae", "score music"],
+            "question": "Would you like reggae or score music?",
+        }
+        decision = {
+            "mode": "chat",
+            "relation": "chat",
+            "goal": "Respond naturally and optionally offer relaxing music",
+            "question": "",
+            "pending_interaction": pending,
+            "steps": [],
+        }
+
+        class Client:
+            async def chat(self, **_kwargs):
+                return _local_result(json.dumps(decision))
+
+            def get_perf_stats(self, *, reset=False):
+                return {}
+
+        result = asyncio.run(
+            hydra_runtime._run_astraeus_plan(
+                llm_client=Client(),
+                platform="webui",
+                current_user_text="I'm just relaxing.",
+                turn_request_text="I'm just relaxing.",
+                topic_seed="",
+                topic_shift_seed=False,
+                history=[],
+                prior_state=None,
+                pending_interaction=None,
+                memory_context=None,
+                capability_catalog="play_music: play requested music",
+                available_tool_ids={"play_music"},
+                platform_preamble="",
+                max_tokens=320,
+            )
+        )
+
+        self.assertEqual(result["mode"], "chat")
+        self.assertEqual(result["pending_interaction"]["tool_hint"], "play_music")
+        self.assertEqual(result["steps"], [])
+
+    def test_chat_response_words_astraeus_pending_interaction_without_tool_metadata(self):
         pending = {
             "kind": "action_offer",
             "goal": "Play music for the user",
@@ -2708,18 +2756,20 @@ class PromptCacheLayoutTests(unittest.TestCase):
             "choices": ["reggae", "score music"],
             "question": "Would you like reggae or score music?",
         }
-        decision = {
-            "response": "Want me to put on some reggae or score music?",
-            "pending_interaction": pending,
-        }
+        response_text = "Want me to put on some reggae or score music?"
 
         class Client:
             def __init__(self):
                 self.call_count = 0
+                self.calls = []
 
-            async def chat(self, **_kwargs):
+            async def chat(self, **kwargs):
                 self.call_count += 1
-                return _local_result(json.dumps(decision))
+                self.calls.append(dict(kwargs))
+                callback = kwargs.get("stream_callback")
+                if callable(callback):
+                    callback(response_text)
+                return _local_result(response_text)
 
         streamed = []
         client = Client()
@@ -2734,8 +2784,7 @@ class PromptCacheLayoutTests(unittest.TestCase):
                     enabled_predicate=None,
                     redis_client=None,
                     memory_context_message="",
-                    capability_catalog="play_music: play requested music",
-                    available_tool_ids={"play_music"},
+                    pending_interaction=pending,
                     platform_preamble="",
                     max_history_items=6,
                     max_tokens=360,
@@ -2743,12 +2792,101 @@ class PromptCacheLayoutTests(unittest.TestCase):
                 )
             )
 
-        self.assertEqual(result["text"], "Want me to put on some reggae or score music?")
+        self.assertEqual(result["text"], response_text)
         self.assertEqual(result["pending_interaction"]["kind"], "action_offer")
         self.assertEqual(result["pending_interaction"]["tool_hint"], "play_music")
         self.assertEqual(result["pending_interaction"]["choices"], ["reggae", "score music"])
-        self.assertEqual(streamed, ["Want me to put on some reggae or score music?"])
+        self.assertEqual(streamed, [response_text])
         self.assertEqual(client.call_count, 1)
+        prompt_text = "\n".join(
+            str(message.get("content") or "")
+            for message in client.calls[0]["messages"]
+        )
+        self.assertIn("Play music for the user", prompt_text)
+        self.assertNotIn("play_music", prompt_text)
+        self.assertNotIn("Available execution catalog", prompt_text)
+
+    def test_chat_response_omits_tool_payload_without_pending_action(self):
+        response_text = "Chillen sounds good."
+
+        class Client:
+            def __init__(self):
+                self.calls = []
+
+            async def chat(self, **kwargs):
+                self.calls.append(dict(kwargs))
+                return _local_result(response_text)
+
+        client = Client()
+        debug = {}
+        result = asyncio.run(
+            hydra_runtime._run_chat_fallback_reply(
+                llm_client=client,
+                platform="webui",
+                user_text="chillen",
+                history=[],
+                registry={},
+                enabled_predicate=None,
+                redis_client=None,
+                memory_context_message="",
+                pending_interaction=None,
+                platform_preamble="",
+                max_history_items=6,
+                max_tokens=360,
+                debug_out=debug,
+            )
+        )
+
+        self.assertEqual(result["text"], response_text)
+        self.assertIsNone(result["pending_interaction"])
+        self.assertFalse(debug["pending_action_offer"])
+        prompt_text = "\n".join(
+            str(message.get("content") or "")
+            for message in client.calls[0]["messages"]
+        )
+        self.assertNotIn("optional conversational action offer", prompt_text)
+        self.assertNotIn("available_capabilities", prompt_text)
+        messages = client.calls[0]["messages"]
+        self.assertNotIn("Current Local Date and Time", messages[0]["content"])
+        self.assertTrue(messages[-2]["content"].startswith("Current Local Date and Time: "))
+
+    def test_chat_exact_datetime_context_is_late_for_every_turn(self):
+        class Client:
+            def __init__(self):
+                self.calls = []
+
+            async def chat(self, **kwargs):
+                self.calls.append(dict(kwargs))
+                return _local_result("It is 10:30 PM.")
+
+        client = Client()
+        result = asyncio.run(
+            hydra_runtime._run_chat_fallback_reply(
+                llm_client=client,
+                platform="webui",
+                user_text="what time is it",
+                history=[{"role": "user", "content": "hello"}, {"role": "assistant", "content": "Hi!"}],
+                registry={},
+                enabled_predicate=None,
+                redis_client=None,
+                memory_context_message="Dynamic memory context",
+                pending_interaction=None,
+                platform_preamble="",
+                max_history_items=6,
+                max_tokens=360,
+            )
+        )
+
+        self.assertEqual(result["text"], "It is 10:30 PM.")
+        messages = client.calls[0]["messages"]
+        self.assertNotIn("Current Local Date and Time", messages[0]["content"])
+        self.assertEqual(messages[1:3], [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "Hi!"},
+        ])
+        self.assertEqual(messages[-3], {"role": "system", "content": "Dynamic memory context"})
+        self.assertTrue(messages[-2]["content"].startswith("Current Local Date and Time: "))
+        self.assertEqual(messages[-1], {"role": "user", "content": "what time is it"})
 
     def test_provider_message_sanitizer_preserves_standard_tool_arguments(self):
         arguments = '{"path":"/tmp/a.txt"}'
@@ -2780,27 +2918,30 @@ class PromptCacheLayoutTests(unittest.TestCase):
         self.assertEqual(messages[1]["tool_calls"][0]["function"]["arguments"], arguments)
         self.assertEqual(messages[2]["tool_call_id"], "call_read")
 
-    def test_volatile_time_is_after_stable_chat_instructions(self):
-        marker = "Friday, July 17, 2026 at 10:30 PM"
+    def test_static_chat_prompt_excludes_volatile_date_and_clock(self):
         prompt = hydra_prompts.chat_fallback_system_prompt(
             platform="webui",
             platform_label="Web UI",
-            now_text=marker,
             first_name="Tater",
             last_name="Totterson",
             personality="friendly",
             ascii_only_platforms=(),
         )
-        self.assertGreater(prompt.index(marker), prompt.index("Reply naturally"))
+        self.assertNotIn("Current Date:", prompt)
+        self.assertNotIn("Current Local Date and Time", prompt)
 
-    def test_volatile_time_is_after_stable_execution_instructions(self):
-        marker = "Friday, July 17, 2026 at 10:30 PM"
+    def test_static_execution_prompt_excludes_volatile_date_and_clock(self):
         prompt = hydra_prompts.thanatos_system_prompt(
             platform="webui",
-            now_text=marker,
             ascii_only_platforms=(),
         )
-        self.assertGreater(prompt.index(marker), prompt.index("Execution role"))
+        self.assertNotIn("Current Date:", prompt)
+        self.assertNotIn("Current Local Date and Time", prompt)
+
+    def test_dynamic_datetime_context_is_always_complete(self):
+        context = hydra_runtime._current_datetime_context_message()
+        self.assertTrue(context.startswith("Current Local Date and Time: "))
+        self.assertRegex(context, r" at \d{2}:\d{2} [AP]M \S+$")
 
 
 class SpecificProgressPromptTests(unittest.IsolatedAsyncioTestCase):

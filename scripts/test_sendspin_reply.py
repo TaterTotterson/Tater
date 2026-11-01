@@ -210,7 +210,7 @@ class SendspinReplyHandshakeTests(unittest.IsolatedAsyncioTestCase):
         )
         peer.ws = _FakeWebSocket()
 
-        for sequence in range(8):
+        for sequence in range(2):
             await peer._handle_json(
                 json.dumps(
                     {
@@ -222,12 +222,12 @@ class SendspinReplyHandshakeTests(unittest.IsolatedAsyncioTestCase):
 
         response = json.loads(peer.ws.messages[-1])
         self.assertEqual(response["type"], "server/time")
-        self.assertEqual(response["payload"]["client_transmitted"], 1007)
+        self.assertEqual(response["payload"]["client_transmitted"], 1001)
         self.assertIn("server_received", response["payload"])
         self.assertIn("server_transmitted", response["payload"])
-        self.assertTrue(peer.time_event.is_set())
+        self.assertEqual(len(peer.ws.messages), 2)
 
-    async def test_ready_requires_pcm_48k_stereo_player(self) -> None:
+    async def test_ready_accepts_synchronized_player_without_eight_time_exchanges(self) -> None:
         peer = sendspin_playback._SendspinPeer(
             mock.Mock(),
             {"selector": "native:left", "host": "192.0.2.10"},
@@ -250,7 +250,6 @@ class SendspinReplyHandshakeTests(unittest.IsolatedAsyncioTestCase):
         peer.ws = _FakeWebSocket()
         peer.hello_event.set()
         peer.state_event.set()
-        peer.time_event.set()
 
         await peer.wait_ready()
 
@@ -362,7 +361,7 @@ class _MockSendspinPlayer:
                     await self._send_time(ws)
                 elif message_type == "server/time":
                     self.time_sequence += 1
-                    if self.time_sequence < 8:
+                    if self.time_sequence < 2:
                         await self._send_time(ws)
             elif message.type == WSMsgType.BINARY:
                 self.audio_packets.append(bytes(message.data))

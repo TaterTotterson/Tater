@@ -6191,12 +6191,12 @@ def _native_wake_preroll_pending(session: VoiceSessionRuntime, now_ts: float) ->
     return deadline <= 0.0 or float(now_ts) < deadline
 
 
-def _native_record_wake_preroll(
+def _native_discard_wake_preroll(
     session: VoiceSessionRuntime,
     audio_bytes: bytes,
     now_ts: float,
 ) -> None:
-    """Account for wake audio retained for STT but intentionally hidden from VAD."""
+    """Account for wake audio that must not enter VAD or speech recognition."""
     if not isinstance(session, VoiceSessionRuntime):
         return
     session.last_audio_ts = float(now_ts)
@@ -6221,15 +6221,15 @@ async def _native_mark_wake_preroll_complete(selector: str) -> bool:
             return True
         session.wake_preroll_boundary_received = True
         session.vad_startup_ignore_until_ts = 0.0
-        retained_chunks = int(session.wake_preroll_chunks or 0)
-        retained_bytes = int(session.wake_preroll_bytes or 0)
+        excluded_chunks = int(session.wake_preroll_chunks or 0)
+        excluded_bytes = int(session.wake_preroll_bytes or 0)
         session_id = _text(session.session_id)
     logger.info(
-        "[native-voice] wake pre-roll complete selector=%s session_id=%s retained_stt_chunks=%s retained_stt_bytes=%s — command VAD live",
+        "[native-voice] wake pre-roll complete selector=%s session_id=%s excluded_stt_chunks=%s excluded_stt_bytes=%s — command STT/VAD live",
         token,
         session_id,
-        retained_chunks,
-        retained_bytes,
+        excluded_chunks,
+        excluded_bytes,
     )
     return True
 
@@ -7335,9 +7335,9 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
             )
         if wake_preroll_boundary_expected:
             # New native firmware sends its saved wake audio first and then an
-            # ordered boundary marker. Retain those frames for STT so an
-            # immediate command cannot lose its leading word, but keep them
-            # out of command VAD until the authoritative marker arrives.
+            # ordered boundary marker. Those frames stay out of STT and VAD;
+            # both begin with the first buffered post-wake command frame
+            # instead of relying on a fixed wall-clock delay.
             startup_gate_s = 0.0
             vad_startup_ignore_s = 0.0
         max_audio_bytes = int(limits_cfg.get("max_audio_bytes") or DEFAULT_MAX_AUDIO_BYTES)
@@ -7468,13 +7468,9 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
             blank_wake_timeout_s=blank_wake_timeout_s,
             audio_input_gain=audio_input_gain,
             spud_link_endpointing_requested=requested_vad_backend == "spud_link",
-            # Wake pre-roll must reach STT without reaching command VAD. The
-            # combined Hub stream cannot apply the marker to those two jobs
-            # independently, so wake sessions use it only for post-marker VAD
-            # and submit the complete buffered audio to Hub STT at finalize.
-            spud_link_endpointing_reuse_stt=bool(
-                hub_stt_routed and not wake_preroll_boundary_expected
-            ),
+            # The stream begins only after an authoritative wake boundary, so
+            # Hub STT and endpointing can safely share the same command audio.
+            spud_link_endpointing_reuse_stt=bool(hub_stt_routed),
         )
         if session.spud_link_endpointing_requested:
             try:
@@ -7686,21 +7682,22 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
 
         if wake_boundary_pending:
             # The firmware marker is authoritative: audio through the local
-            # wake detector's crossing belongs to the wake phrase. Keep it out
-            # of command VAD, but retain it in the normal STT buffer/stream so
-            # speech crossing the detector boundary cannot lose its first word.
+            # wake detector's crossing belongs to the wake phrase. Keep it for
+            # room arbitration/diagnostics, but never append it to an STT
+            # buffer or stream it to a remote recognizer.
             async with lock:
                 active_session = runtime.get("session")
                 if (
                     isinstance(active_session, VoiceSessionRuntime)
                     and active_session.session_id == sid
                 ):
-                    _native_record_wake_preroll(active_session, audio_bytes, now_ts)
+                    _native_discard_wake_preroll(active_session, audio_bytes, now_ts)
                     if active_session.wake_preroll_chunks == 1:
                         _native_debug(
-                            f"native wake pre-roll retained for STT and excluded from VAD selector={token} "
+                            f"native wake pre-roll excluded from STT/VAD selector={token} "
                             f"session_id={sid}"
                         )
+            return
 
         if now_ts < gate_ts:
             async with lock:

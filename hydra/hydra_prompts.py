@@ -105,7 +105,11 @@ def astraeus_system_prompt(*, platform: str) -> str:
         "- Prefer mode=\"chat\" and steps=[] for conversational, opinion, explanation, and reasoning-only turns that can be answered directly without tool execution.\n"
         "- Plan only for this turn's request text; ignore stale prior objectives unless the current message explicitly asks to continue/retry/repeat.\n"
         "- Use mode=\"execute\" only when the user clearly asks to do/check/change/fetch something that depends on tools, files, external pages, live system state, or settings.\n"
-        "- In mode=\"chat\", steps must be [], question must be empty, and pending_interaction.kind must be \"none\". Never create conversational, acknowledge, greeting, reply, answer, or respond steps.\n"
+        "- In mode=\"chat\", steps must be [] and question must be empty. Never create conversational, acknowledge, greeting, reply, answer, or respond steps.\n"
+        "- In mode=\"chat\", pending_interaction may be kind=\"action_offer\" only when one concrete available tool action is directly relevant and would be natural to offer in the response.\n"
+        "- For greetings, ordinary conversation, acknowledgements, factual answers, explanations, and chat that does not benefit from a concrete action offer, set pending_interaction.kind=\"none\".\n"
+        "- A chat action offer must use one exact tool_hint from payload.available_tool_ids and contain enough semantic detail for Hermes to word the offer without seeing tool metadata.\n"
+        "- A chat action offer is pending dialogue state only; it never authorizes or triggers execution.\n"
         "- In mode=\"execute\", question must be empty and pending_interaction.kind must be \"none\".\n"
         "- In mode=\"reject\", question must be empty and pending_interaction.kind must be \"none\".\n"
         "- Stay within payload.available_capabilities and payload.available_tool_ids; every step must use one valid tool_hint from payload.available_tool_ids.\n"
@@ -155,7 +159,6 @@ def chat_fallback_system_prompt(
     *,
     platform: str,
     platform_label: str,
-    now_text: str,
     first_name: str,
     last_name: str,
     personality: str,
@@ -183,81 +186,12 @@ def chat_fallback_system_prompt(
         "Do not mention internal roles, modes, planning, tools, or limitations unless the user asks.\n"
         "Do not list capabilities unless the user explicitly asks.\n"
         f"{plain_text_rule}"
-        f"Current Date and Time: {now_text}\n"
-    ).strip()
-
-
-def chat_response_envelope_system_prompt(
-    *,
-    platform: str,
-    platform_label: str,
-    now_text: str,
-    first_name: str,
-    last_name: str,
-    personality: str,
-    ascii_only_platforms: Iterable[str],
-) -> str:
-    return (
-        chat_fallback_system_prompt(
-            platform=platform,
-            platform_label=platform_label,
-            now_text=now_text,
-            first_name=first_name,
-            last_name=last_name,
-            personality=personality,
-            ascii_only_platforms=ascii_only_platforms,
-        )
-        + "\n\n"
-        + "Return exactly one strict JSON object with this schema:\n"
-        + '{"response":"natural user-facing reply","pending_interaction":{"kind":"none|action_offer|clarification","goal":"pending executable goal or empty","tool_hint":"exact available tool id or empty","known_details":[],"missing_details":[],"choices":[],"question":"question awaiting the user or empty"}}\n'
-        + "Structured dialogue-state rules:\n"
-        + "- response is the complete natural reply the user should receive.\n"
-        + "- Set kind=action_offer only when response explicitly offers to perform a concrete available action and awaits authorization.\n"
-        + "- Set kind=clarification only when response asks for information required to perform a concrete available action.\n"
-        + "- Otherwise set kind=none and leave every other pending_interaction field empty.\n"
-        + "- A pending interaction must use one exact id from the supplied available_tool_ids.\n"
-        + "- Record meaning in structured fields; do not derive state from keywords or expose the structured state in response.\n"
-        + "- Do not claim an offered or pending action has already started or completed.\n"
-        + "- Do not include explanations, markdown, or extra keys outside response."
-    ).strip()
-
-
-def chat_response_envelope_native_system_prompt(
-    *,
-    platform: str,
-    platform_label: str,
-    now_text: str,
-    first_name: str,
-    last_name: str,
-    personality: str,
-    ascii_only_platforms: Iterable[str],
-) -> str:
-    legacy_contract = (
-        "Return exactly one strict JSON object with this schema:\n"
-        '{"response":"natural user-facing reply","pending_interaction":{"kind":"none|action_offer|clarification","goal":"pending executable goal or empty","tool_hint":"exact available tool id or empty","known_details":[],"missing_details":[],"choices":[],"question":"question awaiting the user or empty"}}\n'
-    )
-    return (
-        chat_response_envelope_system_prompt(
-            platform=platform,
-            platform_label=platform_label,
-            now_text=now_text,
-            first_name=first_name,
-            last_name=last_name,
-            personality=personality,
-            ascii_only_platforms=ascii_only_platforms,
-        )
-        .replace(legacy_contract, "")
-        .replace(
-            "- Do not include explanations, markdown, or extra keys outside response.",
-            "- Do not include explanations or markdown in the structured fields.",
-        )
     ).strip()
 
 
 def thanatos_system_prompt(
     *,
     platform: str,
-    now_text: str,
     ascii_only_platforms: Iterable[str],
 ) -> str:
     plain_text_rule = (
@@ -307,14 +241,12 @@ def thanatos_system_prompt(
         "- Never mention internal orchestration roles or codenames.\n"
         "- If outputting a tool call, output only the JSON object and nothing else.\n"
         f"{plain_text_rule}"
-        f"Current Date and Time: {now_text}\n"
     ).strip()
 
 
 def thanatos_native_tools_system_prompt(
     *,
     platform: str,
-    now_text: str,
     ascii_only_platforms: Iterable[str],
 ) -> str:
     plain_text_rule = (
@@ -343,7 +275,6 @@ def thanatos_native_tools_system_prompt(
         "- Do not emit a textual JSON imitation of a tool call; use the provided native function interface.\n"
         "- Never mention internal orchestration roles or codenames.\n"
         f"{plain_text_rule}"
-        f"Current Date and Time: {now_text}\n"
     ).strip()
 
 
@@ -364,7 +295,6 @@ def hermes_synthesis_system_prompt() -> str:
 
 def hermes_final_render_system_prompt(
     *,
-    now_text: str,
     first_name: str,
     last_name: str,
     personality: str,
@@ -396,7 +326,6 @@ def hermes_final_render_system_prompt(
         "- Do not mention internal roles, orchestration, or tool execution.\n"
         "- Output plain user-facing text only.\n"
         f"{plain_text_rule}"
-        f"Current Date and Time: {now_text}\n"
     ).strip()
 
 

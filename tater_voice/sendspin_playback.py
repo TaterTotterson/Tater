@@ -641,11 +641,9 @@ class _SendspinPeer:
         self.send_lock = asyncio.Lock()
         self.hello_event = asyncio.Event()
         self.state_event = asyncio.Event()
-        self.time_event = asyncio.Event()
         self.client_hello: Dict[str, Any] = {}
         self.client_player_state: Dict[str, Any] = {}
         self.client_state = ""
-        self.time_responses = 0
         self.error = ""
         self.closing = False
         self.client_core_version = 0
@@ -753,7 +751,6 @@ class _SendspinPeer:
             # Unblock startup immediately; wait_ready() reports the stored error.
             self.hello_event.set()
             self.state_event.set()
-            self.time_event.set()
 
     async def _handle_json(self, raw_message: str) -> None:
         received_us = _monotonic_us()
@@ -795,16 +792,12 @@ class _SendspinPeer:
                     },
                 }
             )
-            self.time_responses += 1
-            if self.time_responses >= 8:
-                self.time_event.set()
             return
         if message_type == "client/goodbye":
             reason = _text(payload.get("reason")) or "unknown"
             self.error = f"the satellite left Sendspin ({reason})"
             self.hello_event.set()
             self.state_event.set()
-            self.time_event.set()
 
     def _validate_hello(self) -> None:
         payload = self.client_hello
@@ -954,8 +947,11 @@ class _SendspinPeer:
         self._validate_hello()
         await self.activate_supported_presentation_roles()
         try:
+            # The player publishes synchronized only after its own clock
+            # filter converges. Trust that protocol state; clock exchanges
+            # continue in the background while Tater buffers the stream.
             await asyncio.wait_for(
-                asyncio.gather(self.state_event.wait(), self.time_event.wait()),
+                self.state_event.wait(),
                 timeout=SENDSPIN_HANDSHAKE_TIMEOUT_S,
             )
         except asyncio.TimeoutError as exc:
@@ -1175,9 +1171,6 @@ async def _stream_pair_pcm(
                 *(peer.open(server_id=server_id, server_name="Tater Voice Core") for peer in peers)
             )
             await asyncio.gather(*(peer.wait_ready() for peer in peers))
-            # Give each ESP loop one turn after its eighth clock response so the
-            # selected measurement is committed before timestamped audio arrives.
-            await asyncio.sleep(0.1)
 
             group_id = _text(pair_id) or uuid.uuid4().hex[:12]
             await _broadcast_json(
@@ -1473,7 +1466,6 @@ async def _stream_live_pcm(
                     *(peer.open(server_id="tater-sendspin", server_name="Tater") for peer in peers)
                 )
                 await asyncio.gather(*(peer.wait_ready() for peer in peers))
-                await asyncio.sleep(0.1)
                 if all(peer.supports_audio_format("flac") for peer in peers):
                     try:
                         flac_encoders = {

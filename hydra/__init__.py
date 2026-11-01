@@ -1,5 +1,4 @@
 import asyncio
-import inspect
 import json
 import mimetypes
 import re
@@ -191,18 +190,6 @@ def _hydra_astraeus_plan_schema() -> Dict[str, Any]:
             "steps": {"type": "array", "maxItems": 12, "items": _hydra_plan_step_schema()},
         },
         "required": ["mode", "relation", "goal", "question", "pending_interaction", "steps"],
-        "additionalProperties": False,
-    }
-
-
-def _hydra_chat_response_schema() -> Dict[str, Any]:
-    return {
-        "type": "object",
-        "properties": {
-            "response": {"type": "string"},
-            "pending_interaction": _hydra_pending_interaction_schema(),
-        },
-        "required": ["response", "pending_interaction"],
         "additionalProperties": False,
     }
 
@@ -1948,10 +1935,14 @@ def _thanatos_execution_step_prompt(
     )
 
 
+def _current_datetime_context_message() -> str:
+    now = datetime.now().astimezone()
+    return "Current Local Date and Time: " + now.strftime("%A, %B %d, %Y at %I:%M %p %Z")
+
+
 def _thanatos_system_prompt(platform: str) -> str:
     return prompts.thanatos_system_prompt(
         platform=platform,
-        now_text=datetime.now().strftime("%A, %B %d, %Y at %I:%M %p"),
         ascii_only_platforms=ASCII_ONLY_PLATFORMS,
     ).strip()
 
@@ -1959,7 +1950,6 @@ def _thanatos_system_prompt(platform: str) -> str:
 def _thanatos_native_tools_system_prompt(platform: str) -> str:
     return prompts.thanatos_native_tools_system_prompt(
         platform=platform,
-        now_text=datetime.now().strftime("%A, %B %d, %Y at %I:%M %p"),
         ascii_only_platforms=ASCII_ONLY_PLATFORMS,
     ).strip()
 
@@ -1973,25 +1963,6 @@ def _chat_fallback_system_prompt(platform: str) -> str:
     return prompts.chat_fallback_system_prompt(
         platform=platform,
         platform_label=_platform_label(platform),
-        now_text=datetime.now().strftime("%A, %B %d, %Y at %I:%M %p"),
-        first_name=first,
-        last_name=last,
-        personality=(get_tater_personality() or "").strip(),
-        ascii_only_platforms=ASCII_ONLY_PLATFORMS,
-    ).strip()
-
-
-def _chat_response_envelope_system_prompt(platform: str, *, native: bool = False) -> str:
-    first, last = get_tater_name()
-    prompt_fn = (
-        prompts.chat_response_envelope_native_system_prompt
-        if native
-        else prompts.chat_response_envelope_system_prompt
-    )
-    return prompt_fn(
-        platform=platform,
-        platform_label=_platform_label(platform),
-        now_text=datetime.now().strftime("%A, %B %d, %Y at %I:%M %p"),
         first_name=first,
         last_name=last,
         personality=(get_tater_personality() or "").strip(),
@@ -2723,6 +2694,9 @@ async def _run_astraeus_plan(
         "current_user_message": str(current_user_text or ""),
         "recent_history": recent_history,
     }
+    dynamic_payload["current_local_datetime"] = _current_datetime_context_message().removeprefix(
+        "Current Local Date and Time: "
+    )
     if isinstance(pending_interaction, dict) and pending_interaction:
         dynamic_payload["pending_interaction"] = dict(pending_interaction)
     if isinstance(prior_state, dict) and prior_state:
@@ -2878,7 +2852,12 @@ async def _run_astraeus_plan(
             "topic_shift": topic_shift,
             "goal": goal,
             "question": "",
-            "pending_interaction": None,
+            "pending_interaction": (
+                normalized_pending
+                if isinstance(normalized_pending, dict)
+                and normalized_pending.get("kind") == "action_offer"
+                else None
+            ),
             "steps": [],
         }
     if mode == "reject":
@@ -3486,7 +3465,7 @@ def estimate_hydra_chat_context_window(
         user_text=user_text,
         request_text=user_text,
     )
-    chat_system_prompt = _chat_response_envelope_system_prompt(normalized_platform)
+    chat_system_prompt = _chat_fallback_system_prompt(normalized_platform)
     status_prompt = ""
     clean_preamble = _sanitize_platform_preamble(normalized_platform, platform_preamble)
     seeded_user_text, seed_source = _seed_user_text_for_context_estimate(
@@ -3608,8 +3587,7 @@ async def _run_chat_fallback_reply(
     enabled_predicate: Optional[Callable[[str], bool]],
     redis_client: Any,
     memory_context_message: str,
-    capability_catalog: str,
-    available_tool_ids: set[str],
+    pending_interaction: Optional[Dict[str, Any]],
     platform_preamble: str,
     max_history_items: int,
     max_tokens: Optional[int],
@@ -3619,30 +3597,44 @@ async def _run_chat_fallback_reply(
     del registry, enabled_predicate, redis_client
     chat_history = _chat_history_window(history, max_items=max_history_items)
     messages: List[Dict[str, Any]] = [
-        {"role": "system", "content": _chat_response_envelope_system_prompt(platform)},
+        {"role": "system", "content": _chat_fallback_system_prompt(platform)},
     ]
-    if capability_catalog or available_tool_ids:
+    pending_for_response = (
+        dict(pending_interaction)
+        if isinstance(pending_interaction, dict)
+        and str(pending_interaction.get("kind") or "").strip().lower() == "action_offer"
+        else None
+    )
+    messages = _with_platform_preamble(messages, platform_preamble=platform_preamble)
+    messages.extend(chat_history)
+    if pending_for_response:
+        guidance_payload = {
+            "kind": "action_offer",
+            "goal": _short_text(pending_for_response.get("goal"), limit=240),
+            "known_details": pending_for_response.get("known_details") or [],
+            "missing_details": pending_for_response.get("missing_details") or [],
+            "choices": pending_for_response.get("choices") or [],
+            "question": _short_text(pending_for_response.get("question"), limit=320),
+        }
         messages.append(
             {
                 "role": "system",
-                "content": "Available execution catalog for structured action offers:\n"
-                + json.dumps(
-                    {
-                        "available_capabilities": str(capability_catalog or ""),
-                        "available_tool_ids": sorted(
-                            str(item) for item in available_tool_ids if str(item).strip()
-                        )[:200],
-                    },
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                    default=str,
+                "content": (
+                    "Optional conversational action-offer guidance:\n"
+                    + json.dumps(
+                        guidance_payload,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                        default=str,
+                    )
+                    + "\nNaturally include the offer in the response and make clear that it awaits the user's choice or approval. "
+                    "Do not claim the action started or completed. Do not mention tools, internal roles, or this guidance."
                 ),
             }
         )
     if memory_context_message:
         messages.append({"role": "system", "content": memory_context_message})
-    messages = _with_platform_preamble(messages, platform_preamble=platform_preamble)
-    messages.extend(chat_history)
+    messages.append({"role": "system", "content": _current_datetime_context_message()})
     messages.append({"role": "user", "content": str(user_text or "")})
     if isinstance(debug_out, dict):
         prompt_chars = sum(len(str((msg or {}).get("content") or "")) for msg in messages if isinstance(msg, dict))
@@ -3651,24 +3643,20 @@ async def _run_chat_fallback_reply(
                 "message_count": len(messages),
                 "history_messages": len(chat_history),
                 "prompt_chars": int(max(0, prompt_chars)),
+                "pending_action_offer": bool(pending_for_response),
             }
         )
     try:
-        resp = await llm_structured_chat(
-            llm_client,
+        resp = await llm_client.chat(
             messages=messages,
-            native_system_prompt=_chat_response_envelope_system_prompt(platform, native=True),
-            schema=_hydra_chat_response_schema(),
-            function_name="submit_chat_response",
-            description="Submit the natural chat response and any structured pending executable interaction created by it.",
             temperature=0.4,
             activity="chat",
             cache_namespace="hydra:hermes:chat",
+            stream_callback=stream_callback,
             **_chat_with_optional_max_tokens_kwargs(
                 max_tokens=max_tokens,
-                minimum=160,
-                fallback=360,
-                maximum=600,
+                minimum=64,
+                fallback=220,
             ),
         )
     except Exception as exc:
@@ -3685,40 +3673,13 @@ async def _run_chat_fallback_reply(
             )
         else:
             response_text = ""
-        if callable(stream_callback) and response_text:
-            try:
-                callback_result = stream_callback(response_text)
-                if inspect.isawaitable(callback_result):
-                    await callback_result
-            except Exception:
-                pass
         return {"text": response_text, "pending_interaction": None}
     _populate_llm_reasoning_debug(debug_out, response=resp)
-    raw = _coerce_text((resp.get("message", {}) or {}).get("content", "")).strip()
-    parsed = _first_json_object(raw)
-    if isinstance(parsed, dict):
-        response_text = _coerce_text(parsed.get("response")).strip()
-        pending_candidate = parsed.get("pending_interaction")
-    else:
-        response_text = raw
-        pending_candidate = None
-    if isinstance(pending_candidate, dict):
-        pending_candidate = dict(pending_candidate)
-        pending_candidate["tool_hint"] = _canonical_tool_name(
-            str(pending_candidate.get("tool_hint") or "").strip()
-        )
-    normalized_pending = pending_interaction_helpers.normalize_pending_interaction(
-        pending_candidate,
-        available_tool_ids=available_tool_ids,
-    )
-    if callable(stream_callback) and response_text:
-        try:
-            callback_result = stream_callback(response_text)
-            if inspect.isawaitable(callback_result):
-                await callback_result
-        except Exception:
-            pass
-    return {"text": response_text, "pending_interaction": normalized_pending}
+    response_text = _coerce_text((resp.get("message", {}) or {}).get("content", "")).strip()
+    return {
+        "text": response_text,
+        "pending_interaction": pending_for_response if response_text else None,
+    }
 
 
 def _turn_goal_for_state(*, current_user_text: str, turn_request_text: str) -> str:
@@ -4382,7 +4343,6 @@ async def _run_hermes_final_render(
     render_mode = _HERMES_RENDER_MODE_ALIASES.get(str(mode or "").strip().lower(), "direct")
     if render_mode not in {"direct", "summarize", "rewrite"}:
         render_mode = "direct"
-    now_text = datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
     first, last = get_tater_name()
     personality = (get_tater_personality() or "").strip()
 
@@ -4417,7 +4377,6 @@ async def _run_hermes_final_render(
         {
             "role": "system",
             "content": prompts.hermes_final_render_system_prompt(
-                now_text=now_text,
                 first_name=first,
                 last_name=last,
                 personality=personality,
@@ -4428,6 +4387,7 @@ async def _run_hermes_final_render(
     ]
     if core_context_message:
         messages.append({"role": "system", "content": core_context_message})
+    messages.append({"role": "system", "content": _current_datetime_context_message()})
     messages.append({"role": "user", "content": json.dumps(payload, ensure_ascii=False, default=str)})
     messages = _with_platform_preamble(messages, platform_preamble=platform_preamble)
     if isinstance(debug_out, dict):
@@ -5769,7 +5729,11 @@ async def _run_hydra_turn_impl(
         turn_branch = "chat"
         if isinstance(pending_interaction, dict):
             pending_interaction_helpers.clear_pending_interaction(r, platform=platform, scope=scope)
-        next_pending_interaction = None
+        if not (
+            isinstance(next_pending_interaction, dict)
+            and next_pending_interaction.get("kind") == "action_offer"
+        ):
+            next_pending_interaction = None
 
     agent_state: Dict[str, Any] = _initial_agent_state_for_turn_from_topic_signal(
         prior_state=prior_state,
@@ -6149,8 +6113,7 @@ async def _run_hydra_turn_impl(
                 enabled_predicate=enabled_predicate,
                 redis_client=r,
                 memory_context_message=chat_context_message,
-                capability_catalog=astraeus_capability_catalog,
-                available_tool_ids=available_execution_tool_ids,
+                pending_interaction=next_pending_interaction,
                 platform_preamble=platform_preamble,
                 max_history_items=chat_history_max_items,
                 max_tokens=None,
@@ -6244,8 +6207,9 @@ async def _run_hydra_turn_impl(
                     turn_request_text=round_request_text,
                 ),
             },
-            {"role": "system", "content": state_message},
         ])
+        thanatos_messages.append({"role": "system", "content": _current_datetime_context_message()})
+        thanatos_messages.append({"role": "system", "content": state_message})
         previous_step_payload_prompt = _thanatos_previous_step_payloads_prompt(raw_tool_payload_history)
         if previous_step_payload_prompt:
             thanatos_messages.append({"role": "system", "content": previous_step_payload_prompt})

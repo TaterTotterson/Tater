@@ -194,6 +194,10 @@ def resolve_turn_branch(
         return "reject", None
     if current is not None and relation_value in PENDING_FOLLOWUP_RELATIONS:
         return "clarify", updated or current
+    if mode == "chat":
+        if updated is not None and updated.get("kind") == "action_offer":
+            return "chat", updated
+        return "chat", None
     if mode == "clarify":
         if updated is not None:
             return "clarify", updated
