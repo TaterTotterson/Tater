@@ -86,6 +86,8 @@ class LlamaCppShutdownTests(unittest.TestCase):
             {"pid": 300, "ppid": 1, "command": "python helpers.py --tater-llama-cpp-engine-worker"},
             {"pid": 301, "ppid": 300, "command": f"{server_bin} --alias=tater-llama"},
             {"pid": 400, "ppid": 1, "command": f"{server_bin} --alias qwen3-asr"},
+            {"pid": 450, "ppid": 1, "command": f"{server_bin} --alias voxtral-realtime"},
+            {"pid": 475, "ppid": 1, "command": f"{server_bin} --alias lfm3-audio"},
             {"pid": 500, "ppid": 1, "command": f"{server_bin} --alias unrelated"},
             {"pid": 600, "ppid": 1, "command": "/usr/bin/llama-server --alias tater-llama"},
         ]
@@ -96,7 +98,7 @@ class LlamaCppShutdownTests(unittest.TestCase):
             exclude_descendants_of=100,
         )
 
-        self.assertEqual(stale, [200, 301, 400])
+        self.assertEqual(stale, [200, 301, 400, 450, 475])
 
     def test_engine_shutdown_finds_only_its_server_tree(self) -> None:
         server_bin = "/opt/llama.cpp/build/bin/llama-server"

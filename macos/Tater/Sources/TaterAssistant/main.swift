@@ -1272,6 +1272,10 @@ private final class BackendManager {
                 || command.contains("--alias=tater-llama")
                 || command.contains("--alias qwen3-asr")
                 || command.contains("--alias=qwen3-asr")
+                || command.contains("--alias voxtral-realtime")
+                || command.contains("--alias=voxtral-realtime")
+                || command.contains("--alias lfm3-audio")
+                || command.contains("--alias=lfm3-audio")
             let ownsBinary = command == serverPath
                 || command.hasPrefix(serverPath + " ")
                 || command.hasPrefix("\"" + serverPath + "\" ")

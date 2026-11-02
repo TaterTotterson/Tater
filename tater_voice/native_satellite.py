@@ -1558,6 +1558,11 @@ class _NativeVoiceAssistantClient:
         cb = self._callbacks.get(name)
         return cb if callable(cb) else None
 
+    async def send_conversation_display(self, payload: Optional[Dict[str, Any]] = None) -> None:
+        """Send a display-only conversation snapshot without changing voice state."""
+        data = dict(payload) if isinstance(payload, dict) else {}
+        _queue_command(self._queue, _envelope("display.conversation", data))
+
     def subscribe_voice_assistant(
         self,
         *,
@@ -5515,6 +5520,7 @@ async def handle_websocket(websocket: WebSocket) -> None:
             "ota": True,
             "sat_chat": True,
             "sat_chat_audio": True,
+            "conversation_display": True,
         }
         # Echo a device's output_chain claim in the acknowledgement so speaker
         # processing ownership remains explicit in both directions. Native

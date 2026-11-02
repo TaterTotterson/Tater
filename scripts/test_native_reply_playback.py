@@ -100,6 +100,75 @@ class NativeReplyPlaybackTests(unittest.IsolatedAsyncioTestCase):
             playback["ducking"],
         )
 
+    async def test_conversation_display_uses_dedicated_state_neutral_message(self) -> None:
+        queue: asyncio.Queue = asyncio.Queue(maxsize=10)
+        client = native_satellite._NativeVoiceAssistantClient(
+            "native:test-satellite",
+            queue,
+        )
+
+        await client.send_conversation_display(
+            {
+                "turn_id": "turn-1",
+                "phase": "listening",
+                "user_text": "turn on the kitchen lights",
+                "user_final": False,
+                "revision": 2,
+            }
+        )
+
+        message = queue.get_nowait()
+        self.assertEqual("display.conversation", message["type"])
+        self.assertEqual("turn-1", message["payload"]["turn_id"])
+        self.assertEqual("listening", message["payload"]["phase"])
+        self.assertTrue(queue.empty())
+
+    async def test_conversation_display_coalesces_partial_text_and_forces_final(self) -> None:
+        updates = []
+        session = VoiceSessionRuntime(
+            selector="native:test-satellite",
+            session_id="turn-1",
+            conversation_id="conversation-1",
+            wake_word="hey tater",
+            audio_format={"rate": 16000, "width": 2, "channels": 1},
+            started_ts=0.0,
+            startup_gate_until_ts=0.0,
+            conversation_display_callback=lambda payload: updates.append(payload),
+        )
+
+        await voice_pipeline._publish_conversation_display(
+            session,
+            phase="listening",
+            user_text="turn",
+            user_final=False,
+            force=True,
+        )
+        await voice_pipeline._publish_conversation_display(
+            session,
+            phase="listening",
+            user_text="turn on",
+            user_final=False,
+        )
+        await voice_pipeline._publish_conversation_display(
+            session,
+            phase="listening",
+            user_text="turn on the lights",
+            user_final=False,
+        )
+        await voice_pipeline._publish_conversation_display(
+            session,
+            phase="thinking",
+            user_text="turn on the lights",
+            user_final=True,
+            force=True,
+        )
+
+        self.assertEqual(2, len(updates))
+        self.assertEqual("turn", updates[0]["user_text"])
+        self.assertEqual("thinking", updates[-1]["phase"])
+        self.assertEqual("turn on the lights", updates[-1]["user_text"])
+        self.assertTrue(updates[-1]["user_final"])
+
 
 if __name__ == "__main__":
     unittest.main()

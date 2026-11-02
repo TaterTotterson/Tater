@@ -149,7 +149,7 @@ class GlobalWakeVerifierSettingsTests(unittest.TestCase):
         self.assertEqual(source.count("Apply To All Satellites"), 0)
 
     def test_faster_whisper_card_visibility_follows_selected_stt_backend(self) -> None:
-        speech = (REPO_ROOT / "frontend" / "src" / "settings" / "components" / "models" / "SpeechModels.vue").read_text(encoding="utf-8")
+        speech = (REPO_ROOT / "frontend" / "src" / "settings" / "components" / "models" / "ListeningModels.vue").read_text(encoding="utf-8")
         fields = (REPO_ROOT / "frontend" / "src" / "settings" / "components" / "models" / "ModelFields.vue").read_text(encoding="utf-8")
 
         self.assertIn("function setStt", speech)

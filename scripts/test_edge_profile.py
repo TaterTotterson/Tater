@@ -28,7 +28,6 @@ FORBIDDEN_REQUIREMENTS = {
     "tf-keras",
     "torch",
     "transformers",
-    "vosk",
 }
 
 

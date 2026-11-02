@@ -19,12 +19,14 @@ const sttMeta: Record<string, { mark: string; short: string }> = {
   faster_whisper: { mark: "FW", short: "Fast, accurate local Whisper transcription." },
   parakeet_onnx: { mark: "PK", short: "Efficient local speech recognition with ONNX." },
   qwen3_asr_llama_cpp: { mark: "Q3", short: "Experimental local Qwen3-ASR through llama.cpp." },
+  voxtral_realtime_llama_cpp: { mark: "VX", short: "Live local transcription streamed through llama.cpp." },
+  lfm3_audio_llama_cpp: { mark: "L3", short: "Compact live transcription with Liquid AI LFM3-Audio." },
   wyoming: { mark: "WY", short: "Use a Wyoming speech service on your network." },
-  vosk: { mark: "VK", short: "Lightweight offline recognition for modest hardware." },
 };
 
 const voiceSections = computed<JsonRow[]>(() => Array.isArray(props.voiceModelUi.sections) ? props.voiceModelUi.sections : []);
 const sttOptions = computed<JsonRow[]>(() => Array.isArray(props.speechUi.stt_backend_options) ? props.speechUi.stt_backend_options : []);
+const sttModelOptionsByBackend = computed<JsonRow>(() => props.speechUi.stt_model_options_by_backend && typeof props.speechUi.stt_model_options_by_backend === "object" ? props.speechUi.stt_model_options_by_backend as JsonRow : {});
 const accelerationOptions = computed<JsonRow[]>(() => Array.isArray(props.speechUi.acceleration_options) ? props.speechUi.acceleration_options : []);
 const warmupItems = computed<JsonRow[]>(() => Array.isArray(warmup.value.items) ? warmup.value.items : []);
 const warmupHasErrors = computed(() => warmupItems.value.some((item) => String(item.status || "").toLowerCase() === "error") || (Array.isArray(warmup.value.errors) && warmup.value.errors.length > 0));
@@ -34,6 +36,9 @@ const voiceValues = computed<JsonRow>(() => {
 });
 const selectedStt = computed(() => String(props.draft.speech_stt_backend || "faster_whisper"));
 const selectedSttLabel = computed(() => labelFor(sttOptions.value, selectedStt.value, "Speech recognition"));
+const selectedSttModelOptions = computed<JsonRow[]>(() => Array.isArray(sttModelOptionsByBackend.value[selectedStt.value]) ? sttModelOptionsByBackend.value[selectedStt.value] as JsonRow[] : []);
+const selectedQwenModel = computed(() => String(props.draft.speech_qwen3_asr_model || "qwen3-asr-0.6b"));
+const selectedQwenModelLabel = computed(() => labelFor(selectedSttModelOptions.value, selectedQwenModel.value, "Qwen3-ASR 0.6B"));
 const selectedAccelerationLabel = computed(() => labelFor(accelerationOptions.value, props.draft.speech_acceleration, "Auto acceleration"));
 const localStt = computed(() => selectedStt.value !== "wyoming");
 const visibleVoiceSections = computed(() => voiceSections.value.filter((section) => {
@@ -43,12 +48,14 @@ const visibleVoiceSections = computed(() => voiceSections.value.filter((section)
 
 function optionValue(option: JsonRow) { return String(option.value ?? option.id ?? ""); }
 function optionLabel(option: JsonRow) { return String(option.label ?? option.name ?? option.value ?? option.id ?? ""); }
+function optionDescription(option: JsonRow) { return String(option.description ?? "Speech recognition model."); }
 function labelFor(options: JsonRow[], value: unknown, fallback: string) { return optionLabel(options.find((option) => optionValue(option) === String(value || "")) || {}) || fallback; }
 function sttMark(option: JsonRow) { return sttMeta[optionValue(option)]?.mark || optionLabel(option).slice(0, 2).toUpperCase(); }
 function sttDescription(option: JsonRow) { return sttMeta[optionValue(option)]?.short || "Speech recognition provider."; }
 function dirty() { emit("dirty"); }
 function updateVoice(key: string, value: unknown) { voiceValues.value[key] = value; dirty(); }
 function setStt(value: string) { props.draft.speech_stt_backend = value; dirty(); }
+function setQwenModel(value: string) { props.draft.speech_qwen3_asr_model = value; dirty(); }
 function setAcceleration(value: string) { props.draft.speech_acceleration = value; dirty(); }
 
 async function refreshWarmup() {
@@ -93,8 +100,15 @@ defineExpose({ refreshWarmup });
       </div>
     </article>
 
+    <article v-if="selectedStt === 'qwen3_asr_llama_cpp'" class="tm-form-card tm-speech-picker-card">
+      <header><div><span class="tv-eyebrow">Step 2</span><h3>Choose the Qwen listening model</h3><p>Use the smaller model for speed, or the larger model when transcription accuracy matters more.</p></div><span class="tm-speech-status-chip">{{ selectedQwenModelLabel }}</span></header>
+      <div class="tm-speech-provider-grid" role="group" aria-label="Qwen speech recognition model">
+        <button v-for="option in selectedSttModelOptions" :key="optionValue(option)" type="button" :class="{ active: selectedQwenModel === optionValue(option) }" :aria-pressed="selectedQwenModel === optionValue(option)" @click="setQwenModel(optionValue(option))"><i>{{ optionValue(option).includes('1.7b') ? '1.7' : '0.6' }}</i><span><strong>{{ optionLabel(option) }}</strong><small>{{ optionDescription(option) }}</small></span><b aria-hidden="true">✓</b></button>
+      </div>
+    </article>
+
     <article class="tm-form-card tm-speech-runtime-card">
-      <header><div><span class="tv-eyebrow">Step 2</span><h3>{{ localStt ? "Choose the processing hardware" : "Connect the Wyoming service" }}</h3><p>{{ localStt ? "Pick Auto unless you know which accelerator should run speech recognition." : "Enter the host and port of the Wyoming speech-to-text service." }}</p></div><span class="tm-speech-status-chip">{{ localStt ? selectedAccelerationLabel : "Network" }}</span></header>
+      <header><div><span class="tv-eyebrow">{{ selectedStt === 'qwen3_asr_llama_cpp' ? 'Step 3' : 'Step 2' }}</span><h3>{{ localStt ? "Choose the processing hardware" : "Connect the Wyoming service" }}</h3><p>{{ localStt ? "Pick Auto unless you know which accelerator should run speech recognition." : "Enter the host and port of the Wyoming speech-to-text service." }}</p></div><span class="tm-speech-status-chip">{{ localStt ? selectedAccelerationLabel : "Network" }}</span></header>
       <div v-if="localStt" class="tm-speech-acceleration" role="group" aria-label="Speech acceleration">
         <button v-for="option in accelerationOptions" :key="optionValue(option)" type="button" :class="{ active: String(draft.speech_acceleration || 'auto') === optionValue(option) }" @click="setAcceleration(optionValue(option))"><i />{{ optionLabel(option) }}</button>
       </div>

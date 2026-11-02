@@ -223,13 +223,14 @@ async def startup() -> None:
         int(eou_cfg.get("webrtc_aggressiveness") or vp.DEFAULT_WEBRTC_VAD_AGGRESSIVENESS),
     )
     vp.logger.info(
-        "[native-voice] stt backend selected=%s effective=%s faster_whisper=%s parakeet_onnx=%s qwen3_asr_llama_cpp=%s vosk=%s wyoming=%s",
+        "[native-voice] stt backend selected=%s effective=%s faster_whisper=%s parakeet_onnx=%s qwen3_asr_llama_cpp=%s voxtral_realtime_llama_cpp=%s lfm3_audio_llama_cpp=%s wyoming=%s",
         selected_stt_backend,
         effective_stt_backend,
         "available" if vp.WhisperModel is not None else "missing",
         "available" if vp.OnnxASR is not None else "missing",
         "available" if vp._qwen3_asr_llama_cpp_available()[0] else "missing",
-        "available" if vp.VoskModel is not None else "missing",
+        "available" if vp._voxtral_realtime_llama_cpp_available()[0] else "missing",
+        "available" if vp._lfm3_audio_llama_cpp_available()[0] else "missing",
         "available" if vp.AsyncTcpClient is not None else "missing",
     )
     vp.logger.info("[native-voice] stt model root=%s", vp._stt_model_root())
@@ -314,6 +315,8 @@ async def shutdown() -> None:
         await asyncio.gather(*tasks, return_exceptions=True)
     vp._background_tasks.clear()
     vp._shutdown_qwen3_asr_llama_cpp_server()
+    vp._shutdown_voxtral_realtime_llama_cpp_server()
+    vp._shutdown_lfm3_audio_llama_cpp_server()
 
 
 @router.get("/tater-ha/v1/health")
@@ -403,8 +406,12 @@ async def native_status(x_tater_token: Optional[str] = Header(None)) -> Dict[str
         "qwen3_asr_llama_cpp_available": vp._qwen3_asr_llama_cpp_available()[0],
         "qwen3_asr_llama_cpp_error": vp._qwen3_asr_llama_cpp_available()[1],
         "qwen3_asr_llama_cpp_runtime": vp._qwen3_asr_llama_cpp_runtime_snapshot(),
-        "vosk_available": vp.VOSK_IMPORT_ERROR is None,
-        "vosk_error": vp._text(vp.VOSK_IMPORT_ERROR),
+        "voxtral_realtime_llama_cpp_available": vp._voxtral_realtime_llama_cpp_available()[0],
+        "voxtral_realtime_llama_cpp_error": vp._voxtral_realtime_llama_cpp_available()[1],
+        "voxtral_realtime_llama_cpp_runtime": vp._voxtral_realtime_llama_cpp_runtime_snapshot(),
+        "lfm3_audio_llama_cpp_available": vp._lfm3_audio_llama_cpp_available()[0],
+        "lfm3_audio_llama_cpp_error": vp._lfm3_audio_llama_cpp_available()[1],
+        "lfm3_audio_llama_cpp_runtime": vp._lfm3_audio_llama_cpp_runtime_snapshot(),
         "pocket_tts_available": vp.POCKET_TTS_IMPORT_ERROR is None,
         "pocket_tts_error": vp._text(vp.POCKET_TTS_IMPORT_ERROR),
         "wyoming_available": vp.WYOMING_IMPORT_ERROR is None,

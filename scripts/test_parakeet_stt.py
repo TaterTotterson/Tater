@@ -28,6 +28,17 @@ class ParakeetSettingsTests(unittest.TestCase):
         row = next(item for item in rows if item["value"] == "parakeet_onnx")
         self.assertEqual(row["label"], "Parakeet ONNX")
 
+    def test_removed_vosk_selection_migrates_to_default(self) -> None:
+        self.assertEqual(
+            speech_settings._normalize_stt_backend("vosk"),
+            speech_settings.DEFAULT_STT_BACKEND,
+        )
+        self.assertEqual(vp._normalize_stt_backend("vosk"), vp.DEFAULT_STT_BACKEND)
+        self.assertNotIn(
+            "vosk",
+            {item["value"] for item in speech_settings._stt_backend_option_rows()},
+        )
+
     def test_provider_selection_follows_voice_acceleration(self) -> None:
         ort = SimpleNamespace(
             get_available_providers=lambda: [
@@ -175,17 +186,12 @@ class ParakeetBackendTests(unittest.TestCase):
             vp._parakeet_onnx_model_cache[
                 ("nemo-parakeet-tdt-0.6b-v3", "int8", ("CPUExecutionProvider",))
             ] = object()
-        with vp._vosk_model_lock:
-            vp._vosk_model_cache["/tmp/vosk-test"] = object()
-
         cleared = backends.clear_stt_model_caches(keep_backend="parakeet_onnx")
 
         self.assertEqual(cleared["faster_whisper"], 1)
         self.assertEqual(cleared["parakeet_onnx"], 0)
-        self.assertEqual(cleared["vosk"], 1)
         self.assertFalse(vp._faster_whisper_model_cache)
         self.assertTrue(vp._parakeet_onnx_model_cache)
-        self.assertFalse(vp._vosk_model_cache)
 
 
 class ParakeetRoutingTests(unittest.IsolatedAsyncioTestCase):

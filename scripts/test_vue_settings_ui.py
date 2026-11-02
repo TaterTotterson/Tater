@@ -466,6 +466,8 @@ class VueSettingsTests(unittest.TestCase):
         self.assertIn("tm-speech-provider-grid", listening)
         self.assertIn("visibleVoiceSections", listening)
         self.assertIn("function setStt", listening)
+        self.assertIn("speech_qwen3_asr_model", listening)
+        self.assertIn("Choose the Qwen listening model", listening)
         self.assertIn("Listening controls", listening)
         self.assertIn('const inheritsReplyVoice = announcement && ["same_as_direct", "direct"].includes(backend)', speech)
         self.assertIn('const prefix = inheritsReplyVoice ? "speech_" : requestedPrefix', speech)

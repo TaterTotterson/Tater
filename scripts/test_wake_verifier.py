@@ -235,22 +235,6 @@ class WakeVerifierBackendTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(runner.await_args.args[-1])
 
-    async def test_local_wake_router_uses_vosk_path(self) -> None:
-        from tater_voice.voice_pipeline import backends
-
-        runner = mock.AsyncMock(return_value="Hey Tater")
-        with mock.patch.object(backends, "_run_local_stt_thread", new=runner):
-            transcript = await backends._native_transcribe_wake_audio_bytes(
-                backend="vosk",
-                audio_bytes=b"\x00\x00" * 100,
-                audio_format={"rate": 16000, "width": 2, "channels": 1},
-                language="en",
-                selector="native:test",
-            )
-
-        self.assertEqual(transcript, "Hey Tater")
-        self.assertIs(runner.await_args.args[0], backends._transcribe_vosk_sync)
-
     async def test_wyoming_wake_router_uses_one_shot_transcription(self) -> None:
         from tater_voice.voice_pipeline import backends
 

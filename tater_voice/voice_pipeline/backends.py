@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import gc
 import importlib
@@ -16,8 +17,17 @@ import threading
 import time
 import wave
 from typing import Any, AsyncIterator, Dict, Iterable, Iterator, List, Optional, Tuple
+from urllib.parse import urlencode
 
 import requests
+
+try:
+    from websockets.asyncio.client import connect as websocket_connect
+
+    WEBSOCKETS_IMPORT_ERROR = None
+except Exception as exc:  # pragma: no cover - exercised when the optional dependency is absent
+    websocket_connect = None
+    WEBSOCKETS_IMPORT_ERROR = str(exc)
 
 from .conversation import VoiceSessionRuntime
 from runtime_executors import run_stt, run_tts
@@ -48,8 +58,33 @@ _FASTER_WHISPER_MODEL_TRANSCRIBE_LOCK = threading.RLock()
 _PARAKEET_ONNX_TRANSCRIBE_LOCK = threading.RLock()
 _QWEN3_ASR_LLAMA_CPP_TRANSCRIBE_LOCK = threading.RLock()
 _QWEN3_ASR_LLAMA_CPP_PROCESS_LOCK = threading.RLock()
+_VOXTRAL_REALTIME_LLAMA_CPP_PROCESS_LOCK = threading.RLock()
+_LFM3_AUDIO_LLAMA_CPP_PROCESS_LOCK = threading.RLock()
 _POCKET_TTS_VOICE_STATE_CACHE_LIMIT = 8
 _QWEN3_ASR_LLAMA_CPP_STATE: Dict[str, Any] = {
+    "process": None,
+    "base_url": "",
+    "model_id": "",
+    "model_path": "",
+    "mmproj_path": "",
+    "api_key": "",
+    "stdout_tail": [],
+    "stderr_tail": [],
+    "started_ts": 0.0,
+    "gpu_layers": 0,
+}
+_VOXTRAL_REALTIME_LLAMA_CPP_STATE: Dict[str, Any] = {
+    "process": None,
+    "base_url": "",
+    "model_path": "",
+    "mmproj_path": "",
+    "api_key": "",
+    "stdout_tail": [],
+    "stderr_tail": [],
+    "started_ts": 0.0,
+    "gpu_layers": 0,
+}
+_LFM3_AUDIO_LLAMA_CPP_STATE: Dict[str, Any] = {
     "process": None,
     "base_url": "",
     "model_path": "",
@@ -97,7 +132,7 @@ def _resolve_stt_backend() -> Tuple[str, str]:
     if ok:
         return selected, ""
     if selected != "wyoming":
-        for candidate in (vp.DEFAULT_STT_BACKEND, "faster_whisper", "parakeet_onnx", "vosk"):
+        for candidate in (vp.DEFAULT_STT_BACKEND, "faster_whisper", "parakeet_onnx"):
             fallback = vp._normalize_stt_backend(candidate)
             if fallback == selected or fallback == "wyoming":
                 continue
@@ -245,7 +280,8 @@ def clear_stt_model_caches(*, keep_backend: str = "") -> Dict[str, int]:
         "faster_whisper": 0,
         "parakeet_onnx": 0,
         "qwen3_asr_llama_cpp": 0,
-        "vosk": 0,
+        "voxtral_realtime_llama_cpp": 0,
+        "lfm3_audio_llama_cpp": 0,
     }
 
     if keep != "faster_whisper":
@@ -260,11 +296,6 @@ def clear_stt_model_caches(*, keep_backend: str = "") -> Dict[str, int]:
                 cleared["parakeet_onnx"] = len(vp._parakeet_onnx_model_cache)
                 vp._parakeet_onnx_model_cache.clear()
 
-    if keep != "vosk":
-        with vp._vosk_model_lock:
-            cleared["vosk"] = len(vp._vosk_model_cache)
-            vp._vosk_model_cache.clear()
-
     if keep != "qwen3_asr_llama_cpp":
         with _QWEN3_ASR_LLAMA_CPP_TRANSCRIBE_LOCK:
             snapshot = _qwen3_asr_llama_cpp_runtime_snapshot()
@@ -272,17 +303,49 @@ def clear_stt_model_caches(*, keep_backend: str = "") -> Dict[str, int]:
                 cleared["qwen3_asr_llama_cpp"] = 1
             _shutdown_qwen3_asr_llama_cpp_server()
 
+    if keep != "voxtral_realtime_llama_cpp":
+        snapshot = _voxtral_realtime_llama_cpp_runtime_snapshot()
+        if snapshot.get("running"):
+            cleared["voxtral_realtime_llama_cpp"] = 1
+        _shutdown_voxtral_realtime_llama_cpp_server()
+
+    if keep != "lfm3_audio_llama_cpp":
+        snapshot = _lfm3_audio_llama_cpp_runtime_snapshot()
+        if snapshot.get("running"):
+            cleared["lfm3_audio_llama_cpp"] = 1
+        _shutdown_lfm3_audio_llama_cpp_server()
+
     if any(cleared.values()):
         gc.collect()
     vp.logger.info("[native-voice] cleared STT model caches keep=%s cleared=%s", keep or "-", cleared)
     return cleared
 
 
+def _qwen3_asr_llama_cpp_model_spec() -> Dict[str, str]:
+    vp = _vp()
+    selected = vp.normalize_qwen3_asr_model(
+        vp._voice_settings_with_shared_speech().get("VOICE_QWEN3_ASR_MODEL")
+    )
+    if selected == vp.QWEN3_ASR_LARGE_MODEL:
+        return {
+            "id": selected,
+            "repo": vp.QWEN3_ASR_LARGE_LLAMA_CPP_REPO,
+            "model_file": vp.QWEN3_ASR_LARGE_LLAMA_CPP_MODEL_FILE,
+            "mmproj_file": vp.QWEN3_ASR_LARGE_LLAMA_CPP_MMPROJ_FILE,
+        }
+    return {
+        "id": vp.DEFAULT_QWEN3_ASR_MODEL,
+        "repo": vp.DEFAULT_QWEN3_ASR_LLAMA_CPP_REPO,
+        "model_file": vp.DEFAULT_QWEN3_ASR_LLAMA_CPP_MODEL_FILE,
+        "mmproj_file": vp.DEFAULT_QWEN3_ASR_LLAMA_CPP_MMPROJ_FILE,
+    }
+
+
 def _qwen3_asr_llama_cpp_repo() -> str:
     vp = _vp()
     return (
         vp._text(os.getenv("TATER_QWEN3_ASR_LLAMA_CPP_REPO"))
-        or vp.DEFAULT_QWEN3_ASR_LLAMA_CPP_REPO
+        or _qwen3_asr_llama_cpp_model_spec()["repo"]
     )
 
 
@@ -290,7 +353,7 @@ def _qwen3_asr_llama_cpp_model_file() -> str:
     vp = _vp()
     return (
         vp._text(os.getenv("TATER_QWEN3_ASR_LLAMA_CPP_MODEL_FILE"))
-        or vp.DEFAULT_QWEN3_ASR_LLAMA_CPP_MODEL_FILE
+        or _qwen3_asr_llama_cpp_model_spec()["model_file"]
     )
 
 
@@ -298,7 +361,7 @@ def _qwen3_asr_llama_cpp_mmproj_file() -> str:
     vp = _vp()
     return (
         vp._text(os.getenv("TATER_QWEN3_ASR_LLAMA_CPP_MMPROJ_FILE"))
-        or vp.DEFAULT_QWEN3_ASR_LLAMA_CPP_MMPROJ_FILE
+        or _qwen3_asr_llama_cpp_model_spec()["mmproj_file"]
     )
 
 
@@ -364,6 +427,7 @@ def _qwen3_asr_llama_cpp_runtime_snapshot() -> Dict[str, Any]:
             "running": running,
             "pid": int(getattr(proc, "pid", 0) or 0) if running else 0,
             "base_url": str(_QWEN3_ASR_LLAMA_CPP_STATE.get("base_url") or ""),
+            "model_id": str(_QWEN3_ASR_LLAMA_CPP_STATE.get("model_id") or ""),
             "model_path": str(_QWEN3_ASR_LLAMA_CPP_STATE.get("model_path") or ""),
             "mmproj_path": str(_QWEN3_ASR_LLAMA_CPP_STATE.get("mmproj_path") or ""),
             "started_ts": float(_QWEN3_ASR_LLAMA_CPP_STATE.get("started_ts") or 0.0),
@@ -459,6 +523,7 @@ def _shutdown_qwen3_asr_llama_cpp_server() -> None:
             {
                 "process": None,
                 "base_url": "",
+                "model_id": "",
                 "model_path": "",
                 "mmproj_path": "",
                 "api_key": "",
@@ -484,9 +549,12 @@ def _shutdown_qwen3_asr_llama_cpp_server() -> None:
 def _load_qwen3_asr_llama_cpp_server() -> Dict[str, Any]:
     vp = _vp()
     with _QWEN3_ASR_LLAMA_CPP_PROCESS_LOCK:
+        model_id = _qwen3_asr_llama_cpp_model_spec()["id"]
         proc = _QWEN3_ASR_LLAMA_CPP_STATE.get("process")
         if proc is not None and callable(getattr(proc, "poll", None)) and proc.poll() is None:
-            return _qwen3_asr_llama_cpp_runtime_snapshot()
+            if str(_QWEN3_ASR_LLAMA_CPP_STATE.get("model_id") or "") == model_id:
+                return _qwen3_asr_llama_cpp_runtime_snapshot()
+            _shutdown_qwen3_asr_llama_cpp_server()
 
         model_path, mmproj_path = _qwen3_asr_llama_cpp_model_paths(download=True)
         server_bin = _llama_cpp_native_server_bin()
@@ -525,6 +593,7 @@ def _load_qwen3_asr_llama_cpp_server() -> Dict[str, Any]:
             {
                 "process": proc,
                 "base_url": base_url,
+                "model_id": model_id,
                 "model_path": model_path,
                 "mmproj_path": mmproj_path,
                 "api_key": api_key,
@@ -573,6 +642,558 @@ def _load_qwen3_asr_llama_cpp_server() -> Dict[str, Any]:
         if logs:
             detail = f"{detail}. Logs: {logs}"
         raise RuntimeError(f"Qwen3-ASR llama.cpp startup failed: {detail}")
+
+
+def _voxtral_realtime_llama_cpp_repo() -> str:
+    vp = _vp()
+    return (
+        vp._text(os.getenv("TATER_VOXTRAL_REALTIME_LLAMA_CPP_REPO"))
+        or vp.DEFAULT_VOXTRAL_REALTIME_LLAMA_CPP_REPO
+    )
+
+
+def _voxtral_realtime_llama_cpp_model_file() -> str:
+    vp = _vp()
+    return (
+        vp._text(os.getenv("TATER_VOXTRAL_REALTIME_LLAMA_CPP_MODEL_FILE"))
+        or vp.DEFAULT_VOXTRAL_REALTIME_LLAMA_CPP_MODEL_FILE
+    )
+
+
+def _voxtral_realtime_llama_cpp_mmproj_file() -> str:
+    vp = _vp()
+    return (
+        vp._text(os.getenv("TATER_VOXTRAL_REALTIME_LLAMA_CPP_MMPROJ_FILE"))
+        or vp.DEFAULT_VOXTRAL_REALTIME_LLAMA_CPP_MMPROJ_FILE
+    )
+
+
+def _voxtral_realtime_llama_cpp_model_paths(*, download: bool) -> Tuple[str, str]:
+    vp = _vp()
+    root = vp._ensure_stt_backend_model_root("voxtral_realtime_llama_cpp")
+    model_file = _voxtral_realtime_llama_cpp_model_file()
+    mmproj_file = _voxtral_realtime_llama_cpp_mmproj_file()
+    model_path = os.path.join(root, model_file)
+    mmproj_path = os.path.join(root, mmproj_file)
+    if download and (not os.path.isfile(model_path) or not os.path.isfile(mmproj_path)):
+        huggingface_hub = importlib.import_module("huggingface_hub")
+        vp.logger.info(
+            "[native-voice] Voxtral Realtime llama.cpp download repo=%s model=%s mmproj=%s root=%s",
+            _voxtral_realtime_llama_cpp_repo(),
+            model_file,
+            mmproj_file,
+            root,
+        )
+        with _temporary_env(
+            huggingface_environment(
+                {
+                    "HF_HOME": root,
+                    "HF_HUB_CACHE": os.path.join(root, "hub"),
+                    "HUGGINGFACE_HUB_CACHE": os.path.join(root, "hub"),
+                }
+            )
+        ):
+            huggingface_hub.snapshot_download(
+                repo_id=_voxtral_realtime_llama_cpp_repo(),
+                local_dir=root,
+                allow_patterns=[model_file, mmproj_file],
+            )
+    missing = [path for path in (model_path, mmproj_path) if not os.path.isfile(path)]
+    if missing:
+        raise RuntimeError(
+            "Voxtral Realtime llama.cpp model files are missing after download: "
+            + ", ".join(missing)
+        )
+    return model_path, mmproj_path
+
+
+def _voxtral_realtime_llama_cpp_available() -> Tuple[bool, str]:
+    if websocket_connect is None:
+        return False, f"websockets dependency unavailable: {WEBSOCKETS_IMPORT_ERROR or 'unknown import error'}"
+    server_bin = _llama_cpp_native_server_bin()
+    if not server_bin:
+        return False, "Tater's native llama-server binary was not found"
+    try:
+        model_path, mmproj_path = _voxtral_realtime_llama_cpp_model_paths(download=False)
+    except Exception:
+        model_path = mmproj_path = ""
+    if model_path and mmproj_path:
+        return True, ""
+    if importlib.util.find_spec("huggingface_hub") is None:
+        return False, "huggingface-hub is required to download the Voxtral Realtime GGUF files"
+    return True, ""
+
+
+def _voxtral_realtime_llama_cpp_runtime_snapshot() -> Dict[str, Any]:
+    with _VOXTRAL_REALTIME_LLAMA_CPP_PROCESS_LOCK:
+        proc = _VOXTRAL_REALTIME_LLAMA_CPP_STATE.get("process")
+        running = bool(proc is not None and callable(getattr(proc, "poll", None)) and proc.poll() is None)
+        return {
+            "running": running,
+            "pid": int(getattr(proc, "pid", 0) or 0) if running else 0,
+            "base_url": str(_VOXTRAL_REALTIME_LLAMA_CPP_STATE.get("base_url") or ""),
+            "model_path": str(_VOXTRAL_REALTIME_LLAMA_CPP_STATE.get("model_path") or ""),
+            "mmproj_path": str(_VOXTRAL_REALTIME_LLAMA_CPP_STATE.get("mmproj_path") or ""),
+            "started_ts": float(_VOXTRAL_REALTIME_LLAMA_CPP_STATE.get("started_ts") or 0.0),
+            "gpu_layers": max(0, int(_VOXTRAL_REALTIME_LLAMA_CPP_STATE.get("gpu_layers") or 0)),
+            "stdout_tail": list(_VOXTRAL_REALTIME_LLAMA_CPP_STATE.get("stdout_tail") or [])[-20:],
+            "stderr_tail": list(_VOXTRAL_REALTIME_LLAMA_CPP_STATE.get("stderr_tail") or [])[-20:],
+        }
+
+
+def _voxtral_realtime_llama_cpp_gpu_layers() -> int:
+    vp = _vp()
+    if vp._effective_speech_acceleration() == "cpu":
+        return 0
+    return vp._as_int(
+        os.getenv("TATER_VOXTRAL_REALTIME_LLAMA_CPP_N_GPU_LAYERS"),
+        999,
+        minimum=0,
+        maximum=999,
+    )
+
+
+def _voxtral_realtime_llama_cpp_server_command(
+    *,
+    server_bin: str,
+    model_path: str,
+    mmproj_path: str,
+    port: int,
+    api_key: str,
+) -> List[str]:
+    vp = _vp()
+    context_size = vp._as_int(
+        os.getenv("TATER_VOXTRAL_REALTIME_LLAMA_CPP_CONTEXT_SIZE"),
+        vp.DEFAULT_VOXTRAL_REALTIME_LLAMA_CPP_CONTEXT_SIZE,
+        minimum=2048,
+        maximum=131072,
+    )
+    return [
+        server_bin,
+        "--model",
+        model_path,
+        "--mmproj",
+        mmproj_path,
+        "--host",
+        "127.0.0.1",
+        "--port",
+        str(int(port)),
+        "--ctx-size",
+        str(int(context_size)),
+        "--n-gpu-layers",
+        str(_voxtral_realtime_llama_cpp_gpu_layers()),
+        "--parallel",
+        "2",
+        "--temp",
+        "0.0",
+        "--alias",
+        "voxtral-realtime",
+        "--api-key",
+        api_key,
+        "--no-ui",
+        "--no-context-shift",
+        "--cache-ram",
+        "0",
+    ]
+
+
+def _shutdown_voxtral_realtime_llama_cpp_server() -> None:
+    with _VOXTRAL_REALTIME_LLAMA_CPP_PROCESS_LOCK:
+        proc = _VOXTRAL_REALTIME_LLAMA_CPP_STATE.get("process")
+        _VOXTRAL_REALTIME_LLAMA_CPP_STATE.update(
+            {
+                "process": None,
+                "base_url": "",
+                "model_path": "",
+                "mmproj_path": "",
+                "api_key": "",
+                "stdout_tail": [],
+                "stderr_tail": [],
+                "started_ts": 0.0,
+                "gpu_layers": 0,
+            }
+        )
+    if proc is None or not callable(getattr(proc, "poll", None)) or proc.poll() is not None:
+        return
+    with contextlib.suppress(Exception):
+        proc.terminate()
+    try:
+        proc.wait(timeout=10.0)
+    except Exception:
+        with contextlib.suppress(Exception):
+            proc.kill()
+        with contextlib.suppress(Exception):
+            proc.wait(timeout=5.0)
+
+
+def _load_voxtral_realtime_llama_cpp_server() -> Dict[str, Any]:
+    vp = _vp()
+    with _VOXTRAL_REALTIME_LLAMA_CPP_PROCESS_LOCK:
+        proc = _VOXTRAL_REALTIME_LLAMA_CPP_STATE.get("process")
+        if proc is not None and callable(getattr(proc, "poll", None)) and proc.poll() is None:
+            return _voxtral_realtime_llama_cpp_runtime_snapshot()
+
+        model_path, mmproj_path = _voxtral_realtime_llama_cpp_model_paths(download=True)
+        server_bin = _llama_cpp_native_server_bin()
+        if not server_bin:
+            raise RuntimeError("Tater's native llama-server binary was not found")
+        port = _llama_cpp_native_free_port()
+        base_url = f"http://127.0.0.1:{int(port)}"
+        api_key = os.urandom(24).hex()
+        stdout_tail: List[str] = []
+        stderr_tail: List[str] = []
+        gpu_layers = _voxtral_realtime_llama_cpp_gpu_layers()
+        cmd = _voxtral_realtime_llama_cpp_server_command(
+            server_bin=server_bin,
+            model_path=model_path,
+            mmproj_path=mmproj_path,
+            port=port,
+            api_key=api_key,
+        )
+        vp.logger.info(
+            "[native-voice] starting Voxtral Realtime llama.cpp server model=%s mmproj=%s gpu_layers=%s port=%s",
+            model_path,
+            mmproj_path,
+            gpu_layers,
+            port,
+        )
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+            env=dict(os.environ),
+            **_macos_posix_spawn_kwargs(),
+        )
+        _VOXTRAL_REALTIME_LLAMA_CPP_STATE.update(
+            {
+                "process": proc,
+                "base_url": base_url,
+                "model_path": model_path,
+                "mmproj_path": mmproj_path,
+                "api_key": api_key,
+                "stdout_tail": stdout_tail,
+                "stderr_tail": stderr_tail,
+                "started_ts": time.time(),
+                "gpu_layers": gpu_layers,
+            }
+        )
+        threading.Thread(
+            target=_qwen3_asr_llama_cpp_drain_stream,
+            args=(proc.stdout, stdout_tail),
+            daemon=True,
+            name="tater-voxtral-realtime-stdout",
+        ).start()
+        threading.Thread(
+            target=_qwen3_asr_llama_cpp_drain_stream,
+            args=(proc.stderr, stderr_tail),
+            daemon=True,
+            name="tater-voxtral-realtime-stderr",
+        ).start()
+
+        timeout_s = vp._as_float(
+            os.getenv("TATER_VOXTRAL_REALTIME_LLAMA_CPP_STARTUP_TIMEOUT_S"),
+            vp.DEFAULT_VOXTRAL_REALTIME_LLAMA_CPP_STARTUP_TIMEOUT_SECONDS,
+            minimum=10.0,
+            maximum=600.0,
+        )
+        deadline = time.monotonic() + timeout_s
+        error = ""
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                error = f"llama-server exited with code {proc.returncode}"
+                break
+            try:
+                response = requests.get(f"{base_url}/health", timeout=1.0)
+                if response.status_code == 200:
+                    return _voxtral_realtime_llama_cpp_runtime_snapshot()
+            except Exception:
+                pass
+            time.sleep(0.1)
+
+        logs = " | ".join((stderr_tail or stdout_tail)[-10:])
+        _shutdown_voxtral_realtime_llama_cpp_server()
+        detail = error or f"llama-server was not ready after {timeout_s:.1f}s"
+        if logs:
+            detail = f"{detail}. Logs: {logs}"
+        raise RuntimeError(f"Voxtral Realtime llama.cpp startup failed: {detail}")
+
+
+def _lfm3_audio_llama_cpp_repo() -> str:
+    vp = _vp()
+    return (
+        vp._text(os.getenv("TATER_LFM3_AUDIO_LLAMA_CPP_REPO"))
+        or vp.DEFAULT_LFM3_AUDIO_LLAMA_CPP_REPO
+    )
+
+
+def _lfm3_audio_llama_cpp_model_file() -> str:
+    vp = _vp()
+    return (
+        vp._text(os.getenv("TATER_LFM3_AUDIO_LLAMA_CPP_MODEL_FILE"))
+        or vp.DEFAULT_LFM3_AUDIO_LLAMA_CPP_MODEL_FILE
+    )
+
+
+def _lfm3_audio_llama_cpp_mmproj_file() -> str:
+    vp = _vp()
+    return (
+        vp._text(os.getenv("TATER_LFM3_AUDIO_LLAMA_CPP_MMPROJ_FILE"))
+        or vp.DEFAULT_LFM3_AUDIO_LLAMA_CPP_MMPROJ_FILE
+    )
+
+
+def _lfm3_audio_llama_cpp_model_paths(*, download: bool) -> Tuple[str, str]:
+    vp = _vp()
+    root = vp._ensure_stt_backend_model_root("lfm3_audio_llama_cpp")
+    model_file = _lfm3_audio_llama_cpp_model_file()
+    mmproj_file = _lfm3_audio_llama_cpp_mmproj_file()
+    model_path = os.path.join(root, model_file)
+    mmproj_path = os.path.join(root, mmproj_file)
+    if download and (not os.path.isfile(model_path) or not os.path.isfile(mmproj_path)):
+        huggingface_hub = importlib.import_module("huggingface_hub")
+        vp.logger.info(
+            "[native-voice] LFM3-Audio llama.cpp download repo=%s model=%s mmproj=%s root=%s",
+            _lfm3_audio_llama_cpp_repo(),
+            model_file,
+            mmproj_file,
+            root,
+        )
+        with _temporary_env(
+            huggingface_environment(
+                {
+                    "HF_HOME": root,
+                    "HF_HUB_CACHE": os.path.join(root, "hub"),
+                    "HUGGINGFACE_HUB_CACHE": os.path.join(root, "hub"),
+                }
+            )
+        ):
+            huggingface_hub.snapshot_download(
+                repo_id=_lfm3_audio_llama_cpp_repo(),
+                local_dir=root,
+                allow_patterns=[model_file, mmproj_file],
+            )
+    missing = [path for path in (model_path, mmproj_path) if not os.path.isfile(path)]
+    if missing:
+        raise RuntimeError(
+            "LFM3-Audio llama.cpp model files are missing after download: "
+            + ", ".join(missing)
+        )
+    return model_path, mmproj_path
+
+
+def _lfm3_audio_llama_cpp_available() -> Tuple[bool, str]:
+    if websocket_connect is None:
+        return False, f"websockets dependency unavailable: {WEBSOCKETS_IMPORT_ERROR or 'unknown import error'}"
+    server_bin = _llama_cpp_native_server_bin()
+    if not server_bin:
+        return False, "Tater's native llama-server binary was not found"
+    try:
+        model_path, mmproj_path = _lfm3_audio_llama_cpp_model_paths(download=False)
+    except Exception:
+        model_path = mmproj_path = ""
+    if model_path and mmproj_path:
+        return True, ""
+    if importlib.util.find_spec("huggingface_hub") is None:
+        return False, "huggingface-hub is required to download the LFM3-Audio GGUF files"
+    return True, ""
+
+
+def _lfm3_audio_llama_cpp_runtime_snapshot() -> Dict[str, Any]:
+    with _LFM3_AUDIO_LLAMA_CPP_PROCESS_LOCK:
+        proc = _LFM3_AUDIO_LLAMA_CPP_STATE.get("process")
+        running = bool(proc is not None and callable(getattr(proc, "poll", None)) and proc.poll() is None)
+        return {
+            "running": running,
+            "pid": int(getattr(proc, "pid", 0) or 0) if running else 0,
+            "base_url": str(_LFM3_AUDIO_LLAMA_CPP_STATE.get("base_url") or ""),
+            "model_path": str(_LFM3_AUDIO_LLAMA_CPP_STATE.get("model_path") or ""),
+            "mmproj_path": str(_LFM3_AUDIO_LLAMA_CPP_STATE.get("mmproj_path") or ""),
+            "started_ts": float(_LFM3_AUDIO_LLAMA_CPP_STATE.get("started_ts") or 0.0),
+            "gpu_layers": max(0, int(_LFM3_AUDIO_LLAMA_CPP_STATE.get("gpu_layers") or 0)),
+            "stdout_tail": list(_LFM3_AUDIO_LLAMA_CPP_STATE.get("stdout_tail") or [])[-20:],
+            "stderr_tail": list(_LFM3_AUDIO_LLAMA_CPP_STATE.get("stderr_tail") or [])[-20:],
+        }
+
+
+def _lfm3_audio_llama_cpp_gpu_layers() -> int:
+    vp = _vp()
+    if vp._effective_speech_acceleration() == "cpu":
+        return 0
+    return vp._as_int(
+        os.getenv("TATER_LFM3_AUDIO_LLAMA_CPP_N_GPU_LAYERS"),
+        999,
+        minimum=0,
+        maximum=999,
+    )
+
+
+def _lfm3_audio_llama_cpp_server_command(
+    *,
+    server_bin: str,
+    model_path: str,
+    mmproj_path: str,
+    port: int,
+    api_key: str,
+) -> List[str]:
+    vp = _vp()
+    context_size = vp._as_int(
+        os.getenv("TATER_LFM3_AUDIO_LLAMA_CPP_CONTEXT_SIZE"),
+        vp.DEFAULT_LFM3_AUDIO_LLAMA_CPP_CONTEXT_SIZE,
+        minimum=2048,
+        maximum=131072,
+    )
+    return [
+        server_bin,
+        "--model",
+        model_path,
+        "--mmproj",
+        mmproj_path,
+        "--host",
+        "127.0.0.1",
+        "--port",
+        str(int(port)),
+        "--ctx-size",
+        str(int(context_size)),
+        "--n-gpu-layers",
+        str(_lfm3_audio_llama_cpp_gpu_layers()),
+        "--parallel",
+        "2",
+        "--temp",
+        "0.0",
+        "--alias",
+        "lfm3-audio",
+        "--api-key",
+        api_key,
+        "--no-ui",
+        "--no-context-shift",
+        "--cache-ram",
+        "0",
+    ]
+
+
+def _shutdown_lfm3_audio_llama_cpp_server() -> None:
+    with _LFM3_AUDIO_LLAMA_CPP_PROCESS_LOCK:
+        proc = _LFM3_AUDIO_LLAMA_CPP_STATE.get("process")
+        _LFM3_AUDIO_LLAMA_CPP_STATE.update(
+            {
+                "process": None,
+                "base_url": "",
+                "model_path": "",
+                "mmproj_path": "",
+                "api_key": "",
+                "stdout_tail": [],
+                "stderr_tail": [],
+                "started_ts": 0.0,
+                "gpu_layers": 0,
+            }
+        )
+    if proc is None or not callable(getattr(proc, "poll", None)) or proc.poll() is not None:
+        return
+    with contextlib.suppress(Exception):
+        proc.terminate()
+    try:
+        proc.wait(timeout=10.0)
+    except Exception:
+        with contextlib.suppress(Exception):
+            proc.kill()
+        with contextlib.suppress(Exception):
+            proc.wait(timeout=5.0)
+
+
+def _load_lfm3_audio_llama_cpp_server() -> Dict[str, Any]:
+    vp = _vp()
+    with _LFM3_AUDIO_LLAMA_CPP_PROCESS_LOCK:
+        proc = _LFM3_AUDIO_LLAMA_CPP_STATE.get("process")
+        if proc is not None and callable(getattr(proc, "poll", None)) and proc.poll() is None:
+            return _lfm3_audio_llama_cpp_runtime_snapshot()
+
+        model_path, mmproj_path = _lfm3_audio_llama_cpp_model_paths(download=True)
+        server_bin = _llama_cpp_native_server_bin()
+        if not server_bin:
+            raise RuntimeError("Tater's native llama-server binary was not found")
+        port = _llama_cpp_native_free_port()
+        base_url = f"http://127.0.0.1:{int(port)}"
+        api_key = os.urandom(24).hex()
+        stdout_tail: List[str] = []
+        stderr_tail: List[str] = []
+        gpu_layers = _lfm3_audio_llama_cpp_gpu_layers()
+        cmd = _lfm3_audio_llama_cpp_server_command(
+            server_bin=server_bin,
+            model_path=model_path,
+            mmproj_path=mmproj_path,
+            port=port,
+            api_key=api_key,
+        )
+        vp.logger.info(
+            "[native-voice] starting LFM3-Audio llama.cpp server model=%s mmproj=%s gpu_layers=%s port=%s",
+            model_path,
+            mmproj_path,
+            gpu_layers,
+            port,
+        )
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+            env=dict(os.environ),
+            **_macos_posix_spawn_kwargs(),
+        )
+        _LFM3_AUDIO_LLAMA_CPP_STATE.update(
+            {
+                "process": proc,
+                "base_url": base_url,
+                "model_path": model_path,
+                "mmproj_path": mmproj_path,
+                "api_key": api_key,
+                "stdout_tail": stdout_tail,
+                "stderr_tail": stderr_tail,
+                "started_ts": time.time(),
+                "gpu_layers": gpu_layers,
+            }
+        )
+        threading.Thread(
+            target=_qwen3_asr_llama_cpp_drain_stream,
+            args=(proc.stdout, stdout_tail),
+            daemon=True,
+            name="tater-lfm3-audio-stdout",
+        ).start()
+        threading.Thread(
+            target=_qwen3_asr_llama_cpp_drain_stream,
+            args=(proc.stderr, stderr_tail),
+            daemon=True,
+            name="tater-lfm3-audio-stderr",
+        ).start()
+
+        timeout_s = vp._as_float(
+            os.getenv("TATER_LFM3_AUDIO_LLAMA_CPP_STARTUP_TIMEOUT_S"),
+            vp.DEFAULT_LFM3_AUDIO_LLAMA_CPP_STARTUP_TIMEOUT_SECONDS,
+            minimum=10.0,
+            maximum=600.0,
+        )
+        deadline = time.monotonic() + timeout_s
+        error = ""
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                error = f"llama-server exited with code {proc.returncode}"
+                break
+            try:
+                response = requests.get(f"{base_url}/health", timeout=1.0)
+                if response.status_code == 200:
+                    return _lfm3_audio_llama_cpp_runtime_snapshot()
+            except Exception:
+                pass
+            time.sleep(0.1)
+
+        logs = " | ".join((stderr_tail or stdout_tail)[-10:])
+        _shutdown_lfm3_audio_llama_cpp_server()
+        detail = error or f"llama-server was not ready after {timeout_s:.1f}s"
+        if logs:
+            detail = f"{detail}. Logs: {logs}"
+        raise RuntimeError(f"LFM3-Audio llama.cpp startup failed: {detail}")
 
 
 def _qwen3_asr_llama_cpp_response_text(payload: Any) -> str:
@@ -734,24 +1355,6 @@ def _load_parakeet_onnx_model() -> Any:
         return model
 
 
-def _load_vosk_model() -> Any:
-    vp = _vp()
-    if vp.VoskModel is None:
-        raise RuntimeError(f"vosk dependency unavailable: {vp.VOSK_IMPORT_ERROR or 'unknown import error'}")
-
-    model_path = vp._resolve_vosk_model_path()
-    if not os.path.isdir(model_path) or not vp._looks_like_vosk_model_dir(model_path):
-        raise RuntimeError(f"Vosk STT selected but no extracted model was found under {vp._stt_backend_model_root('vosk')}")
-
-    with vp._vosk_model_lock:
-        model = vp._vosk_model_cache.get(model_path)
-        if model is None:
-            vp.logger.info("[native-voice] vosk model source=%s", model_path)
-            model = vp.VoskModel(model_path)
-            vp._vosk_model_cache[model_path] = model
-        return model
-
-
 def _transcribe_faster_whisper_sync(
     audio_bytes: bytes,
     audio_format: Dict[str, int],
@@ -832,44 +1435,6 @@ def _transcribe_parakeet_onnx_sync(
     with _PARAKEET_ONNX_TRANSCRIBE_LOCK:
         result = model.recognize(audio_np, **kwargs)
     return re.sub(r"\s+", " ", vp._text(result)).strip()
-
-
-def _vosk_result_text(payload: Any) -> str:
-    vp = _vp()
-    raw = vp._text(payload)
-    if not raw:
-        return ""
-    with contextlib.suppress(Exception):
-        parsed = json.loads(raw)
-        if isinstance(parsed, dict):
-            return vp._text(parsed.get("text"))
-    return ""
-
-
-def _transcribe_vosk_sync(audio_bytes: bytes, audio_format: Dict[str, int]) -> str:
-    vp = _vp()
-    pcm16, _state = vp._pcm_to_pcm16_mono_16k(audio_bytes, audio_format)
-    if not pcm16:
-        return ""
-
-    model = _load_vosk_model()
-    recognizer = vp.KaldiRecognizer(model, 16000.0)
-    with contextlib.suppress(Exception):
-        recognizer.SetWords(False)
-    parts: List[str] = []
-    chunk_size = 4000
-    for offset in range(0, len(pcm16), chunk_size):
-        chunk = pcm16[offset : offset + chunk_size]
-        if not chunk:
-            continue
-        if recognizer.AcceptWaveform(chunk):
-            text = _vosk_result_text(recognizer.Result())
-            if text:
-                parts.append(text)
-    final_text = _vosk_result_text(recognizer.FinalResult())
-    if final_text:
-        parts.append(final_text)
-    return re.sub(r"\s+", " ", " ".join(part for part in parts if part)).strip()
 
 
 def _wyoming_timeout_s() -> float:
@@ -1031,6 +1596,629 @@ async def _native_wyoming_refresh_tts_voices() -> Dict[str, Any]:
     return {"host": host, "port": port, "voices": voices, "count": len(voices)}
 
 
+def _realtime_llama_cpp_error_message(event: Dict[str, Any], backend_label: str) -> str:
+    error = event.get("error")
+    if isinstance(error, dict):
+        return str(error.get("message") or error.get("code") or f"{backend_label} server error")
+    return str(error or event.get("message") or f"{backend_label} server error")
+
+
+def _realtime_transcription_delta(event: Dict[str, Any]) -> str:
+    """Return a realtime STT delta without discarding token whitespace.
+
+    llama.cpp emits word-boundary spaces inside ``delta`` values. The normal
+    ``_text`` helper intentionally strips user-facing strings, so applying it
+    to every delta turns ``[\"turn\", \" on\", \" the lights\"]`` into
+    ``turnonthelights`` until the completed transcript replaces the preview.
+    """
+    value = event.get("delta")
+    if isinstance(value, str):
+        return value
+    return _vp()._text(value)
+
+
+class _RealtimeWakeVerifierClient:
+    """Keep one configured realtime session warm for short wake checks.
+
+    llama.cpp closes a realtime connection after a commit marked ``final``.
+    Wake checks instead commit independent clips with ``final: false`` so the
+    configured session and its logical slot can be reused. The normal command
+    stream still owns a separate connection and commits with ``final: true``.
+    """
+
+    def __init__(
+        self,
+        *,
+        load_server: Any,
+        process_lock: threading.RLock,
+        state: Dict[str, Any],
+        model_alias: str,
+        backend_label: str,
+    ) -> None:
+        self.load_server = load_server
+        self.process_lock = process_lock
+        self.state = state
+        self.model_alias = model_alias
+        self.backend_label = backend_label
+        self.loop: Optional[asyncio.AbstractEventLoop] = None
+        self.lock: Optional[asyncio.Lock] = None
+        self.connection_context: Any = None
+        self.websocket: Any = None
+        self.base_url = ""
+        self.api_key = ""
+        self.language = ""
+        self.ready_ts = 0.0
+        self.requests = 0
+
+    def _current_lock(self) -> asyncio.Lock:
+        loop = asyncio.get_running_loop()
+        if self.loop is not loop or self.lock is None:
+            # Production uses one server loop. This reset also keeps isolated
+            # asyncio tests and an in-process app restart from reusing objects
+            # that belong to a closed loop.
+            self.loop = loop
+            self.lock = asyncio.Lock()
+            self.connection_context = None
+            self.websocket = None
+            self.base_url = ""
+            self.api_key = ""
+            self.language = ""
+            self.ready_ts = 0.0
+        return self.lock
+
+    async def _close_locked(self) -> None:
+        connection_context = self.connection_context
+        websocket = self.websocket
+        self.connection_context = None
+        self.websocket = None
+        self.base_url = ""
+        self.api_key = ""
+        self.language = ""
+        self.ready_ts = 0.0
+        if connection_context is not None:
+            with contextlib.suppress(BaseException):
+                await connection_context.__aexit__(None, None, None)
+            return
+        close = getattr(websocket, "close", None)
+        if callable(close):
+            with contextlib.suppress(BaseException):
+                result = close()
+                if hasattr(result, "__await__"):
+                    await result
+
+    def _connection_usable(self, *, base_url: str, api_key: str, language: str) -> bool:
+        websocket = self.websocket
+        if websocket is None:
+            return False
+        if self.base_url != base_url or self.api_key != api_key or self.language != language:
+            return False
+        if getattr(websocket, "close_code", None) is not None:
+            return False
+        return True
+
+    async def _ensure_connected_locked(self, language: Optional[str]) -> Any:
+        vp = _vp()
+        if websocket_connect is None:
+            raise RuntimeError(
+                f"websockets dependency unavailable: {WEBSOCKETS_IMPORT_ERROR or 'unknown import error'}"
+            )
+
+        runtime = await run_stt(self.load_server)
+        base_url = vp._text(runtime.get("base_url"))
+        with self.process_lock:
+            api_key = vp._text(self.state.get("api_key"))
+        if not base_url or not api_key:
+            raise RuntimeError(
+                f"{self.backend_label} llama.cpp server did not expose a usable endpoint"
+            )
+
+        language_token = vp._text(language)
+        if self._connection_usable(
+            base_url=base_url,
+            api_key=api_key,
+            language=language_token,
+        ):
+            return self.websocket
+
+        await self._close_locked()
+        query = urlencode({"model": self.model_alias, "intent": "transcription"})
+        websocket_url = f"{base_url.replace('http://', 'ws://', 1)}/v1/realtime?{query}"
+        timeout_s = vp._get_float_setting(
+            "VOICE_NATIVE_LOCAL_STT_TIMEOUT_S",
+            vp.DEFAULT_LOCAL_STT_TIMEOUT_SECONDS,
+            minimum=5.0,
+            maximum=180.0,
+        )
+        connection_context = websocket_connect(
+            websocket_url,
+            additional_headers={"Authorization": f"Bearer {api_key}"},
+            open_timeout=min(30.0, timeout_s),
+            close_timeout=5.0,
+            max_size=None,
+            ping_interval=20.0,
+            ping_timeout=20.0,
+        )
+        websocket = await connection_context.__aenter__()
+        try:
+            created = json.loads(await asyncio.wait_for(websocket.recv(), timeout=timeout_s))
+            if created.get("type") == "error":
+                raise RuntimeError(
+                    _realtime_llama_cpp_error_message(created, self.backend_label)
+                )
+            if created.get("type") != "session.created":
+                raise RuntimeError(
+                    f"{self.backend_label} expected session.created, "
+                    f"received {created.get('type') or 'unknown'}"
+                )
+            session_info = created.get("session") if isinstance(created.get("session"), dict) else {}
+            input_rate = (
+                (((session_info.get("audio") or {}).get("input") or {}).get("format") or {}).get("rate")
+            )
+            if input_rate not in (None, 16000, "16000"):
+                raise RuntimeError(
+                    f"{self.backend_label} requested unsupported input rate {input_rate}"
+                )
+
+            session_update: Dict[str, Any] = {"type": "transcription"}
+            if language_token:
+                session_update["audio"] = {
+                    "input": {"transcription": {"language": language_token}}
+                }
+            await websocket.send(
+                json.dumps({"type": "session.update", "session": session_update})
+            )
+            updated = json.loads(await asyncio.wait_for(websocket.recv(), timeout=timeout_s))
+            if updated.get("type") == "error":
+                raise RuntimeError(
+                    _realtime_llama_cpp_error_message(updated, self.backend_label)
+                )
+            if updated.get("type") != "session.updated":
+                raise RuntimeError(
+                    f"{self.backend_label} expected session.updated, "
+                    f"received {updated.get('type') or 'unknown'}"
+                )
+        except BaseException:
+            with contextlib.suppress(BaseException):
+                await connection_context.__aexit__(None, None, None)
+            raise
+
+        self.connection_context = connection_context
+        self.websocket = websocket
+        self.base_url = base_url
+        self.api_key = api_key
+        self.language = language_token
+        self.ready_ts = time.time()
+        return websocket
+
+    async def warm(self, *, language: Optional[str] = "en") -> Dict[str, Any]:
+        lock = self._current_lock()
+        async with lock:
+            await self._ensure_connected_locked(language)
+            return self.snapshot()
+
+    async def transcribe(
+        self,
+        audio_bytes: bytes,
+        audio_format: Dict[str, int],
+        language: Optional[str],
+    ) -> str:
+        vp = _vp()
+        pcm16, _ratecv_state = vp._pcm_to_pcm16_mono_16k(
+            bytes(audio_bytes or b""),
+            audio_format,
+        )
+        if not pcm16:
+            return ""
+
+        last_error: Optional[BaseException] = None
+        for attempt in range(2):
+            lock = self._current_lock()
+            async with lock:
+                try:
+                    websocket = await self._ensure_connected_locked(language)
+                    await websocket.send(
+                        json.dumps(
+                            {
+                                "type": "input_audio_buffer.append",
+                                "audio": base64.b64encode(pcm16).decode("ascii"),
+                            }
+                        )
+                    )
+                    # ``final: false`` asks llama.cpp to transcribe and clear
+                    # this utterance while leaving the configured session open.
+                    await websocket.send(
+                        json.dumps({"type": "input_audio_buffer.commit", "final": False})
+                    )
+                    delta_parts: List[str] = []
+                    timeout_s = vp._get_float_setting(
+                        "VOICE_NATIVE_LOCAL_STT_TIMEOUT_S",
+                        vp.DEFAULT_LOCAL_STT_TIMEOUT_SECONDS,
+                        minimum=5.0,
+                        maximum=180.0,
+                    )
+                    while True:
+                        raw_event = await asyncio.wait_for(websocket.recv(), timeout=timeout_s)
+                        event = json.loads(raw_event)
+                        event_type = vp._text(event.get("type"))
+                        if event_type == "conversation.item.input_audio_transcription.delta":
+                            delta = _realtime_transcription_delta(event)
+                            if delta:
+                                delta_parts.append(delta)
+                            continue
+                        if event_type == "conversation.item.input_audio_transcription.completed":
+                            transcript = vp._text(event.get("transcript")) or "".join(delta_parts)
+                            self.requests += 1
+                            return vp._sanitize_stt_transcript(transcript)
+                        if event_type == "error":
+                            raise RuntimeError(
+                                _realtime_llama_cpp_error_message(event, self.backend_label)
+                            )
+                except asyncio.CancelledError:
+                    # A verifier timeout can leave an in-flight result on this
+                    # socket. Close it so the next request never consumes stale
+                    # transcription events.
+                    await self._close_locked()
+                    raise
+                except BaseException as exc:
+                    last_error = exc
+                    await self._close_locked()
+            if attempt == 0:
+                continue
+        if last_error is not None:
+            raise last_error
+        return ""
+
+    async def close(self) -> None:
+        lock = self._current_lock()
+        async with lock:
+            await self._close_locked()
+
+    def snapshot(self) -> Dict[str, Any]:
+        return {
+            "backend": self.model_alias,
+            "connected": bool(self.websocket is not None and self.ready_ts > 0.0),
+            "ready_ts": float(self.ready_ts or 0.0),
+            "requests": int(self.requests or 0),
+        }
+
+
+_REALTIME_WAKE_VERIFIER_CLIENTS: Dict[str, _RealtimeWakeVerifierClient] = {}
+
+
+def _realtime_wake_verifier_client(backend: str) -> _RealtimeWakeVerifierClient:
+    vp = _vp()
+    token = vp._normalize_stt_backend(backend)
+    client = _REALTIME_WAKE_VERIFIER_CLIENTS.get(token)
+    if client is not None:
+        return client
+    if token == "voxtral_realtime_llama_cpp":
+        client = _RealtimeWakeVerifierClient(
+            load_server=_load_voxtral_realtime_llama_cpp_server,
+            process_lock=_VOXTRAL_REALTIME_LLAMA_CPP_PROCESS_LOCK,
+            state=_VOXTRAL_REALTIME_LLAMA_CPP_STATE,
+            model_alias="voxtral-realtime",
+            backend_label="Voxtral Realtime",
+        )
+    elif token == "lfm3_audio_llama_cpp":
+        client = _RealtimeWakeVerifierClient(
+            load_server=_load_lfm3_audio_llama_cpp_server,
+            process_lock=_LFM3_AUDIO_LLAMA_CPP_PROCESS_LOCK,
+            state=_LFM3_AUDIO_LLAMA_CPP_STATE,
+            model_alias="lfm3-audio",
+            backend_label="LFM3-Audio",
+        )
+    else:
+        raise RuntimeError(f"Unsupported realtime wake-verifier backend: {token}")
+    _REALTIME_WAKE_VERIFIER_CLIENTS[token] = client
+    return client
+
+
+async def _warm_realtime_wake_verifier_backend(backend: str) -> Dict[str, Any]:
+    client = _realtime_wake_verifier_client(backend)
+    snapshot = await client.warm(language="en")
+    _vp().logger.info(
+        "[wake-verifier] warmed persistent %s session requests=%s",
+        snapshot.get("backend"),
+        snapshot.get("requests"),
+    )
+    return snapshot
+
+
+async def _close_realtime_wake_verifier_backend(backend: str) -> None:
+    vp = _vp()
+    token = vp._normalize_stt_backend(backend)
+    client = _REALTIME_WAKE_VERIFIER_CLIENTS.get(token)
+    if client is not None:
+        await client.close()
+
+
+async def _close_all_realtime_wake_verifier_sessions() -> None:
+    for client in list(_REALTIME_WAKE_VERIFIER_CLIENTS.values()):
+        with contextlib.suppress(BaseException):
+            await client.close()
+
+
+async def _transcribe_realtime_wake_verifier_audio_bytes(
+    *,
+    backend: str,
+    audio_bytes: bytes,
+    audio_format: Dict[str, int],
+    language: Optional[str],
+) -> str:
+    client = _realtime_wake_verifier_client(backend)
+    return await client.transcribe(audio_bytes, audio_format, language)
+
+
+async def _realtime_llama_cpp_transcribe_queue(
+    *,
+    queue: asyncio.Queue,
+    audio_format: Dict[str, int],
+    language: Optional[str],
+    load_server: Any,
+    process_lock: threading.RLock,
+    state: Dict[str, Any],
+    model_alias: str,
+    backend_label: str,
+    sender_task_name: str,
+    session_ref: Optional[VoiceSessionRuntime] = None,
+) -> str:
+    vp = _vp()
+    if websocket_connect is None:
+        raise RuntimeError(
+            f"websockets dependency unavailable: {WEBSOCKETS_IMPORT_ERROR or 'unknown import error'}"
+        )
+
+    runtime = await run_stt(load_server)
+    base_url = vp._text(runtime.get("base_url"))
+    with process_lock:
+        api_key = vp._text(state.get("api_key"))
+    if not base_url or not api_key:
+        raise RuntimeError(f"{backend_label} llama.cpp server did not expose a usable endpoint")
+
+    query = urlencode({"model": model_alias, "intent": "transcription"})
+    websocket_url = f"{base_url.replace('http://', 'ws://', 1)}/v1/realtime?{query}"
+    timeout_s = vp._get_float_setting(
+        "VOICE_NATIVE_LOCAL_STT_TIMEOUT_S",
+        vp.DEFAULT_LOCAL_STT_TIMEOUT_SECONDS,
+        minimum=5.0,
+        maximum=180.0,
+    )
+    headers = {"Authorization": f"Bearer {api_key}"}
+    delta_parts: List[str] = []
+
+    async with websocket_connect(
+        websocket_url,
+        additional_headers=headers,
+        open_timeout=min(30.0, timeout_s),
+        close_timeout=5.0,
+        max_size=None,
+    ) as websocket:
+        created = json.loads(await asyncio.wait_for(websocket.recv(), timeout=timeout_s))
+        if created.get("type") == "error":
+            raise RuntimeError(_realtime_llama_cpp_error_message(created, backend_label))
+        if created.get("type") != "session.created":
+            raise RuntimeError(
+                f"{backend_label} expected session.created, received {created.get('type') or 'unknown'}"
+            )
+        session_info = created.get("session") if isinstance(created.get("session"), dict) else {}
+        input_rate = (
+            (((session_info.get("audio") or {}).get("input") or {}).get("format") or {}).get("rate")
+        )
+        if input_rate not in (None, 16000, "16000"):
+            raise RuntimeError(f"{backend_label} requested unsupported input rate {input_rate}")
+
+        session_update: Dict[str, Any] = {"type": "transcription"}
+        language_token = vp._text(language)
+        if language_token:
+            session_update["audio"] = {
+                "input": {"transcription": {"language": language_token}}
+            }
+        await websocket.send(
+            json.dumps({"type": "session.update", "session": session_update})
+        )
+        updated = json.loads(await asyncio.wait_for(websocket.recv(), timeout=timeout_s))
+        if updated.get("type") == "error":
+            raise RuntimeError(_realtime_llama_cpp_error_message(updated, backend_label))
+        if updated.get("type") != "session.updated":
+            raise RuntimeError(
+                f"{backend_label} expected session.updated, received {updated.get('type') or 'unknown'}"
+            )
+
+        async def _sender() -> None:
+            ratecv_state: Any = None
+            while True:
+                chunk = await queue.get()
+                if chunk is None:
+                    await websocket.send(
+                        json.dumps({"type": "input_audio_buffer.commit", "final": True})
+                    )
+                    return
+                pcm16, ratecv_state = vp._pcm_to_pcm16_mono_16k(
+                    bytes(chunk),
+                    audio_format,
+                    ratecv_state=ratecv_state,
+                )
+                if not pcm16:
+                    continue
+                await websocket.send(
+                    json.dumps(
+                        {
+                            "type": "input_audio_buffer.append",
+                            "audio": base64.b64encode(pcm16).decode("ascii"),
+                        }
+                    )
+                )
+
+        sender_task = asyncio.create_task(_sender(), name=sender_task_name)
+        try:
+            while True:
+                raw_event = await asyncio.wait_for(websocket.recv(), timeout=timeout_s)
+                event = json.loads(raw_event)
+                event_type = vp._text(event.get("type"))
+                if event_type == "conversation.item.input_audio_transcription.delta":
+                    delta = _realtime_transcription_delta(event)
+                    if delta:
+                        delta_parts.append(delta)
+                        if isinstance(session_ref, VoiceSessionRuntime):
+                            partial = "".join(delta_parts).strip()
+                            session_ref.partial_transcript = partial
+                            session_ref.partial_transcript_updates += 1
+                            session_ref.partial_transcript_updated_ts = vp._now()
+                            await vp._publish_conversation_display(
+                                session_ref,
+                                phase="listening",
+                                user_text=partial,
+                                user_final=False,
+                            )
+                    continue
+                if event_type == "conversation.item.input_audio_transcription.completed":
+                    transcript = vp._text(event.get("transcript")) or "".join(delta_parts)
+                    transcript = vp._sanitize_stt_transcript(transcript)
+                    if isinstance(session_ref, VoiceSessionRuntime):
+                        session_ref.stt_transcript = transcript
+                    return transcript
+                if event_type == "error":
+                    raise RuntimeError(_realtime_llama_cpp_error_message(event, backend_label))
+        finally:
+            if not sender_task.done():
+                sender_task.cancel()
+            await asyncio.gather(sender_task, return_exceptions=True)
+
+
+async def _voxtral_realtime_transcribe_queue(
+    *,
+    queue: asyncio.Queue,
+    audio_format: Dict[str, int],
+    language: Optional[str],
+    session_ref: Optional[VoiceSessionRuntime] = None,
+) -> str:
+    return await _realtime_llama_cpp_transcribe_queue(
+        queue=queue,
+        audio_format=audio_format,
+        language=language,
+        load_server=_load_voxtral_realtime_llama_cpp_server,
+        process_lock=_VOXTRAL_REALTIME_LLAMA_CPP_PROCESS_LOCK,
+        state=_VOXTRAL_REALTIME_LLAMA_CPP_STATE,
+        model_alias="voxtral-realtime",
+        backend_label="Voxtral Realtime",
+        sender_task_name="voxtral-realtime-audio-sender",
+        session_ref=session_ref,
+    )
+
+
+async def _lfm3_audio_transcribe_queue(
+    *,
+    queue: asyncio.Queue,
+    audio_format: Dict[str, int],
+    language: Optional[str],
+    session_ref: Optional[VoiceSessionRuntime] = None,
+) -> str:
+    return await _realtime_llama_cpp_transcribe_queue(
+        queue=queue,
+        audio_format=audio_format,
+        language=language,
+        load_server=_load_lfm3_audio_llama_cpp_server,
+        process_lock=_LFM3_AUDIO_LLAMA_CPP_PROCESS_LOCK,
+        state=_LFM3_AUDIO_LLAMA_CPP_STATE,
+        model_alias="lfm3-audio",
+        backend_label="LFM3-Audio",
+        sender_task_name="lfm3-audio-audio-sender",
+        session_ref=session_ref,
+    )
+
+
+async def _native_voxtral_realtime_stream_stt_task(
+    token: str,
+    session_id: str,
+    queue: asyncio.Queue,
+    audio_format: Dict[str, int],
+    language: Optional[str],
+    session_ref: Optional[VoiceSessionRuntime] = None,
+) -> None:
+    vp = _vp()
+    vp._native_debug(
+        f"STT (Voxtral Realtime stream) connect selector={token} session_id={session_id}"
+    )
+    try:
+        transcript = await _voxtral_realtime_transcribe_queue(
+            queue=queue,
+            audio_format=audio_format,
+            language=language,
+            session_ref=session_ref,
+        )
+        vp._native_debug(f"STT Voxtral Realtime transcript={transcript!r}")
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        vp._native_debug(f"Voxtral Realtime STT stream failed: {exc}")
+        if isinstance(session_ref, VoiceSessionRuntime):
+            vp._mark_stt_stream_unhealthy(
+                session_ref,
+                f"voxtral_realtime_stream_failed:{vp._text(exc) or type(exc).__name__}",
+            )
+
+
+async def _transcribe_voxtral_realtime_audio_bytes(
+    audio_bytes: bytes,
+    audio_format: Dict[str, int],
+    language: Optional[str],
+) -> str:
+    queue: asyncio.Queue = asyncio.Queue(maxsize=2)
+    queue.put_nowait(bytes(audio_bytes or b""))
+    queue.put_nowait(None)
+    return await _voxtral_realtime_transcribe_queue(
+        queue=queue,
+        audio_format=audio_format,
+        language=language,
+    )
+
+
+async def _native_lfm3_audio_stream_stt_task(
+    token: str,
+    session_id: str,
+    queue: asyncio.Queue,
+    audio_format: Dict[str, int],
+    language: Optional[str],
+    session_ref: Optional[VoiceSessionRuntime] = None,
+) -> None:
+    vp = _vp()
+    vp._native_debug(
+        f"STT (LFM3-Audio stream) connect selector={token} session_id={session_id}"
+    )
+    try:
+        transcript = await _lfm3_audio_transcribe_queue(
+            queue=queue,
+            audio_format=audio_format,
+            language=language,
+            session_ref=session_ref,
+        )
+        vp._native_debug(f"STT LFM3-Audio transcript={transcript!r}")
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        vp._native_debug(f"LFM3-Audio STT stream failed: {exc}")
+        if isinstance(session_ref, VoiceSessionRuntime):
+            vp._mark_stt_stream_unhealthy(
+                session_ref,
+                f"lfm3_audio_stream_failed:{vp._text(exc) or type(exc).__name__}",
+            )
+
+
+async def _transcribe_lfm3_audio_audio_bytes(
+    audio_bytes: bytes,
+    audio_format: Dict[str, int],
+    language: Optional[str],
+) -> str:
+    queue: asyncio.Queue = asyncio.Queue(maxsize=2)
+    queue.put_nowait(bytes(audio_bytes or b""))
+    queue.put_nowait(None)
+    return await _lfm3_audio_transcribe_queue(
+        queue=queue,
+        audio_format=audio_format,
+        language=language,
+    )
+
+
 async def _native_wyoming_stream_stt_task(
     token: str,
     session_id: str,
@@ -1070,6 +2258,7 @@ async def _native_wyoming_stream_stt_task(
 
             async def _update_session_transcript(*, transcript: str, final: bool) -> None:
                 text_value = vp._text(transcript)
+                target_session: Optional[VoiceSessionRuntime] = None
                 runtime = vp._selector_runtime(token)
                 if runtime and "lock" in runtime:
                     async with runtime.get("lock"):
@@ -1081,8 +2270,8 @@ async def _native_wyoming_stream_stt_task(
                                 sess.partial_transcript = text_value
                                 sess.partial_transcript_updates += 1
                                 sess.partial_transcript_updated_ts = vp._now()
-                            return
-                if isinstance(session_ref, VoiceSessionRuntime):
+                            target_session = sess
+                if target_session is None and isinstance(session_ref, VoiceSessionRuntime):
                     with contextlib.suppress(Exception):
                         if vp._text(session_ref.session_id) == vp._text(session_id):
                             if final:
@@ -1091,6 +2280,14 @@ async def _native_wyoming_stream_stt_task(
                                 session_ref.partial_transcript = text_value
                                 session_ref.partial_transcript_updates += 1
                                 session_ref.partial_transcript_updated_ts = vp._now()
+                            target_session = session_ref
+                if target_session is not None and not final and text_value:
+                    await vp._publish_conversation_display(
+                        target_session,
+                        phase="listening",
+                        user_text=text_value,
+                        user_final=False,
+                    )
 
             async def _reader() -> None:
                 try:
@@ -1246,14 +2443,15 @@ def _buffered_stt_fallback_backend() -> str:
     vp = _vp()
     candidates = []
     default_backend = vp._normalize_stt_backend(vp.DEFAULT_STT_BACKEND)
-    if default_backend != "wyoming":
+    streaming_backends = {"wyoming", "voxtral_realtime_llama_cpp", "lfm3_audio_llama_cpp"}
+    if default_backend not in streaming_backends:
         candidates.append(default_backend)
-    candidates.extend(["parakeet_onnx", "faster_whisper", "vosk"])
+    candidates.extend(["parakeet_onnx", "faster_whisper"])
 
     seen = set()
     for candidate in candidates:
         token = vp._normalize_stt_backend(candidate)
-        if token in seen or token == "wyoming":
+        if token in seen or token in streaming_backends:
             continue
         seen.add(token)
         ok, _reason = vp._stt_backend_available(token)
@@ -1346,13 +2544,19 @@ async def _native_transcribe_session_audio(session: VoiceSessionRuntime) -> str:
                 raise
             backend, _fallback_note = vp._resolve_stt_backend_selected(vp._selected_stt_backend())
             session.stt_backend_effective = backend
-    if backend == "wyoming":
+    if backend in {"wyoming", "voxtral_realtime_llama_cpp", "lfm3_audio_llama_cpp"}:
+        if backend == "voxtral_realtime_llama_cpp":
+            stream_label = "voxtral_realtime"
+        elif backend == "lfm3_audio_llama_cpp":
+            stream_label = "lfm3_audio"
+        else:
+            stream_label = "wyoming"
         if session.stt_task is not None:
             wait_timeout = 2.0 if bool(session.stt_stream_unhealthy) else 15.0
             try:
                 await asyncio.wait_for(session.stt_task, timeout=wait_timeout)
             except asyncio.TimeoutError:
-                vp._mark_stt_stream_unhealthy(session, "wyoming_stream_result_timeout")
+                vp._mark_stt_stream_unhealthy(session, f"{stream_label}_stream_result_timeout")
                 session.stt_task.cancel()
                 with contextlib.suppress(BaseException):
                     await session.stt_task
@@ -1365,7 +2569,7 @@ async def _native_transcribe_session_audio(session: VoiceSessionRuntime) -> str:
         if bool(session.stt_stream_unhealthy):
             buffered = await _transcribe_buffered_stt_fallback(
                 session,
-                vp._text(session.stt_stream_fallback_reason) or "wyoming_stream_unhealthy",
+                vp._text(session.stt_stream_fallback_reason) or f"{stream_label}_stream_unhealthy",
             )
             if buffered:
                 return buffered
@@ -1470,9 +2674,26 @@ async def _native_transcribe_local_audio_bytes(
                 language,
                 bool(partial),
             )
-        elif token == "vosk":
-            vp._native_debug(f"STT ({mode_label} vosk) local selector={selector} session_id={session_id} bytes={len(data)}")
-            transcript = await _run_local_stt_thread(_transcribe_vosk_sync, data, audio_format)
+        elif token == "voxtral_realtime_llama_cpp":
+            vp._native_debug(
+                f"STT ({mode_label} Voxtral Realtime llama.cpp) local selector={selector} "
+                f"session_id={session_id} bytes={len(data)}"
+            )
+            transcript = await _transcribe_voxtral_realtime_audio_bytes(
+                data,
+                audio_format,
+                language,
+            )
+        elif token == "lfm3_audio_llama_cpp":
+            vp._native_debug(
+                f"STT ({mode_label} LFM3-Audio llama.cpp) local selector={selector} "
+                f"session_id={session_id} bytes={len(data)}"
+            )
+            transcript = await _transcribe_lfm3_audio_audio_bytes(
+                data,
+                audio_format,
+                language,
+            )
         else:
             raise RuntimeError(f"Unsupported local STT backend: {token}")
 
@@ -1499,6 +2720,13 @@ async def _native_transcribe_wake_audio_bytes(
 
     if token == "wyoming":
         return await _native_wyoming_transcribe_audio_bytes(data, audio_format, language)
+    if token in {"voxtral_realtime_llama_cpp", "lfm3_audio_llama_cpp"}:
+        return await _transcribe_realtime_wake_verifier_audio_bytes(
+            backend=token,
+            audio_bytes=data,
+            audio_format=audio_format,
+            language=language,
+        )
     if token == "spud_link":
         remote = await spud_link_request_stt_async(
             audio_bytes=data,
@@ -1537,12 +2765,6 @@ async def _native_transcribe_wake_audio_bytes(
                 language,
                 True,
             )
-        elif token == "vosk":
-            transcript = await _run_local_stt_thread(
-                _transcribe_vosk_sync,
-                data,
-                audio_format,
-            )
         else:
             raise RuntimeError(f"Unsupported wake-verifier STT backend: {token}")
     return vp._text(transcript)
@@ -1575,7 +2797,7 @@ async def _native_local_partial_stt_task(
                 if bool(session.processing):
                     return
                 backend = vp._normalize_stt_backend(vp._text(session.stt_backend_effective) or vp._text(session.stt_backend))
-                if backend == "wyoming":
+                if backend in {"wyoming", "voxtral_realtime_llama_cpp", "lfm3_audio_llama_cpp"}:
                     return
                 audio_bytes = bytes(session.audio_buffer or b"")
                 audio_format = dict(session.audio_format or {})
@@ -1628,6 +2850,13 @@ async def _native_local_partial_stt_task(
                     session_ref.partial_transcript = text_value
                     session_ref.partial_transcript_updates += 1
                     session_ref.partial_transcript_updated_ts = vp._now()
+
+            await vp._publish_conversation_display(
+                session,
+                phase="listening",
+                user_text=text_value,
+                user_final=False,
+            )
 
             last_partial = text_value
             last_audio_bytes = len(audio_bytes)

@@ -31,6 +31,65 @@ class Qwen3AsrSettingsTests(unittest.TestCase):
         row = next(item for item in rows if item["value"] == "qwen3_asr_llama_cpp")
         self.assertIn("Experimental", row["label"])
 
+    def test_small_and_large_models_are_selectable(self) -> None:
+        payload = speech_settings.get_speech_ui_payload(
+            {"qwen3_asr_model": speech_settings.QWEN3_ASR_LARGE_MODEL}
+        )
+        rows = payload["stt_model_options_by_backend"]["qwen3_asr_llama_cpp"]
+        self.assertEqual(
+            [row["value"] for row in rows],
+            [
+                speech_settings.DEFAULT_QWEN3_ASR_MODEL,
+                speech_settings.QWEN3_ASR_LARGE_MODEL,
+            ],
+        )
+        self.assertIn("Higher accuracy", rows[1]["description"])
+
+    def test_large_model_aliases_normalize(self) -> None:
+        for value in ("1.7B", "large", "Qwen/Qwen3-ASR-1.7B"):
+            self.assertEqual(
+                speech_settings.normalize_qwen3_asr_model(value),
+                speech_settings.QWEN3_ASR_LARGE_MODEL,
+            )
+
+    def test_selected_model_round_trips_through_speech_settings(self) -> None:
+        with mock.patch.object(
+            speech_settings.redis_client,
+            "hgetall",
+            return_value={"qwen3_asr_model": "large"},
+        ):
+            settings = speech_settings.get_speech_settings()
+        self.assertEqual(
+            settings["qwen3_asr_model"],
+            speech_settings.QWEN3_ASR_LARGE_MODEL,
+        )
+
+        with (
+            mock.patch.object(speech_settings.redis_client, "hset") as hset,
+            mock.patch.object(speech_settings.redis_client, "hdel"),
+        ):
+            speech_settings.save_speech_settings(
+                stt_backend="qwen3_asr_llama_cpp",
+                qwen3_asr_model="large",
+                wyoming_stt_host="",
+                wyoming_stt_port="",
+                tts_backend="wyoming",
+                tts_model="",
+                tts_voice="",
+                wyoming_tts_host="",
+                wyoming_tts_port="",
+                wyoming_tts_voice="",
+                openai_tts_base_url="",
+                openai_tts_api_key="",
+                announcement_tts_backend="same_as_direct",
+                announcement_tts_model="",
+                announcement_tts_voice="",
+            )
+        self.assertEqual(
+            hset.call_args.kwargs["mapping"]["qwen3_asr_model"],
+            speech_settings.QWEN3_ASR_LARGE_MODEL,
+        )
+
 
 class Qwen3AsrBackendTests(unittest.TestCase):
     def tearDown(self) -> None:
@@ -39,6 +98,7 @@ class Qwen3AsrBackendTests(unittest.TestCase):
                 {
                     "process": None,
                     "base_url": "",
+                    "model_id": "",
                     "model_path": "",
                     "mmproj_path": "",
                     "api_key": "",
@@ -74,6 +134,39 @@ class Qwen3AsrBackendTests(unittest.TestCase):
             allow_patterns=[
                 vp.DEFAULT_QWEN3_ASR_LLAMA_CPP_MODEL_FILE,
                 vp.DEFAULT_QWEN3_ASR_LLAMA_CPP_MMPROJ_FILE,
+            ],
+        )
+
+    def test_large_model_paths_download_official_q8_files(self) -> None:
+        hub = SimpleNamespace(snapshot_download=mock.Mock())
+        with tempfile.TemporaryDirectory() as temp_dir:
+            model_path = pathlib.Path(temp_dir, vp.QWEN3_ASR_LARGE_LLAMA_CPP_MODEL_FILE)
+            mmproj_path = pathlib.Path(temp_dir, vp.QWEN3_ASR_LARGE_LLAMA_CPP_MMPROJ_FILE)
+
+            def download(**_kwargs):
+                model_path.touch()
+                mmproj_path.touch()
+
+            hub.snapshot_download.side_effect = download
+            with (
+                mock.patch.object(vp, "_ensure_stt_backend_model_root", return_value=temp_dir),
+                mock.patch.object(
+                    vp,
+                    "_voice_settings_with_shared_speech",
+                    return_value={"VOICE_QWEN3_ASR_MODEL": vp.QWEN3_ASR_LARGE_MODEL},
+                ),
+                mock.patch.object(backends.importlib, "import_module", return_value=hub),
+                mock.patch.object(backends, "huggingface_environment", return_value={}),
+            ):
+                resolved = backends._qwen3_asr_llama_cpp_model_paths(download=True)
+
+        self.assertEqual(resolved, (str(model_path), str(mmproj_path)))
+        hub.snapshot_download.assert_called_once_with(
+            repo_id=vp.QWEN3_ASR_LARGE_LLAMA_CPP_REPO,
+            local_dir=temp_dir,
+            allow_patterns=[
+                vp.QWEN3_ASR_LARGE_LLAMA_CPP_MODEL_FILE,
+                vp.QWEN3_ASR_LARGE_LLAMA_CPP_MMPROJ_FILE,
             ],
         )
 

@@ -4308,8 +4308,18 @@ def _warm_speech_model_item(item: Dict[str, str]) -> str:
                 f"loaded STT {token} in dedicated llama-server "
                 f"(pid={int(runtime.get('pid') or 0)})"
             )
-        elif token == "vosk":
-            voice_pipeline._load_vosk_model()
+        elif token == "voxtral_realtime_llama_cpp":
+            runtime = voice_pipeline._load_voxtral_realtime_llama_cpp_server()
+            return (
+                f"loaded STT {token} in dedicated llama-server "
+                f"(pid={int(runtime.get('pid') or 0)})"
+            )
+        elif token == "lfm3_audio_llama_cpp":
+            runtime = voice_pipeline._load_lfm3_audio_llama_cpp_server()
+            return (
+                f"loaded STT {token} in dedicated llama-server "
+                f"(pid={int(runtime.get('pid') or 0)})"
+            )
         else:
             raise RuntimeError(f"unsupported STT backend: {token}")
         return f"loaded STT {token}"
@@ -4396,6 +4406,27 @@ def _run_speech_model_warmup(settings: Dict[str, Any], *, reason: str) -> None:
         try:
             row["message"] = _warm_speech_model_item(row)
             row["status"] = "loaded" if not str(row["message"]).startswith("skipped") else "skipped"
+            if row.get("kind") == "stt" and row.get("status") == "loaded":
+                from tater_voice import voice_pipeline
+
+                stt_token = voice_pipeline._normalize_stt_backend(row.get("backend"))
+                if stt_token in {"voxtral_realtime_llama_cpp", "lfm3_audio_llama_cpp"}:
+                    try:
+                        verifier = native_satellite_module.run_on_runtime_loop(
+                            voice_pipeline._warm_realtime_wake_verifier_backend(stt_token),
+                            timeout=30.0,
+                        )
+                        row["wake_verifier"] = verifier
+                        row["message"] = f"{row['message']} and warmed its wake-verifier session"
+                    except Exception as exc:
+                        # A wake request reconnects this session automatically,
+                        # so a transient warmup failure should not make the STT
+                        # backend itself appear unavailable.
+                        logger.warning(
+                            "[speech-warmup] %s persistent wake verifier warmup failed: %s",
+                            stt_token,
+                            exc,
+                        )
             logger.info("[speech-warmup] %s %s", label, row["message"])
         except Exception as exc:
             message = str(exc) or type(exc).__name__
@@ -10409,6 +10440,7 @@ class AppSettingsRequest(BaseModel):
     face_id_enabled: Optional[bool] = None
     face_id_model: Optional[str] = None
     speech_stt_backend: Optional[str] = None
+    speech_qwen3_asr_model: Optional[str] = None
     speech_acceleration: Optional[str] = None
     speech_wyoming_stt_host: Optional[str] = None
     speech_wyoming_stt_port: Optional[str] = None
@@ -10998,6 +11030,14 @@ async def _shutdown_event() -> None:
             "portal runtime",
             lambda: asyncio.to_thread(portal_runtime.stop_all, timeout=8.0),
             timeout=10.0,
+        )
+        await _run_shutdown_step(
+            "wake verifier sessions",
+            lambda: __import__(
+                "tater_voice.voice_pipeline",
+                fromlist=["_close_all_realtime_wake_verifier_sessions"],
+            )._close_all_realtime_wake_verifier_sessions(),
+            timeout=5.0,
         )
         await _run_shutdown_step("Tater Voice runtime", esphome_home_module.shutdown, timeout=10.0)
         await _run_shutdown_step(
@@ -11661,26 +11701,6 @@ def _runtime_voice_pipeline_model_rows() -> List[Dict[str, Any]]:
             )
 
     with contextlib.suppress(Exception):
-        with voice_pipeline._vosk_model_lock:
-            vosk_items = list(voice_pipeline._vosk_model_cache.items())
-        for model_path, model_obj in vosk_items:
-            path = str(model_path or "").strip()
-            estimated = _runtime_model_estimated_bytes(model_obj, path)
-            rows.append(
-                _runtime_managed_model_row(
-                    category="stt",
-                    kind_label="STT",
-                    provider="voice_stt_vosk",
-                    provider_label="STT • Vosk",
-                    model=Path(path).name if path else "Vosk",
-                    model_path=path,
-                    model_root=str(getattr(voice_pipeline, "_stt_backend_model_root")("vosk")),
-                    estimated_bytes=estimated,
-                    memory_kind="ram",
-                )
-            )
-
-    with contextlib.suppress(Exception):
         runtime = voice_pipeline._qwen3_asr_llama_cpp_runtime_snapshot()
         if bool(runtime.get("running")):
             model_path = str(runtime.get("model_path") or "").strip()
@@ -11703,6 +11723,72 @@ def _runtime_voice_pipeline_model_rows() -> List[Dict[str, Any]]:
                     provider="voice_stt_qwen3_asr_llama_cpp",
                     provider_label="STT • Qwen3-ASR (llama.cpp)",
                     model=Path(model_path).stem if model_path else "Qwen3-ASR 0.6B Q8",
+                    device=device,
+                    model_path=model_path,
+                    model_root=str(Path(model_path).parent) if model_path else "",
+                    estimated_bytes=_runtime_path_bytes(model_path, mmproj_path),
+                    memory_kind=_runtime_model_memory_kind_from_device(device),
+                    details=details,
+                    loaded_ts=float(runtime.get("started_ts") or 0.0),
+                )
+            )
+
+    with contextlib.suppress(Exception):
+        runtime = voice_pipeline._voxtral_realtime_llama_cpp_runtime_snapshot()
+        if bool(runtime.get("running")):
+            model_path = str(runtime.get("model_path") or "").strip()
+            mmproj_path = str(runtime.get("mmproj_path") or "").strip()
+            gpu_layers = max(0, int(runtime.get("gpu_layers") or 0))
+            if gpu_layers > 0:
+                device = "Metal" if sys.platform == "darwin" else "GPU offload"
+            else:
+                device = "CPU"
+            details = ["Dedicated llama.cpp realtime server"]
+            if mmproj_path:
+                details.append(f"Projector {Path(mmproj_path).name}")
+            if int(runtime.get("pid") or 0) > 0:
+                details.append(f"PID {int(runtime.get('pid') or 0)}")
+            details.append(f"GPU layers {gpu_layers}")
+            rows.append(
+                _runtime_managed_model_row(
+                    category="stt",
+                    kind_label="STT",
+                    provider="voice_stt_voxtral_realtime_llama_cpp",
+                    provider_label="STT • Voxtral Realtime (llama.cpp)",
+                    model=Path(model_path).stem if model_path else "Voxtral Realtime 4B Q4_K_M",
+                    device=device,
+                    model_path=model_path,
+                    model_root=str(Path(model_path).parent) if model_path else "",
+                    estimated_bytes=_runtime_path_bytes(model_path, mmproj_path),
+                    memory_kind=_runtime_model_memory_kind_from_device(device),
+                    details=details,
+                    loaded_ts=float(runtime.get("started_ts") or 0.0),
+                )
+            )
+
+    with contextlib.suppress(Exception):
+        runtime = voice_pipeline._lfm3_audio_llama_cpp_runtime_snapshot()
+        if bool(runtime.get("running")):
+            model_path = str(runtime.get("model_path") or "").strip()
+            mmproj_path = str(runtime.get("mmproj_path") or "").strip()
+            gpu_layers = max(0, int(runtime.get("gpu_layers") or 0))
+            if gpu_layers > 0:
+                device = "Metal" if sys.platform == "darwin" else "GPU offload"
+            else:
+                device = "CPU"
+            details = ["Dedicated llama.cpp realtime server", "Two transcription slots"]
+            if mmproj_path:
+                details.append(f"Projector {Path(mmproj_path).name}")
+            if int(runtime.get("pid") or 0) > 0:
+                details.append(f"PID {int(runtime.get('pid') or 0)}")
+            details.append(f"GPU layers {gpu_layers}")
+            rows.append(
+                _runtime_managed_model_row(
+                    category="stt",
+                    kind_label="STT",
+                    provider="voice_stt_lfm3_audio_llama_cpp",
+                    provider_label="STT • LFM3-Audio 2B (llama.cpp)",
+                    model=Path(model_path).stem if model_path else "LFM3-Audio 2B Q4_K_M",
                     device=device,
                     model_path=model_path,
                     model_root=str(Path(model_path).parent) if model_path else "",
@@ -21240,6 +21326,7 @@ def get_settings() -> Dict[str, Any]:
         "video_understanding_max_seconds": int(video_understanding_settings.get("max_seconds") or 15),
         "face_id": face_id_runtime.settings_payload(redis_client),
         "speech_stt_backend": str(speech_settings.get("stt_backend") or ""),
+        "speech_qwen3_asr_model": str(speech_settings.get("qwen3_asr_model") or ""),
         "speech_acceleration": str(speech_settings.get("acceleration") or ""),
         "speech_wyoming_stt_host": str(speech_settings.get("wyoming_stt_host") or ""),
         "speech_wyoming_stt_port": str(speech_settings.get("wyoming_stt_port") or ""),
@@ -23441,6 +23528,7 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
 
     speech_keys = {
         "speech_stt_backend",
+        "speech_qwen3_asr_model",
         "speech_acceleration",
         "speech_wyoming_stt_host",
         "speech_wyoming_stt_port",
@@ -23505,6 +23593,7 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
     if any(key in updates for key in speech_keys):
         current_speech = get_shared_speech_settings()
         previous_stt_backend = str(current_speech.get("stt_backend") or "").strip()
+        previous_qwen3_asr_model = str(current_speech.get("qwen3_asr_model") or "").strip()
         previous_acceleration = str(current_speech.get("acceleration") or "").strip()
         selected_announcement_backend = normalize_managed_tts_backend(
             updates.get("speech_announcement_tts_backend", current_speech.get("announcement_tts_backend") or "")
@@ -23526,6 +23615,9 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
                         )
         save_shared_speech_settings(
             stt_backend=str(updates.get("speech_stt_backend", current_speech.get("stt_backend") or "")).strip(),
+            qwen3_asr_model=str(
+                updates.get("speech_qwen3_asr_model", current_speech.get("qwen3_asr_model") or "")
+            ).strip(),
             acceleration=str(updates.get("speech_acceleration", current_speech.get("acceleration") or "")).strip(),
             wyoming_stt_host=str(
                 updates.get("speech_wyoming_stt_host", current_speech.get("wyoming_stt_host") or "")
@@ -23674,12 +23766,25 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
             acceleration_changed = (
                 previous_acceleration != str(updated_speech.get("acceleration") or "").strip()
             )
-            if stt_backend_changed or acceleration_changed:
+            qwen3_asr_model_changed = (
+                previous_qwen3_asr_model
+                != str(updated_speech.get("qwen3_asr_model") or "").strip()
+            )
+            if stt_backend_changed or acceleration_changed or qwen3_asr_model_changed:
+                reload_reason = (
+                    "acceleration-change"
+                    if acceleration_changed
+                    else "model-change"
+                    if qwen3_asr_model_changed
+                    else "backend-change"
+                )
                 stt_reload_result = {
-                    "reason": "acceleration-change" if acceleration_changed else "backend-change",
+                    "reason": reload_reason,
                     "selected": selected_stt_backend,
                     "cleared": voice_pipeline.clear_stt_model_caches(
-                        keep_backend="" if acceleration_changed else selected_stt_backend
+                        keep_backend=""
+                        if acceleration_changed or qwen3_asr_model_changed
+                        else selected_stt_backend
                     ),
                 }
         if any(key in updates for key in tts_reload_keys):

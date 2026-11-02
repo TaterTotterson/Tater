@@ -197,6 +197,8 @@ class MacOSLauncherShutdownTests(unittest.TestCase):
         self.assertIn("bundledLlamaServerURL()?.standardizedFileURL.path", implementation)
         self.assertIn('command.contains("--alias tater-llama")', implementation)
         self.assertIn('command.contains("--alias qwen3-asr")', implementation)
+        self.assertIn('command.contains("--alias voxtral-realtime")', implementation)
+        self.assertIn('command.contains("--alias lfm3-audio")', implementation)
         self.assertIn('command.hasPrefix(serverPath + " ")', implementation)
         self.assertIn("Darwin.kill(pid, SIGKILL)", implementation)
 

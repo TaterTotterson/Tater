@@ -21,6 +21,8 @@ DEFAULT_OPENAI_COMPATIBLE_TTS_API_KEY = ""
 DEFAULT_OPENAI_COMPATIBLE_TTS_MODEL = "tts-1"
 DEFAULT_OPENAI_COMPATIBLE_TTS_VOICE = "alloy"
 DEFAULT_SPEECH_ACCELERATION = "auto"
+DEFAULT_QWEN3_ASR_MODEL = "qwen3-asr-0.6b"
+QWEN3_ASR_LARGE_MODEL = "qwen3-asr-1.7b"
 DEFAULT_POCKET_TTS_MODEL = "b6369a24"
 DEFAULT_POCKET_TTS_OUTPUT_GAIN = 1.5
 DEFAULT_QWEN_TTS_MODEL = "Qwen/Qwen3-TTS-12Hz-0.6B-Base"
@@ -753,11 +755,39 @@ def _normalize_stt_backend(value: Any) -> str:
         "qwen_asr_llama_cpp",
     }:
         return "qwen3_asr_llama_cpp"
-    if token == "vosk":
-        return "vosk"
+    if token in {
+        "voxtral",
+        "voxtral_realtime",
+        "voxtral_realtime_llama",
+        "voxtral_realtime_llama_cpp",
+        "voxtral_llama_cpp",
+    }:
+        return "voxtral_realtime_llama_cpp"
+    if token in {
+        "lfm3_audio",
+        "lfm3_audio_llama",
+        "lfm3_audio_llama_cpp",
+        "liquid_audio",
+        "liquid_lfm3_audio",
+    }:
+        return "lfm3_audio_llama_cpp"
     if token == "wyoming":
         return "wyoming"
     return DEFAULT_STT_BACKEND
+
+
+def normalize_qwen3_asr_model(value: Any) -> str:
+    token = _clean(value).lower().replace("_", "-").replace(" ", "-")
+    if token in {
+        "qwen3-asr-1.7b",
+        "qwen3-asr-1-7b",
+        "qwen/qwen3-asr-1.7b",
+        "ggml-org/qwen3-asr-1.7b-gguf",
+        "1.7b",
+        "large",
+    }:
+        return QWEN3_ASR_LARGE_MODEL
+    return DEFAULT_QWEN3_ASR_MODEL
 
 
 def _normalize_tts_backend(value: Any) -> str:
@@ -911,8 +941,15 @@ def _stt_backend_option_rows() -> List[Dict[str, Any]]:
             "value": "qwen3_asr_llama_cpp",
             "label": "Qwen3-ASR (llama.cpp, Experimental)",
         },
+        {
+            "value": "voxtral_realtime_llama_cpp",
+            "label": "Voxtral Realtime (llama.cpp, Experimental)",
+        },
+        {
+            "value": "lfm3_audio_llama_cpp",
+            "label": "LFM3-Audio 2B (llama.cpp, Experimental)",
+        },
         {"value": "wyoming", "label": "Wyoming"},
-        {"value": "vosk", "label": "Vosk"},
     ]
 
 
@@ -987,6 +1024,7 @@ def get_speech_settings() -> Dict[str, Any]:
     has_announcement_openai_api_key = "announcement_openai_tts_api_key" in shared
     return {
         "stt_backend": _normalize_stt_backend(shared.get("stt_backend")),
+        "qwen3_asr_model": normalize_qwen3_asr_model(shared.get("qwen3_asr_model")),
         "acceleration": normalize_speech_acceleration(shared.get("acceleration")),
         "wyoming_stt_host": _clean(shared.get("wyoming_stt_host")) or DEFAULT_WYOMING_STT_HOST,
         "wyoming_stt_port": _as_int(shared.get("wyoming_stt_port"), DEFAULT_WYOMING_STT_PORT),
@@ -1092,6 +1130,7 @@ def get_speech_settings() -> Dict[str, Any]:
 def save_speech_settings(
     *,
     stt_backend: Any,
+    qwen3_asr_model: Any = DEFAULT_QWEN3_ASR_MODEL,
     wyoming_stt_host: Any,
     wyoming_stt_port: Any,
     tts_backend: Any,
@@ -1170,6 +1209,7 @@ def save_speech_settings(
         SPEECH_SETTINGS_KEY,
         mapping={
             "stt_backend": _normalize_stt_backend(stt_backend),
+            "qwen3_asr_model": normalize_qwen3_asr_model(qwen3_asr_model),
             "acceleration": normalize_speech_acceleration(acceleration),
             "wyoming_stt_host": _clean(wyoming_stt_host) or DEFAULT_WYOMING_STT_HOST,
             "wyoming_stt_port": str(_as_int(wyoming_stt_port, DEFAULT_WYOMING_STT_PORT)),
@@ -1346,6 +1386,20 @@ def get_speech_ui_payload(settings: Optional[Dict[str, Any]] = None) -> Dict[str
 
     return {
         "stt_backend_options": _stt_backend_option_rows(),
+        "stt_model_options_by_backend": {
+            "qwen3_asr_llama_cpp": [
+                {
+                    "value": DEFAULT_QWEN3_ASR_MODEL,
+                    "label": "Qwen3-ASR 0.6B",
+                    "description": "Faster and lighter for everyday listening.",
+                },
+                {
+                    "value": QWEN3_ASR_LARGE_MODEL,
+                    "label": "Qwen3-ASR 1.7B",
+                    "description": "Higher accuracy with a larger memory footprint.",
+                },
+            ],
+        },
         "capabilities": {
             "cuda_available": _cuda_runtime_available(),
             "ctranslate2_cuda_available": _ctranslate2_cuda_available(),

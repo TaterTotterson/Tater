@@ -242,7 +242,7 @@ function validateLlm(): string {
 }
 
 const listeningKeys = [
-  "speech_stt_backend", "speech_acceleration", "speech_wyoming_stt_host", "speech_wyoming_stt_port",
+  "speech_stt_backend", "speech_qwen3_asr_model", "speech_acceleration", "speech_wyoming_stt_host", "speech_wyoming_stt_port",
 ] as const;
 
 const speechKeys = [

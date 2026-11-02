@@ -48,7 +48,6 @@ import threading
 import time
 import uuid
 import wave
-import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -71,9 +70,12 @@ import verba_registry
 from verba_settings import get_verba_enabled
 from hydra import run_hydra_turn, resolve_agent_limits
 from speech_settings import (
+    DEFAULT_QWEN3_ASR_MODEL,
     DEFAULT_OMNIVOICE_TTS_MODEL,
     DEFAULT_QWEN_TTS_MODEL,
+    QWEN3_ASR_LARGE_MODEL,
     get_speech_settings as get_shared_speech_settings,
+    normalize_qwen3_asr_model,
     normalize_speech_acceleration,
 )
 from .. import reply_playback
@@ -85,6 +87,7 @@ from .conversation import (
     _history_key,
     _load_context,
     _load_history,
+    _publish_conversation_display,
     _run_hydra_turn_for_voice,
     _save_context,
     _save_history_message,
@@ -102,13 +105,19 @@ from .backends import (
     _load_piper_voice_model,
     _load_pocket_tts_model,
     _load_qwen3_asr_llama_cpp_server,
-    _load_vosk_model,
+    _load_lfm3_audio_llama_cpp_server,
+    _load_voxtral_realtime_llama_cpp_server,
     _native_local_partial_stt_task,
     _open_openai_compatible_tts_stream_response,
     _native_synthesize_text,
     _native_transcribe_local_audio_bytes,
     _native_transcribe_wake_audio_bytes,
     _native_transcribe_session_audio,
+    _warm_realtime_wake_verifier_backend,
+    _close_realtime_wake_verifier_backend,
+    _close_all_realtime_wake_verifier_sessions,
+    _native_lfm3_audio_stream_stt_task,
+    _native_voxtral_realtime_stream_stt_task,
     _native_wyoming_transcribe_audio_bytes,
     _native_wyoming_refresh_tts_voices,
     _native_wyoming_stream_stt_task,
@@ -127,12 +136,10 @@ from .backends import (
     _transcribe_faster_whisper_sync,
     _transcribe_parakeet_onnx_sync,
     _transcribe_qwen3_asr_llama_cpp_sync,
-    _transcribe_vosk_sync,
     _trim_pcm_for_playback,
     _tts_backend_available,
     _tts_config_snapshot,
     _tts_selection_from_values,
-    _vosk_result_text,
     _wyoming_stt_endpoint,
     _wyoming_timeout_s,
     _wyoming_tts_endpoint,
@@ -143,6 +150,14 @@ from .backends import (
     _qwen3_asr_llama_cpp_available,
     _qwen3_asr_llama_cpp_runtime_snapshot,
     _shutdown_qwen3_asr_llama_cpp_server,
+    _transcribe_lfm3_audio_audio_bytes,
+    _lfm3_audio_llama_cpp_available,
+    _lfm3_audio_llama_cpp_runtime_snapshot,
+    _shutdown_lfm3_audio_llama_cpp_server,
+    _transcribe_voxtral_realtime_audio_bytes,
+    _voxtral_realtime_llama_cpp_available,
+    _voxtral_realtime_llama_cpp_runtime_snapshot,
+    _shutdown_voxtral_realtime_llama_cpp_server,
 )
 from .routes import router, shutdown, startup
 
@@ -217,17 +232,6 @@ try:
 except Exception as exc:  # pragma: no cover - runtime dependency guard
     OnnxASR = None
     PARAKEET_ONNX_IMPORT_ERROR = str(exc)
-
-try:
-    from vosk import Model as VoskModel, KaldiRecognizer, SetLogLevel as VoskSetLogLevel
-    with contextlib.suppress(Exception):
-        VoskSetLogLevel(-1)
-    VOSK_IMPORT_ERROR: Optional[str] = None
-except Exception as exc:  # pragma: no cover - runtime dependency guard
-    VoskModel = None
-    KaldiRecognizer = None
-    VoskSetLogLevel = None
-    VOSK_IMPORT_ERROR = str(exc)
 
 try:
     from pykokoro import build_pipeline as build_kokoro_pipeline, PipelineConfig as KokoroPipelineConfig
@@ -347,11 +351,22 @@ DEFAULT_PARAKEET_ONNX_QUANTIZATION = "int8"
 DEFAULT_QWEN3_ASR_LLAMA_CPP_REPO = "ggml-org/Qwen3-ASR-0.6B-GGUF"
 DEFAULT_QWEN3_ASR_LLAMA_CPP_MODEL_FILE = "Qwen3-ASR-0.6B-Q8_0.gguf"
 DEFAULT_QWEN3_ASR_LLAMA_CPP_MMPROJ_FILE = "mmproj-Qwen3-ASR-0.6B-Q8_0.gguf"
+QWEN3_ASR_LARGE_LLAMA_CPP_REPO = "ggml-org/Qwen3-ASR-1.7B-GGUF"
+QWEN3_ASR_LARGE_LLAMA_CPP_MODEL_FILE = "Qwen3-ASR-1.7B-Q8_0.gguf"
+QWEN3_ASR_LARGE_LLAMA_CPP_MMPROJ_FILE = "mmproj-Qwen3-ASR-1.7B-Q8_0.gguf"
 DEFAULT_QWEN3_ASR_LLAMA_CPP_CONTEXT_SIZE = 8192
 DEFAULT_QWEN3_ASR_LLAMA_CPP_MAX_TOKENS = 256
 DEFAULT_QWEN3_ASR_LLAMA_CPP_STARTUP_TIMEOUT_SECONDS = 180.0
-DEFAULT_VOSK_MODEL_NAME = "vosk-model-small-en-us-0.15"
-DEFAULT_VOSK_MODEL_URL = "https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip"
+DEFAULT_VOXTRAL_REALTIME_LLAMA_CPP_REPO = "ggml-org/Voxtral-Mini-4B-Realtime-2602-GGUF"
+DEFAULT_VOXTRAL_REALTIME_LLAMA_CPP_MODEL_FILE = "Voxtral-Mini-4B-Realtime-2602-Q4_K_M.gguf"
+DEFAULT_VOXTRAL_REALTIME_LLAMA_CPP_MMPROJ_FILE = "mmproj-Voxtral-Mini-4B-Realtime-2602-Q8_0.gguf"
+DEFAULT_VOXTRAL_REALTIME_LLAMA_CPP_CONTEXT_SIZE = 2048
+DEFAULT_VOXTRAL_REALTIME_LLAMA_CPP_STARTUP_TIMEOUT_SECONDS = 300.0
+DEFAULT_LFM3_AUDIO_LLAMA_CPP_REPO = "LiquidAI/LFM3-Audio-2B-GGUF"
+DEFAULT_LFM3_AUDIO_LLAMA_CPP_MODEL_FILE = "LFM3-Audio-2B-Q4_K_M.gguf"
+DEFAULT_LFM3_AUDIO_LLAMA_CPP_MMPROJ_FILE = "mmproj-LFM3-Audio-2B-Q8_0.gguf"
+DEFAULT_LFM3_AUDIO_LLAMA_CPP_CONTEXT_SIZE = 4096
+DEFAULT_LFM3_AUDIO_LLAMA_CPP_STARTUP_TIMEOUT_SECONDS = 300.0
 DEFAULT_STT_MODEL_ROOT = str(agent_lab_path("models", "stt"))
 DEFAULT_TTS_MODEL_ROOT = str(agent_lab_path("models", "tts"))
 DEFAULT_KOKORO_MODEL = "v1.0:q8"
@@ -521,9 +536,6 @@ _faster_whisper_model_cache: Dict[Tuple[str, str, str], Any] = {}
 _faster_whisper_model_lock = threading.Lock()
 _parakeet_onnx_model_cache: Dict[Tuple[str, str, Tuple[str, ...]], Any] = {}
 _parakeet_onnx_model_lock = threading.Lock()
-_vosk_model_cache: Dict[str, Any] = {}
-_vosk_model_lock = threading.Lock()
-_vosk_bootstrap_lock = threading.Lock()
 _kokoro_pipeline_cache: Dict[Tuple[str, ...], Any] = {}
 _kokoro_pipeline_lock = threading.Lock()
 _kokoro_runtime_lock = threading.Lock()
@@ -2093,6 +2105,7 @@ def _shared_speech_voice_settings() -> Dict[str, Any]:
     shared = get_shared_speech_settings() or {}
     return {
         "VOICE_STT_BACKEND": shared.get("stt_backend"),
+        "VOICE_QWEN3_ASR_MODEL": shared.get("qwen3_asr_model"),
         "VOICE_ACCELERATION": shared.get("acceleration"),
         "VOICE_WYOMING_STT_HOST": shared.get("wyoming_stt_host"),
         "VOICE_WYOMING_STT_PORT": shared.get("wyoming_stt_port"),
@@ -2426,8 +2439,22 @@ def _normalize_stt_backend(value: Any) -> str:
         "qwen_asr_llama_cpp",
     }:
         return "qwen3_asr_llama_cpp"
-    if token == "vosk":
-        return "vosk"
+    if token in {
+        "voxtral",
+        "voxtral_realtime",
+        "voxtral_realtime_llama",
+        "voxtral_realtime_llama_cpp",
+        "voxtral_llama_cpp",
+    }:
+        return "voxtral_realtime_llama_cpp"
+    if token in {
+        "lfm3_audio",
+        "lfm3_audio_llama",
+        "lfm3_audio_llama_cpp",
+        "liquid_audio",
+        "liquid_lfm3_audio",
+    }:
+        return "lfm3_audio_llama_cpp"
     if token == "wyoming":
         return "wyoming"
     if token in {"spud_link", "spudhub", "spud_hub"}:
@@ -2747,94 +2774,10 @@ def _resolve_faster_whisper_model_source() -> str:
     return DEFAULT_FASTER_WHISPER_MODEL
 
 
-def _looks_like_vosk_model_dir(path: str) -> bool:
-    token = os.path.expanduser(_text(path))
-    if not token or not os.path.isdir(token):
-        return False
-    return (
-        os.path.isfile(os.path.join(token, "am", "final.mdl"))
-        and os.path.isdir(os.path.join(token, "conf"))
-    )
-
-
-def _find_vosk_model_path(search_roots: Optional[List[str]] = None) -> str:
-    roots = search_roots or [_ensure_stt_backend_model_root("vosk"), _ensure_stt_model_root()]
-    for root in roots:
-        if _looks_like_vosk_model_dir(root):
-            return root
-
-        with contextlib.suppress(Exception):
-            for name in sorted(os.listdir(root)):
-                candidate = os.path.join(root, name)
-                if _looks_like_vosk_model_dir(candidate):
-                    return candidate
-
-        with contextlib.suppress(Exception):
-            for current_root, dirs, _files in os.walk(root):
-                dirs.sort()
-                if _looks_like_vosk_model_dir(current_root):
-                    return current_root
-    return ""
-
-
-def _safe_extract_zip(archive_path: str, extract_root: str) -> None:
-    abs_root = os.path.abspath(extract_root)
-    with zipfile.ZipFile(archive_path) as zf:
-        for member in zf.infolist():
-            target = os.path.abspath(os.path.join(abs_root, member.filename))
-            if os.path.commonpath([abs_root, target]) != abs_root:
-                raise RuntimeError(f"Refusing to extract unexpected path from archive: {member.filename}")
-        zf.extractall(abs_root)
-
-
-def _bootstrap_vosk_model() -> str:
-    backend_root = _ensure_stt_backend_model_root("vosk")
-    existing = _find_vosk_model_path([backend_root, _ensure_stt_model_root()])
-    if existing:
-        return existing
-
-    with _vosk_bootstrap_lock:
-        existing = _find_vosk_model_path([backend_root, _ensure_stt_model_root()])
-        if existing:
-            return existing
-
-        logger.info(
-            "[native-voice] vosk model missing; downloading url=%s target_root=%s",
-            DEFAULT_VOSK_MODEL_URL,
-            backend_root,
-        )
-        with tempfile.TemporaryDirectory(prefix="tater_vosk_") as temp_dir:
-            archive_path = os.path.join(temp_dir, "vosk_model.zip")
-            extract_root = os.path.join(temp_dir, "extract")
-            os.makedirs(extract_root, exist_ok=True)
-            urllib_request.urlretrieve(DEFAULT_VOSK_MODEL_URL, archive_path)
-            _safe_extract_zip(archive_path, extract_root)
-            extracted_model = _find_vosk_model_path([extract_root])
-            if not extracted_model:
-                raise RuntimeError(
-                    f"Downloaded Vosk archive did not contain a valid model from {DEFAULT_VOSK_MODEL_URL}"
-                )
-
-            final_dir = os.path.join(backend_root, os.path.basename(extracted_model.rstrip(os.sep)))
-            with contextlib.suppress(Exception):
-                if os.path.isdir(final_dir) and not _looks_like_vosk_model_dir(final_dir):
-                    shutil.rmtree(final_dir)
-            shutil.copytree(extracted_model, final_dir, dirs_exist_ok=True)
-            if not _looks_like_vosk_model_dir(final_dir):
-                raise RuntimeError(f"Vosk model download completed but final model dir is invalid: {final_dir}")
-            logger.info("[native-voice] vosk model downloaded target=%s", final_dir)
-            return final_dir
-
-
-def _resolve_vosk_model_path() -> str:
-    resolved = _find_vosk_model_path()
-    if resolved:
-        return resolved
-    return _bootstrap_vosk_model()
-
-
 def _build_voice_config_snapshot() -> Dict[str, Any]:
     settings = _voice_settings_with_shared_speech()
+    qwen3_asr_model = normalize_qwen3_asr_model(settings.get("VOICE_QWEN3_ASR_MODEL"))
+    qwen3_asr_large = qwen3_asr_model == QWEN3_ASR_LARGE_MODEL
     tts_backend = _normalize_tts_backend(settings.get("VOICE_TTS_BACKEND"))
     tts_model = _text(settings.get("VOICE_TTS_MODEL"))
     tts_voice = _text(settings.get("VOICE_TTS_VOICE"))
@@ -2891,17 +2834,47 @@ def _build_voice_config_snapshot() -> Dict[str, Any]:
                 "model_root": _stt_backend_model_root("parakeet_onnx"),
             },
             "qwen3_asr_llama_cpp": {
+                "model": qwen3_asr_model,
                 "repo": _text(os.getenv("TATER_QWEN3_ASR_LLAMA_CPP_REPO"))
-                or DEFAULT_QWEN3_ASR_LLAMA_CPP_REPO,
+                or (
+                    QWEN3_ASR_LARGE_LLAMA_CPP_REPO
+                    if qwen3_asr_large
+                    else DEFAULT_QWEN3_ASR_LLAMA_CPP_REPO
+                ),
                 "model_file": _text(os.getenv("TATER_QWEN3_ASR_LLAMA_CPP_MODEL_FILE"))
-                or DEFAULT_QWEN3_ASR_LLAMA_CPP_MODEL_FILE,
+                or (
+                    QWEN3_ASR_LARGE_LLAMA_CPP_MODEL_FILE
+                    if qwen3_asr_large
+                    else DEFAULT_QWEN3_ASR_LLAMA_CPP_MODEL_FILE
+                ),
                 "mmproj_file": _text(os.getenv("TATER_QWEN3_ASR_LLAMA_CPP_MMPROJ_FILE"))
-                or DEFAULT_QWEN3_ASR_LLAMA_CPP_MMPROJ_FILE,
+                or (
+                    QWEN3_ASR_LARGE_LLAMA_CPP_MMPROJ_FILE
+                    if qwen3_asr_large
+                    else DEFAULT_QWEN3_ASR_LLAMA_CPP_MMPROJ_FILE
+                ),
                 "model_root": _stt_backend_model_root("qwen3_asr_llama_cpp"),
                 "runtime": _qwen3_asr_llama_cpp_runtime_snapshot(),
             },
-            "vosk": {
-                "model_root": _stt_backend_model_root("vosk"),
+            "voxtral_realtime_llama_cpp": {
+                "repo": _text(os.getenv("TATER_VOXTRAL_REALTIME_LLAMA_CPP_REPO"))
+                or DEFAULT_VOXTRAL_REALTIME_LLAMA_CPP_REPO,
+                "model_file": _text(os.getenv("TATER_VOXTRAL_REALTIME_LLAMA_CPP_MODEL_FILE"))
+                or DEFAULT_VOXTRAL_REALTIME_LLAMA_CPP_MODEL_FILE,
+                "mmproj_file": _text(os.getenv("TATER_VOXTRAL_REALTIME_LLAMA_CPP_MMPROJ_FILE"))
+                or DEFAULT_VOXTRAL_REALTIME_LLAMA_CPP_MMPROJ_FILE,
+                "model_root": _stt_backend_model_root("voxtral_realtime_llama_cpp"),
+                "runtime": _voxtral_realtime_llama_cpp_runtime_snapshot(),
+            },
+            "lfm3_audio_llama_cpp": {
+                "repo": _text(os.getenv("TATER_LFM3_AUDIO_LLAMA_CPP_REPO"))
+                or DEFAULT_LFM3_AUDIO_LLAMA_CPP_REPO,
+                "model_file": _text(os.getenv("TATER_LFM3_AUDIO_LLAMA_CPP_MODEL_FILE"))
+                or DEFAULT_LFM3_AUDIO_LLAMA_CPP_MODEL_FILE,
+                "mmproj_file": _text(os.getenv("TATER_LFM3_AUDIO_LLAMA_CPP_MMPROJ_FILE"))
+                or DEFAULT_LFM3_AUDIO_LLAMA_CPP_MMPROJ_FILE,
+                "model_root": _stt_backend_model_root("lfm3_audio_llama_cpp"),
+                "runtime": _lfm3_audio_llama_cpp_runtime_snapshot(),
             },
         },
         "tts": {
@@ -4150,18 +4123,10 @@ def _stt_backend_available(backend: str) -> Tuple[bool, str]:
         return True, ""
     if token == "qwen3_asr_llama_cpp":
         return _qwen3_asr_llama_cpp_available()
-    if token == "vosk":
-        if VoskModel is None or KaldiRecognizer is None:
-            return False, _text(VOSK_IMPORT_ERROR) or "vosk dependency unavailable"
-        try:
-            model_path = _resolve_vosk_model_path()
-        except Exception as exc:
-            return False, f"Vosk model unavailable: {exc}"
-        if not os.path.isdir(model_path):
-            return False, f"Vosk model not found under {_stt_backend_model_root('vosk')}"
-        if not _looks_like_vosk_model_dir(model_path):
-            return False, f"No Vosk model directory found under {_stt_backend_model_root('vosk')}"
-        return True, ""
+    if token == "voxtral_realtime_llama_cpp":
+        return _voxtral_realtime_llama_cpp_available()
+    if token == "lfm3_audio_llama_cpp":
+        return _lfm3_audio_llama_cpp_available()
     return False, f"unsupported STT backend: {token}"
 
 
@@ -4171,7 +4136,7 @@ def _resolve_stt_backend_selected(selected: str) -> Tuple[str, str]:
     if ok:
         return token, ""
     if token != "wyoming":
-        for candidate in (DEFAULT_STT_BACKEND, "faster_whisper", "parakeet_onnx", "vosk"):
+        for candidate in (DEFAULT_STT_BACKEND, "faster_whisper", "parakeet_onnx"):
             fallback = _normalize_stt_backend(candidate)
             if fallback == token or fallback == "wyoming":
                 continue
@@ -6348,6 +6313,13 @@ async def _process_voice_turn(session: VoiceSessionRuntime) -> Dict[str, Any]:
                 session.stt_latency_ms,
             )
             session.stt_metric_recorded = True
+    await _publish_conversation_display(
+        session,
+        phase="thinking",
+        user_text=transcript,
+        user_final=True,
+        force=True,
+    )
     from .. import intercom as esphome_intercom
 
     if esphome_intercom.is_broadcast_wake_word(session.wake_word):
@@ -6529,6 +6501,11 @@ async def _finalize_session(
         if session.processing:
             return
         session.processing = True
+        pending_display = session.conversation_display_flush_task
+        if isinstance(pending_display, asyncio.Task) and not pending_display.done():
+            pending_display.cancel()
+        session.conversation_display_flush_task = None
+        session.conversation_display_pending = None
         _cancel_audio_stall_watch(runtime)
         runtime["session"] = None
 
@@ -6802,6 +6779,13 @@ async def _finalize_session(
             return
 
         response_text = _text(result.get("response_text"))
+        await _publish_conversation_display(
+            session,
+            phase="replying",
+            assistant_text=response_text,
+            assistant_final=True,
+            force=True,
+        )
         spoken_response_text = _sanitize_spoken_response_text(response_text)
         continue_conversation = False
         followup_cue = ""
@@ -7472,6 +7456,23 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
             # Hub STT and endpointing can safely share the same command audio.
             spud_link_endpointing_reuse_stt=bool(hub_stt_routed),
         )
+        send_conversation_display = getattr(client, "send_conversation_display", None)
+        if callable(send_conversation_display):
+            async def _conversation_display(payload: Dict[str, Any]) -> None:
+                result = send_conversation_display(payload)
+                if inspect.isawaitable(result):
+                    await result
+
+            session.conversation_display_callback = _conversation_display
+            await _publish_conversation_display(
+                session,
+                phase="listening",
+                user_text="",
+                user_final=False,
+                assistant_text="",
+                assistant_final=False,
+                force=True,
+            )
         if session.spud_link_endpointing_requested:
             try:
                 session.spud_link_stt_stream = await spud_link_open_stt_stream(
@@ -7927,18 +7928,26 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
                         f"esphome startup preroll applied selector={token} session_id={session.session_id} "
                         f"bytes={preroll_bytes} preroll_s={float(session.startup_preroll_s or 0.0):.2f}"
                     )
-                if _normalize_stt_backend(session.stt_backend_effective) == "wyoming":
+                stream_backend = _normalize_stt_backend(session.stt_backend_effective)
+                if stream_backend in {"wyoming", "voxtral_realtime_llama_cpp", "lfm3_audio_llama_cpp"}:
                     session.stt_queue_max_chunks = _wyoming_stt_queue_max_chunks()
                     session.stt_queue = asyncio.Queue(maxsize=session.stt_queue_max_chunks)
+                    if stream_backend == "voxtral_realtime_llama_cpp":
+                        stream_task = _native_voxtral_realtime_stream_stt_task
+                    elif stream_backend == "lfm3_audio_llama_cpp":
+                        stream_task = _native_lfm3_audio_stream_stt_task
+                    else:
+                        stream_task = _native_wyoming_stream_stt_task
                     session.stt_task = asyncio.create_task(
-                        _native_wyoming_stream_stt_task(
+                        stream_task(
                             token=token,
                             session_id=session.session_id,
                             queue=session.stt_queue,
                             audio_format=session.audio_format,
                             language=session.language,
                             session_ref=session,
-                        )
+                        ),
+                        name=f"{stream_backend}-stt-{session.session_id}",
                     )
                 elif _experimental_partial_stt_enabled():
                     session.partial_stt_task = asyncio.create_task(

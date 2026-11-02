@@ -5,12 +5,119 @@ import contextlib
 import inspect
 import json
 import sys
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
 
 def _vp():
     return sys.modules[__package__]
+
+
+CONVERSATION_DISPLAY_MIN_INTERVAL_S = 0.09
+
+
+async def _dispatch_conversation_display(
+    session: "VoiceSessionRuntime",
+    payload: Dict[str, Any],
+) -> None:
+    callback = session.conversation_display_callback
+    if not callable(callback):
+        return
+    try:
+        result = callback(dict(payload))
+        if inspect.isawaitable(result):
+            await result
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        with contextlib.suppress(Exception):
+            _vp()._native_debug(
+                f"conversation display update failed selector={session.selector} "
+                f"session_id={session.session_id} error={exc}"
+            )
+
+
+def _conversation_display_payload(session: "VoiceSessionRuntime") -> Dict[str, Any]:
+    return {
+        "turn_id": str(session.session_id or ""),
+        "phase": str(session.conversation_display_phase or "listening"),
+        "user_text": str(session.conversation_user_text or ""),
+        "user_final": bool(session.conversation_user_final),
+        "assistant_text": str(session.conversation_assistant_text or ""),
+        "assistant_final": bool(session.conversation_assistant_final),
+        "revision": int(session.conversation_display_revision or 0),
+    }
+
+
+async def _flush_conversation_display_after(
+    session: "VoiceSessionRuntime",
+    delay_s: float,
+) -> None:
+    try:
+        await asyncio.sleep(max(0.0, float(delay_s or 0.0)))
+        payload = dict(session.conversation_display_pending or {})
+        session.conversation_display_pending = None
+        if payload:
+            await _dispatch_conversation_display(session, payload)
+            session.conversation_display_last_sent_ts = time.monotonic()
+    finally:
+        if session.conversation_display_flush_task is asyncio.current_task():
+            session.conversation_display_flush_task = None
+
+
+async def _publish_conversation_display(
+    session: "VoiceSessionRuntime",
+    *,
+    phase: str = "",
+    user_text: Optional[str] = None,
+    user_final: Optional[bool] = None,
+    assistant_text: Optional[str] = None,
+    assistant_final: Optional[bool] = None,
+    force: bool = False,
+) -> None:
+    """Publish one engine-independent screen transcript snapshot.
+
+    Partial STT hypotheses replace ``user_text`` rather than append to it,
+    while LLM callbacks accumulate ``assistant_text`` before calling here.
+    Complete snapshots keep reconnects and dropped/coalesced updates safe.
+    """
+    if not callable(session.conversation_display_callback):
+        return
+    normalized_phase = str(phase or "").strip().lower()
+    if normalized_phase in {"listening", "thinking", "replying"}:
+        session.conversation_display_phase = normalized_phase
+    if user_text is not None:
+        session.conversation_user_text = str(user_text or "").strip()
+    if user_final is not None:
+        session.conversation_user_final = bool(user_final)
+    if assistant_text is not None:
+        session.conversation_assistant_text = str(assistant_text or "").strip()
+    if assistant_final is not None:
+        session.conversation_assistant_final = bool(assistant_final)
+    session.conversation_display_revision += 1
+    payload = _conversation_display_payload(session)
+    now = time.monotonic()
+    elapsed = now - float(session.conversation_display_last_sent_ts or 0.0)
+    if force or session.conversation_display_last_sent_ts <= 0.0 or elapsed >= CONVERSATION_DISPLAY_MIN_INTERVAL_S:
+        pending_task = session.conversation_display_flush_task
+        if isinstance(pending_task, asyncio.Task) and not pending_task.done():
+            pending_task.cancel()
+        session.conversation_display_flush_task = None
+        session.conversation_display_pending = None
+        await _dispatch_conversation_display(session, payload)
+        session.conversation_display_last_sent_ts = time.monotonic()
+        return
+
+    session.conversation_display_pending = payload
+    pending_task = session.conversation_display_flush_task
+    if not isinstance(pending_task, asyncio.Task) or pending_task.done():
+        session.conversation_display_flush_task = asyncio.create_task(
+            _flush_conversation_display_after(
+                session,
+                CONVERSATION_DISPLAY_MIN_INTERVAL_S - elapsed,
+            )
+        )
 
 
 @dataclass
@@ -118,6 +225,16 @@ class VoiceSessionRuntime:
     tool_visual_sent: bool = False
     last_tool_progress_text: str = ""
     live_tool_progress_callback: Optional[Callable[[str, Optional[Dict[str, Any]]], Any]] = None
+    conversation_display_callback: Optional[Callable[[Dict[str, Any]], Any]] = None
+    conversation_display_phase: str = "listening"
+    conversation_user_text: str = ""
+    conversation_user_final: bool = False
+    conversation_assistant_text: str = ""
+    conversation_assistant_final: bool = False
+    conversation_display_revision: int = 0
+    conversation_display_last_sent_ts: float = 0.0
+    conversation_display_pending: Optional[Dict[str, Any]] = None
+    conversation_display_flush_task: Optional[asyncio.Task] = None
     speaker_id: str = ""
     speaker_name: str = ""
     speaker_score: float = 0.0
@@ -337,6 +454,20 @@ async def _run_hydra_turn_for_voice(*, transcript: str, conv_id: str, session: V
                 "Use this as voice context only. Do not claim the user explicitly said the room.\n"
             )
 
+    streamed_response_parts: List[str] = []
+
+    async def _response_chunk(chunk: str) -> None:
+        chunk_text = str(chunk or "")
+        if not chunk_text:
+            return
+        streamed_response_parts.append(chunk_text)
+        await _publish_conversation_display(
+            session,
+            phase="replying",
+            assistant_text="".join(streamed_response_parts),
+            assistant_final=False,
+        )
+
     async with vp.get_llm_client_from_env(redis_conn=vp.redis_client) as llm_client:
         async def _wait(
             func_name: str,
@@ -374,11 +505,20 @@ async def _run_hydra_turn_for_voice(*, transcript: str, conv_id: str, session: V
             platform_preamble=platform_preamble,
             tool_platform_preamble=tool_platform_preamble,
             wait_callback=_wait,
+            response_callback=_response_chunk,
         )
 
     response_text = vp._text((result or {}).get("text"))
     if not response_text:
         response_text = "I couldn't generate a response right now."
+
+    await _publish_conversation_display(
+        session,
+        phase="replying",
+        assistant_text=response_text,
+        assistant_final=True,
+        force=True,
+    )
 
     await _save_history_message(
         conv_id,

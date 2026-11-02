@@ -5523,7 +5523,9 @@ _LLAMA_CPP_ENGINE_WORKER_ENV = "TATER_LLAMA_CPP_ENGINE_WORKER"
 _LLAMA_CPP_ENGINE_PROTOCOL_VERSION = 1
 _LLAMA_CPP_NATIVE_MEDIA_MARKER = "<__media__>"
 _LLAMA_CPP_HTTP_THREAD_LOCAL = threading.local()
-_TATER_LLAMA_CPP_MANAGED_ALIASES = frozenset({"tater-llama", "tater-decision", "qwen3-asr"})
+_TATER_LLAMA_CPP_MANAGED_ALIASES = frozenset(
+    {"tater-llama", "tater-decision", "qwen3-asr", "voxtral-realtime", "lfm3-audio"}
+)
 
 
 def _macos_bundled_llama_server_candidates() -> List[Path]:
