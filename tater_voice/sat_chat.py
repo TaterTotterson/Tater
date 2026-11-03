@@ -36,7 +36,7 @@ def _truthy(value: Any) -> bool:
 
 def _video_receive_profile(participant: Optional[Dict[str, Any]]) -> str:
     board = _text((participant or {}).get("board")).lower().replace("_", "-")
-    if board in {"checkers", "crown", "athena"}:
+    if board in {"checkers", "cronos", "crown", "athena"}:
         # The larger Echo displays use a 640x360 source at 15 FPS. This avoids
         # enlarging the former 320x180 call frame across an 848-1280px panel
         # while retaining a conservative cadence for software JPEG decoding.

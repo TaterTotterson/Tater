@@ -80,6 +80,28 @@ def _echo_manifest() -> dict[str, object]:
                     "final_artifact": "ota",
                 }],
             },
+            "cronos": {
+                "display_name": "Amazon Echo Show 5 2nd Generation (2021)",
+                "amazon_codename": "cronos",
+                "model_number": "C76N8S",
+                "cpu": "armv7a-on-arm64-kernel",
+                "unlock": "amonet-cronos-v1.0.0",
+                "factory_install": True,
+                "ota": True,
+                "status": "hardware-validation",
+                "artifacts": {
+                    "factory": {
+                        "name": "tater-echo-cronos-v0.4.0-factory.tar.gz",
+                        "sha256": "9" * 64,
+                        "size": 10240,
+                    },
+                    "ota": {
+                        "name": "tater-echo-cronos-v0.4.0-ota.tar.gz",
+                        "sha256": "a1" * 32,
+                        "size": 8192,
+                    },
+                },
+            },
             "crown": {
                 "display_name": "Amazon Echo Show 8 1st Generation (2019)",
                 "amazon_codename": "crown",
@@ -442,6 +464,39 @@ class EchoFirmwareOtaTests(unittest.TestCase):
         self.assertTrue(info["available"])
         self.assertEqual("tater_native_ota", info["artifacts"]["ota"]["flash_transport"])
         self.assertTrue(info["artifacts"]["ota"]["path"].endswith("tater-echo-checkers-v0.4.0-ota.zip"))
+
+    def test_cronos_identity_selects_its_own_verified_ota_and_show_art(self) -> None:
+        row = {
+            "connected": True,
+            "firmware_target": "cronos",
+            "board": "cronos",
+            "firmware_version": "v0.3.0",
+            "device_info": {"model": "C76N8S"},
+            "capabilities": {"ota": True, "screen": True},
+        }
+        spec = firmware._match_template_spec("native:cronos-test", row)
+        self.assertEqual("cronos", spec["key"])
+        self.assertFalse(spec["usb_recovery"])
+        self.assertEqual(
+            "cronos",
+            firmware._template_key_from_hardware_identity("Echo Show 5 2nd Gen"),
+        )
+        self.assertEqual(
+            "Tater Echo Show 5 (2nd Gen)",
+            native_satellite._default_name_for_board("cronos"),
+        )
+        self.assertEqual(
+            ui_helpers._named_satellite_image_src("echo-show-5.png"),
+            ui_helpers.device_image_src("cronos", "Tater Echo Show 5 (2nd Gen)", "C76N8S"),
+        )
+        source = firmware._firmware_manifest_source("cronos")
+        self.assertEqual("echo_targets", source["format"])
+        with mock.patch.object(firmware, "_remote_json", return_value=_echo_manifest()):
+            info = firmware._native_firmware_info("cronos")
+        self.assertTrue(info["available"])
+        self.assertEqual("tater_native_ota", info["artifacts"]["ota"]["flash_transport"])
+        self.assertTrue(info["artifacts"]["ota"]["path"].endswith("tater-echo-cronos-v0.4.0-ota.tar.gz"))
+        self.assertIn("factory/cronos-linux/README.md", info["artifacts"]["factory"]["instructions_url"])
 
     def test_crown_identity_selects_its_own_verified_ota(self) -> None:
         row = {

@@ -30,7 +30,7 @@ class EchoDisplayThemeSettingsTests(unittest.TestCase):
 
     def test_echo_screens_replace_led_controls_with_display_theme(self) -> None:
         with mock.patch.object(native_live_settings, "redis_client", self._redis()):
-            for board in ("checkers", "crown", "athena", "rook"):
+            for board in ("checkers", "cronos", "crown", "athena", "rook"):
                 fields = native_live_settings.settings_fields(f"native:{board}", board=board)
                 by_key = {str(field.get("key") or ""): field for field in fields}
 
@@ -53,6 +53,7 @@ class EchoDisplayThemeSettingsTests(unittest.TestCase):
                     self.assertNotIn(led_key, by_key)
 
         self.assertTrue(native_live_settings._board_supports_display_photos("checkers"))
+        self.assertTrue(native_live_settings._board_supports_display_photos("cronos"))
         self.assertTrue(native_live_settings._board_supports_display_photos("crown"))
         self.assertTrue(native_live_settings._board_supports_display_photos("athena"))
         self.assertTrue(native_live_settings._board_supports_display_photos("rook"))

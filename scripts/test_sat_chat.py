@@ -15,9 +15,9 @@ from tater_voice import sat_chat
 def _client(name: str, board: str, **capability_overrides):
     capabilities = {
         "sat_chat_audio": True,
-        "sat_chat_can_initiate": board in {"checkers", "crown", "athena", "rook"},
-        "sat_chat_can_end": board in {"checkers", "crown", "athena", "rook"},
-        "sat_chat_ui": board in {"checkers", "crown", "athena", "rook"},
+        "sat_chat_can_initiate": board in {"checkers", "cronos", "crown", "athena", "rook"},
+        "sat_chat_can_end": board in {"checkers", "cronos", "crown", "athena", "rook"},
+        "sat_chat_ui": board in {"checkers", "cronos", "crown", "athena", "rook"},
         **capability_overrides,
     }
     return {
@@ -36,6 +36,7 @@ class SatChatTests(unittest.IsolatedAsyncioTestCase):
             "native:kitchen": _client("Kitchen Crown", "crown"),
             "native:office": _client("Office Checkers", "checkers"),
             "native:den": _client("Den Athena", "athena"),
+            "native:desk": _client("Desk Cronos", "cronos"),
             "native:bedroom": _client("Bedroom Biscuit", "biscuit"),
         }
 
@@ -63,6 +64,15 @@ class SatChatTests(unittest.IsolatedAsyncioTestCase):
             sat_chat, "_send", new=sent
         ), patch.object(sat_chat, "refresh_directories", new=AsyncMock()):
             await sat_chat.start("native:den", "native:office")
+
+        self.assertEqual(sent.await_args_list[0].args[2]["video_send_profile"], "echo-balanced")
+
+    async def test_cronos_uses_echo_balanced_video_receive_profile(self) -> None:
+        sent = AsyncMock()
+        with patch.object(sat_chat, "_native_clients", new=AsyncMock(return_value=self.clients)), patch.object(
+            sat_chat, "_send", new=sent
+        ), patch.object(sat_chat, "refresh_directories", new=AsyncMock()):
+            await sat_chat.start("native:desk", "native:office")
 
         self.assertEqual(sent.await_args_list[0].args[2]["video_send_profile"], "echo-balanced")
 

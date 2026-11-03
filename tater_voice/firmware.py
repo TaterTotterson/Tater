@@ -229,6 +229,7 @@ _NATIVE_FIRMWARE_MANIFEST_TO_TEMPLATE_KEY = {
 _NATIVE_FIRMWARE_TEMPLATE_KEYS = {
     "biscuit",
     "checkers",
+    "cronos",
     "crown",
     "athena",
     "radar",
@@ -251,13 +252,14 @@ _PREBUILT_FIRMWARE_TEMPLATE_KEYS = set(_NATIVE_FIRMWARE_TEMPLATE_KEYS)
 _ECHO_FACTORY_GUIDE_DIRECTORIES = {
     "biscuit": "biscuit",
     "checkers": "checkers-linux",
+    "cronos": "cronos-linux",
     "crown": "crown-linux",
     "athena": "athena-linux",
     "radar": "radar",
     "rook": "rook-linux",
 }
-_ECHO_FIRMWARE_TARGETS = {"biscuit", "checkers", "crown", "athena", "radar", "rook"}
-_NATIVE_SCREEN_TARGETS = {"checkers", "crown", "athena", "rook"}
+_ECHO_FIRMWARE_TARGETS = {"biscuit", "checkers", "cronos", "crown", "athena", "radar", "rook"}
+_NATIVE_SCREEN_TARGETS = {"checkers", "cronos", "crown", "athena", "rook"}
 
 _S3BOX_SENSOR_FIELD_LABELS: Dict[str, str] = {
     "sensor_temp_out": "Outdoor Temperature",
@@ -385,6 +387,21 @@ _TEMPLATE_SPECS: tuple[Dict[str, Any], ...] = (
             "amazon echo show 8",
             "tater crown",
             "tater echo show 8",
+        },
+    },
+    {
+        "key": "cronos",
+        "label": "Tater Echo Show 5 (2nd Gen)",
+        "usb_recovery": False,
+        "match_tokens": {
+            "cronos",
+            "c76n8s",
+            "echo show 5 2nd gen",
+            "echo show 5 2nd generation",
+            "echo show 5 2021",
+            "amazon echo show 5 2nd generation",
+            "tater cronos",
+            "tater echo show 5 2nd gen",
         },
     },
     {
@@ -2732,6 +2749,23 @@ def _template_key_from_hardware_identity(value: Any) -> str:
         "taterecho",
     }:
         return "biscuit"
+    if token in {
+        "cronos",
+        "c76n8s",
+        "echo-show-5-2nd-gen",
+        "echo-show-5-2nd-generation",
+        "echo-show-5-2021",
+    } or compact in {
+        "cronos",
+        "c76n8s",
+        "echoshow52ndgen",
+        "echoshow52ndgeneration",
+        "echoshow52021",
+        "amazonechoshow52ndgeneration",
+        "tatercronos",
+        "taterechoshow52ndgen",
+    }:
+        return "cronos"
     if token in {"checkers", "echo-show-5", "echo-show-5-1st-gen"} or compact in {
         "checkers",
         "echoshow5",
@@ -3226,6 +3260,8 @@ def display_sensor_profiles_payload(status: Dict[str, Any]) -> Dict[str, Any]:
                     screen_target = "athena"
                 elif "crown" in hardware_tokens:
                     screen_target = "crown"
+                elif "cronos" in hardware_tokens:
+                    screen_target = "cronos"
                 elif "checkers" in hardware_tokens:
                     screen_target = "checkers"
             title = (

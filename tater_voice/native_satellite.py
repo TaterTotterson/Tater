@@ -364,6 +364,7 @@ def _default_name_for_board(board: Any) -> str:
         "biscuit": "Tater Echo Dot 2",
         "radar": "Tater Echo 2",
         "checkers": "Tater Echo Show 5",
+        "cronos": "Tater Echo Show 5 (2nd Gen)",
         "crown": "Tater Crown",
         "athena": "Tater Athena",
         "rook": "Tater Echo Spot",
@@ -500,7 +501,7 @@ _native_camera_relays: Dict[str, Dict[str, Any]] = {}
 def _echo_camera_profile_for_boards(source_board: Any, target_board: Any) -> str:
     source = _text(source_board).lower().replace("_", "-")
     target = _text(target_board).lower().replace("_", "-")
-    large_displays = {"checkers", "crown", "athena"}
+    large_displays = {"checkers", "cronos", "crown", "athena"}
     if source in large_displays and target in large_displays:
         return "echo-balanced"
     return "echo-low"

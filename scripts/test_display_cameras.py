@@ -243,6 +243,10 @@ class NativeCameraRelayTests(unittest.TestCase):
             "echo-balanced",
         )
         self.assertEqual(
+            native_satellite._echo_camera_profile_for_boards("cronos", "checkers"),
+            "echo-balanced",
+        )
+        self.assertEqual(
             native_satellite._echo_camera_profile_for_boards("rook", "checkers"),
             "echo-low",
         )

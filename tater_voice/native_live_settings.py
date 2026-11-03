@@ -1305,7 +1305,7 @@ def wake_family_for(*, capabilities: Dict[str, Any] | None = None, board: Any = 
         return "echo"
     # Board fallback keeps settings correct while an older Echo build is connecting
     # before it has advertised the newer detector capability flags.
-    if _lower(board).replace("_", "-") in {"biscuit", "radar", "checkers", "crown", "athena", "rook"}:
+    if _lower(board).replace("_", "-") in {"biscuit", "radar", "checkers", "cronos", "crown", "athena", "rook"}:
         return "echo"
     return "mww"
 
@@ -1647,6 +1647,8 @@ def _board_supports_display_theme(board: Any = "") -> bool:
         "checkers",
         "echo-show-5",
         "echo-show-5-1st-gen",
+        "cronos",
+        "echo-show-5-2nd-gen",
         "crown",
         "echo-show-8",
         "echo-show-8-1st-gen",
@@ -1658,6 +1660,8 @@ def _board_supports_display_theme(board: Any = "") -> bool:
         "checkers",
         "echoshow5",
         "echoshow51stgen",
+        "cronos",
+        "echoshow52ndgen",
         "crown",
         "echoshow8",
         "echoshow81stgen",
@@ -1675,6 +1679,8 @@ def _board_supports_display_photos(board: Any = "") -> bool:
         "checkers",
         "echo-show-5",
         "echo-show-5-1st-gen",
+        "cronos",
+        "echo-show-5-2nd-gen",
         "crown",
         "echo-show-8",
         "echo-show-8-1st-gen",
@@ -1686,6 +1692,8 @@ def _board_supports_display_photos(board: Any = "") -> bool:
         "checkers",
         "echoshow5",
         "echoshow51stgen",
+        "cronos",
+        "echoshow52ndgen",
         "crown",
         "echoshow8",
         "echoshow81stgen",
@@ -1797,6 +1805,7 @@ def _board_supports_screen_settings(board: Any = "") -> bool:
     return token in {
         "s3-box", "s3-box-3", "esp32-s3-box", "esp32-s3-box-3",
         "checkers", "echo-show-5", "echo-show-5-1st-gen",
+        "cronos", "echo-show-5-2nd-gen",
         "crown", "echo-show-8", "echo-show-8-1st-gen",
         "athena", "echo-show-8-2nd-gen",
         "rook", "echo-spot",
@@ -1808,6 +1817,8 @@ def _board_supports_screen_settings(board: Any = "") -> bool:
         "checkers",
         "echoshow5",
         "echoshow51stgen",
+        "cronos",
+        "echoshow52ndgen",
         "crown",
         "echoshow8",
         "echoshow81stgen",

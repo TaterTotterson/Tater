@@ -60,8 +60,8 @@ class DisplayClimateSettingsTests(unittest.TestCase):
         self.assertEqual("Automatic (recommended)", thermostat["options"][0]["label"])
         self.assertEqual("__none__", thermostat["options"][1]["value"])
 
-    def test_checkers_and_crown_offer_six_room_temperature_slots(self) -> None:
-        for screen_target in ("checkers", "crown"):
+    def test_full_size_echo_displays_offer_six_room_temperature_slots(self) -> None:
+        for screen_target in ("checkers", "cronos", "crown", "athena"):
             fields = self._profile(screen_target).get("fields") or []
             room_fields = [
                 field

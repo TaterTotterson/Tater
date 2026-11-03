@@ -50,7 +50,7 @@ class EchoScreenPowerSettingsTests(unittest.TestCase):
             "screen_clock_format",
         }
         with mock.patch.object(native_live_settings, "redis_client", self._redis()):
-            for board in ("checkers", "crown", "athena", "rook"):
+            for board in ("checkers", "cronos", "crown", "athena", "rook"):
                 fields = native_live_settings.settings_fields(
                     f"native:{board}", board=board, capabilities=self._capabilities()
                 )
