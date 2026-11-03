@@ -153,6 +153,19 @@ class FirmwareOfflineImageTests(unittest.TestCase):
                 },
                 "last_seen_ts": 125.0,
             },
+            {
+                "selector": "native:cronos-test",
+                "host": "",
+                "name": "Echo Show 5 Second Gen Test",
+                "source": "tater_native",
+                "metadata": {
+                    "native_selected": True,
+                    "board": "cronos",
+                    "firmware_target": "cronos",
+                    "firmware_version": "v4.1.0",
+                },
+                "last_seen_ts": 126.0,
+            },
         ]
         native_status = {
             "clients": {
@@ -179,6 +192,14 @@ class FirmwareOfflineImageTests(unittest.TestCase):
                     "board": "checkers",
                     "firmware_target": "checkers",
                     "firmware_version": "v0.1.5",
+                },
+                "native:cronos-test": {
+                    "connected": True,
+                    "device_id": "cronos-test",
+                    "device_name": "Echo Show 5 Second Gen Test",
+                    "board": "cronos",
+                    "firmware_target": "cronos",
+                    "firmware_version": "v4.1.0",
                 },
                 "native:radar-test": {
                     "connected": True,
@@ -208,6 +229,10 @@ class FirmwareOfflineImageTests(unittest.TestCase):
         )
         self.assertEqual(
             cards["native:show-test"]["hero_image_src"],
+            ui_helpers._named_satellite_image_src("echo-show-5.png"),
+        )
+        self.assertEqual(
+            cards["native:cronos-test"]["hero_image_src"],
             ui_helpers._named_satellite_image_src("echo-show-5.png"),
         )
         self.assertEqual(
