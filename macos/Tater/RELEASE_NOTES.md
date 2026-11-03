@@ -1,55 +1,34 @@
-# Tater v2.0.3
+# Tater v2.0.4
 
-Tater v2.0.3 adds two streaming local speech-recognition engines, a larger
-Qwen3-ASR option, and live voice transcripts and replies on compatible Echo
-screens when paired with Echo Firmware v4.0.2.
+Tater v2.0.4 adds complete management support for the Amazon Echo Show 5
+second generation (2021), model C76N8S, codename `cronos`.
 
 ## What's Changed
 
-### Live conversations on Echo screens
+### Echo Show 5 second-generation support
 
-- Streams partial user speech and assistant reply text to Checkers, Crown,
-  Athena, and Rook through one shared, engine-independent display protocol.
-- Keeps the completed request visible while Tater thinks and works, then
-  transitions into the reply with ordered, throttled full-state updates.
-- Supports non-streaming speech engines too by sending the complete transcript
-  or reply as soon as it is available.
-- Requires Echo Firmware v4.0.2 for the new on-screen conversation experience;
-  older firmware continues to support normal voice operation without it.
+- Recognizes Cronos as its own Echo target instead of treating it as a generic
+  screen satellite or first-generation Checkers device.
+- Shows the correct device name and artwork throughout Satellites, settings,
+  firmware status, Sat Chat, and display controls.
+- Enables the full supported screen settings, including themes, photos,
+  cameras, climate, clock format, screen power, Do Not Disturb, SSH, audio
+  output, and live conversation displays.
+- Uses Cronos's native video profile for Sat Chat and camera relay playback.
 
-### More local speech recognition
+### Factory and OTA updates
 
-- Adds Voxtral Realtime 4B as an experimental streaming llama.cpp speech engine.
-- Adds LFM3-Audio 2B as a compact experimental streaming llama.cpp speech engine.
-- Automatically downloads the selected models and manages their dedicated
-  llama.cpp processes on macOS, Docker, and NVIDIA Docker installations.
-- Keeps a persistent realtime wake-check session warm so optional STT wake-word
-  verification does not pay a fresh connection cost for every wake.
+- Selects the target-matched Cronos factory archive and verified application
+  and System OTA artifacts from the shared Echo firmware manifest.
+- Keeps Cronos separate from the visually similar Checkers target so an update
+  for the wrong Echo Show 5 generation cannot be selected.
 
-### Qwen3-ASR model choices
+### Echo Firmware v4.1.0 companion release
 
-- Adds a choice between the faster Qwen3-ASR 0.6B model and the larger 1.7B
-  model for users who prefer additional transcription accuracy.
-- Downloads and loads the matching model automatically, and cleanly restarts
-  the managed speech runtime when the selection changes.
-
-### Cleaner listening setup
-
-- Removes the older Vosk backend and its dependency now that Tater has stronger
-  local speech-recognition choices.
-- Extends speech runtime status, warmup, memory reporting, shutdown ownership,
-  and diagnostics to the new managed llama.cpp engines.
-- Adds focused regression coverage for realtime transcription, wake checks,
-  model selection, live display snapshots, and process cleanup.
-
-### Echo Firmware v4.0.2 companion update
-
-- Adds the matching listening, thinking, working, and replying screen flow with
-  theme-aware edge lighting and smooth layouts for rectangular and round Echo
-  displays.
-- Improves the Sendspin music screen with calmer synchronized spectrum motion
-  and a stable progress bar on page-flipped displays.
-- See the [Echo Firmware v4.0.2 release](https://github.com/TaterTotterson/Tater-Echo-Firmware/releases/tag/v4.0.2)
+- Adds the first hardware-tested Tater Linux release for Cronos, including its
+  factory installer, native display and audio stack, TWRP recovery, A/B OTA,
+  and automatic USB Ethernet with Wi-Fi fallback.
+- See the [Echo Firmware v4.1.0 release](https://github.com/TaterTotterson/Tater-Echo-Firmware/releases/tag/v4.1.0)
   for firmware downloads and complete device-side notes.
 
-**Full Changelog**: [v2.0.2...v2.0.3](https://github.com/TaterTotterson/Tater/compare/v2.0.2...v2.0.3)
+**Full Changelog**: [v2.0.3...v2.0.4](https://github.com/TaterTotterson/Tater/compare/v2.0.3...v2.0.4)

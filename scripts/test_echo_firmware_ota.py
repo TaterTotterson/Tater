@@ -85,10 +85,10 @@ def _echo_manifest() -> dict[str, object]:
                 "amazon_codename": "cronos",
                 "model_number": "C76N8S",
                 "cpu": "armv7a-on-arm64-kernel",
-                "unlock": "amonet-cronos-v1.0.0",
+                "unlock": "amonet-cronos-v2.0.1",
                 "factory_install": True,
                 "ota": True,
-                "status": "hardware-validation",
+                "status": "hardware-tested",
                 "artifacts": {
                     "factory": {
                         "name": "tater-echo-cronos-v0.4.0-factory.tar.gz",
