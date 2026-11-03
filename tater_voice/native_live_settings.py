@@ -1568,6 +1568,25 @@ _ECHO_SCREEN_DEFAULTS = {
 
 _SCREEN_FIELD_KEYS = _SCREEN_SETTING_KEYS | {"screen_section"}
 
+# The -30 dB bass protection floor suits the small Dot, Show 5, and Spot
+# drivers but makes music thin on the larger Echo and Echo Show 8 speakers.
+_LARGE_SPEAKER_DEFAULTS = {"bass_guard_db": -10.0}
+_LARGE_SPEAKER_BOARDS = {
+    "radar",
+    "echo2ndgen",
+    "crown",
+    "echoshow8",
+    "echoshow81stgen",
+    "athena",
+    "a8h3n2",
+    "echoshow82ndgen",
+}
+
+
+def _board_speaker_defaults(board: Any = "") -> Dict[str, Any]:
+    compact = _lower(board).replace("_", "").replace("-", "").replace(" ", "")
+    return dict(_LARGE_SPEAKER_DEFAULTS) if compact in _LARGE_SPEAKER_BOARDS else {}
+
 _DISPLAY_THEME_SETTING_KEYS = {"display_theme", "display_wallpaper_interval_minutes"}
 _DISPLAY_THEME_FIELD_KEYS = _DISPLAY_THEME_SETTING_KEYS | {
     "display_theme_section",
@@ -2296,6 +2315,9 @@ def settings_snapshot(selector: Any = "", *, board: Any = "") -> Dict[str, Any]:
             for key, value in _ECHO_SCREEN_DEFAULTS.items():
                 if key not in device_raw:
                     current[key] = value
+        for key, value in _board_speaker_defaults(board).items():
+            if key not in device_raw:
+                current[key] = value
     current["wake_verifier_mode"] = _global_wake_verifier_mode()
     if _is_s420_board(board):
         for key in S420_LED_DEFAULTS:
@@ -2689,6 +2711,7 @@ def settings_fields(
         else settings_snapshot(selector, board=board)
     )
     screen_defaults = _ECHO_SCREEN_DEFAULTS if _board_is_echo_screen(board) else DEFAULTS
+    speaker_defaults = {**DEFAULTS, **_board_speaker_defaults(board)}
     catalog_selected = current["wake_word"] == "custom_url" and wake_word_catalog.is_catalog_url(
         current["wake_word_url"]
     )
@@ -3316,12 +3339,15 @@ def settings_fields(
             "label": "Bass Protection Floor (dB)",
             "type": "number",
             "value": current["bass_guard_db"],
-            "default": DEFAULTS["bass_guard_db"],
+            "default": speaker_defaults["bass_guard_db"],
             "min": -60,
             "max": 0,
             "step": 1,
             "show_when": {"source_key": "bass_guard_enabled", "equals": True},
-            "description": "Maximum low-bass reduction when protection is active. The safe default is -30 dB.",
+            "description": (
+                "Maximum low-bass reduction when protection is active. The default is -30 dB on the "
+                "small Dot, Show 5, and Spot speakers and -10 dB on the larger Echo and Echo Show 8 speakers."
+            ),
         },
         {
             "key": "limiter_enabled",
@@ -4098,6 +4124,12 @@ def save_settings(values: Dict[str, Any], *, selector: Any = "", board: Any = ""
         profile = _profile_for_save(incoming, current_raw)
         oww_profile = _oww_profile_for_save(incoming, current_raw)
     current_base = normalize_settings(current_raw, base=board_base)
+    if token:
+        # A partial save must not replace the board's speaker default with the
+        # global value; only an explicit value from this satellite does.
+        for key, value in _board_speaker_defaults(board).items():
+            if key not in device_raw:
+                current_base[key] = value
     normalized = normalize_settings(incoming, base={**current_base, **profile, **oww_profile})
     changed = [key for key, value in normalized.items() if current.get(key) != value]
     if ssh_password_changed:
