@@ -36,7 +36,7 @@ def _local_result(text: str = "ok"):
 
 
 class StructuredChatCompatibilityTests(unittest.IsolatedAsyncioTestCase):
-    async def test_native_tool_arguments_are_returned_as_legacy_json_content(self):
+    async def test_native_tool_arguments_are_normalized_as_json_content(self):
         class Client:
             def __init__(self):
                 self.calls = []
@@ -75,39 +75,34 @@ class StructuredChatCompatibilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(client.calls), 1)
         self.assertIn("Native structured-output mode", client.calls[0][0][0]["content"])
 
-    async def test_provider_tool_rejection_retries_unchanged_legacy_prompt(self):
-        original = [{"role": "system", "content": "Return JSON: {\"ok\":true}"}]
-
+    async def test_provider_tool_rejection_fails_without_prompt_retry(self):
         class Client:
             def __init__(self):
                 self.calls = []
 
             async def chat(self, *, messages, **kwargs):
                 self.calls.append((messages, kwargs))
-                if "tools" in kwargs:
-                    raise TypeError("tools unsupported")
-                return {"message": {"role": "assistant", "content": '{"ok":true}'}}
+                raise TypeError("tools unsupported")
 
         client = Client()
-        response = await helpers.llm_structured_chat(
-            client,
-            messages=original,
-            native_system_prompt="Decide whether the operation succeeded.",
-            schema={
-                "type": "object",
-                "properties": {"ok": {"type": "boolean"}},
-                "required": ["ok"],
-                "additionalProperties": False,
-            },
-        )
+        with self.assertRaisesRegex(TypeError, "tools unsupported"):
+            await helpers.llm_structured_chat(
+                client,
+                messages=[{"role": "system", "content": "unused legacy prompt"}],
+                native_system_prompt="Decide whether the operation succeeded.",
+                schema={
+                    "type": "object",
+                    "properties": {"ok": {"type": "boolean"}},
+                    "required": ["ok"],
+                    "additionalProperties": False,
+                },
+            )
 
-        self.assertEqual(response["_structured_output_mode"], "prompt_fallback")
+        self.assertEqual(len(client.calls), 1)
         self.assertIn("Decide whether the operation succeeded.", client.calls[0][0][0]["content"])
-        self.assertNotIn("Return JSON", client.calls[0][0][0]["content"])
-        self.assertEqual(client.calls[1][0], original)
-        self.assertNotIn("tools", client.calls[1][1])
+        self.assertIn("tools", client.calls[0][1])
 
-    async def test_native_attempt_accepts_valid_text_json_without_retry(self):
+    async def test_native_attempt_rejects_text_json_without_tool_call(self):
         class Client:
             def __init__(self):
                 self.call_count = 0
@@ -117,36 +112,33 @@ class StructuredChatCompatibilityTests(unittest.IsolatedAsyncioTestCase):
                 return {"message": {"role": "assistant", "content": 'Result: {"value":7}'}}
 
         client = Client()
-        response = await helpers.llm_structured_chat(client, messages=[])
+        with self.assertRaisesRegex(ValueError, "did not match the supplied schema"):
+            await helpers.llm_structured_chat(client, messages=[])
 
-        self.assertEqual(json.loads(response["message"]["content"]), {"value": 7})
         self.assertEqual(client.call_count, 1)
 
-    async def test_schema_mismatch_uses_prompt_fallback(self):
+    async def test_schema_mismatch_fails_without_prompt_retry(self):
         class Client:
             def __init__(self):
                 self.call_count = 0
 
             async def chat(self, **kwargs):
                 self.call_count += 1
-                if "tools" in kwargs:
-                    return {"message": {"role": "assistant", "content": '{"count":"wrong"}'}}
-                return {"message": {"role": "assistant", "content": '{"count":2}'}}
+                return {"message": {"role": "assistant", "content": '{"count":"wrong"}'}}
 
         client = Client()
-        response = await helpers.llm_structured_chat(
-            client,
-            messages=[],
-            schema={
-                "type": "object",
-                "properties": {"count": {"type": "integer"}},
-                "required": ["count"],
-            },
-        )
+        with self.assertRaisesRegex(ValueError, "did not match the supplied schema"):
+            await helpers.llm_structured_chat(
+                client,
+                messages=[],
+                schema={
+                    "type": "object",
+                    "properties": {"count": {"type": "integer"}},
+                    "required": ["count"],
+                },
+            )
 
-        self.assertEqual(json.loads(response["message"]["content"]), {"count": 2})
-        self.assertEqual(response["_structured_output_mode"], "prompt_fallback")
-        self.assertEqual(client.call_count, 2)
+        self.assertEqual(client.call_count, 1)
 
     def test_schema_validator_supports_nullable_and_any_of_types(self):
         schema = {
@@ -1663,7 +1655,7 @@ class ProviderCompatibilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["finish_reason"], "tool_calls")
 
 
-    async def test_thanatos_retries_legacy_contract_when_native_tools_are_rejected(self):
+    async def test_thanatos_fails_closed_when_native_tools_are_rejected(self):
         tool = hydra_tool_index.native_function_tool(
             tool_id="read_file",
             description="Read one file.",
@@ -1676,8 +1668,33 @@ class ProviderCompatibilityTests(unittest.IsolatedAsyncioTestCase):
 
             async def chat(self, **kwargs):
                 self.calls.append(dict(kwargs))
-                if kwargs.get("tools"):
-                    raise RuntimeError("tools unsupported")
+                raise RuntimeError("tools unsupported")
+
+            def get_perf_stats(self, *, reset=False):
+                return {}
+
+        client = Client()
+        text, _elapsed, native_call = await hydra_runtime._run_thanatos_step(
+            llm_client=client,
+            thanatos_messages=[{"role": "system", "content": "native"}],
+            max_tokens=128,
+            native_tools=[tool],
+        )
+
+        self.assertEqual(text, "")
+        self.assertIsNone(native_call)
+        self.assertEqual(len(client.calls), 1)
+        self.assertEqual(client.calls[0]["tools"], [tool])
+
+    async def test_thanatos_rejects_textual_tool_json_in_native_mode(self):
+        tool = hydra_tool_index.native_function_tool(
+            tool_id="read_file",
+            description="Read one file.",
+            usage='{"function":"read_file","arguments":{"path":"<path>"}}',
+        )
+
+        class Client:
+            async def chat(self, **_kwargs):
                 return _local_result(
                     '{"function":"read_file","arguments":{"path":"/tmp/a.txt"}}'
                 )
@@ -1685,20 +1702,15 @@ class ProviderCompatibilityTests(unittest.IsolatedAsyncioTestCase):
             def get_perf_stats(self, *, reset=False):
                 return {}
 
-        client = Client()
-        text, _elapsed, native_call, used_fallback = await hydra_runtime._run_thanatos_step(
-            llm_client=client,
+        text, _elapsed, native_call = await hydra_runtime._run_thanatos_step(
+            llm_client=Client(),
             thanatos_messages=[{"role": "system", "content": "native"}],
-            fallback_messages=[{"role": "system", "content": "legacy"}],
             max_tokens=128,
             native_tools=[tool],
         )
 
-        self.assertTrue(used_fallback)
+        self.assertEqual(text, "")
         self.assertIsNone(native_call)
-        self.assertIn('"function":"read_file"', text)
-        self.assertEqual(client.calls[0]["tools"], [tool])
-        self.assertNotIn("tools", client.calls[1])
 
     async def test_spud_link_forwards_and_preserves_native_tool_calls(self):
         tool = hydra_tool_index.native_function_tool(
@@ -2575,40 +2587,30 @@ class PromptCacheLayoutTests(unittest.TestCase):
         self.assertNotIn("strict JSON", reviewer)
         self.assertNotIn('{"goal":"clear goal"', reviewer)
 
-    def test_astraeus_uses_semantic_native_prompt_then_unchanged_legacy_fallback(self):
-        legacy_result = {
-            "mode": "execute",
-            "relation": "standalone",
-            "goal": "Research the topic",
-            "question": "",
-            "pending_interaction": {
-                "kind": "none",
-                "goal": "",
-                "tool_hint": "",
-                "known_details": [],
-                "missing_details": [],
-                "choices": [],
-                "question": "",
-            },
-            "steps": [
-                {
-                    "step_id": 1,
-                    "intent": "Research the topic",
-                    "nl": "Research the topic",
-                    "tool_hint": "websearch",
-                }
-            ],
-        }
+    def test_astraeus_prompt_is_compact_and_keeps_critical_routing_rules(self):
+        prompt = hydra_prompts.astraeus_system_prompt(platform="webui")
 
+        self.assertLess(len(prompt), 3200)
+        for required in (
+            "payload.current_user_message",
+            "payload.route_lock",
+            "pending_interaction",
+            "action_offer",
+            "payload.available_tool_ids",
+            "websearch",
+            "download_file",
+            "send_message",
+        ):
+            self.assertIn(required, prompt)
+
+    def test_astraeus_native_failure_does_not_retry_a_legacy_prompt(self):
         class Client:
             def __init__(self):
                 self.calls = []
 
             async def chat(self, **kwargs):
                 self.calls.append(dict(kwargs))
-                if kwargs.get("tools"):
-                    raise TypeError("tools unsupported")
-                return _local_result(json.dumps(legacy_result))
+                raise TypeError("tools unsupported")
 
             def get_perf_stats(self, *, reset=False):
                 return {}
@@ -2633,13 +2635,11 @@ class PromptCacheLayoutTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(result["mode"], "execute")
-        self.assertEqual(result["steps"][0]["tool_hint"], "websearch")
-        self.assertEqual(len(client.calls), 2)
+        self.assertEqual(result["mode"], "unknown")
+        self.assertEqual(result["steps"], [])
+        self.assertEqual(len(client.calls), 1)
         self.assertIn("tools", client.calls[0])
         self.assertNotIn("strict JSON", client.calls[0]["messages"][0]["content"])
-        self.assertNotIn("tools", client.calls[1])
-        self.assertIn("strict JSON", client.calls[1]["messages"][0]["content"])
 
     def test_astraeus_semantically_resolves_structured_pending_interaction(self):
         pending = {
@@ -2666,7 +2666,20 @@ class PromptCacheLayoutTests(unittest.TestCase):
 
             async def chat(self, **kwargs):
                 self.calls.append(dict(kwargs))
-                return _local_result(json.dumps(decision))
+                function_name = kwargs["tools"][0]["function"]["name"]
+                return {
+                    "message": {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": "call_plan",
+                                "type": "function",
+                                "function": {"name": function_name, "arguments": decision},
+                            }
+                        ],
+                    }
+                }
 
             def get_perf_stats(self, *, reset=False):
                 return {}
@@ -2717,8 +2730,21 @@ class PromptCacheLayoutTests(unittest.TestCase):
         }
 
         class Client:
-            async def chat(self, **_kwargs):
-                return _local_result(json.dumps(decision))
+            async def chat(self, **kwargs):
+                function_name = kwargs["tools"][0]["function"]["name"]
+                return {
+                    "message": {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": "call_plan",
+                                "type": "function",
+                                "function": {"name": function_name, "arguments": decision},
+                            }
+                        ],
+                    }
+                }
 
             def get_perf_stats(self, *, reset=False):
                 return {}
@@ -2931,7 +2957,7 @@ class PromptCacheLayoutTests(unittest.TestCase):
         self.assertNotIn("Current Local Date and Time", prompt)
 
     def test_static_execution_prompt_excludes_volatile_date_and_clock(self):
-        prompt = hydra_prompts.thanatos_system_prompt(
+        prompt = hydra_prompts.thanatos_native_tools_system_prompt(
             platform="webui",
             ascii_only_platforms=(),
         )
@@ -2989,11 +3015,22 @@ class DeterministicStateUpdateTests(unittest.IsolatedAsyncioTestCase):
             self.calls = 0
             self.response_state = response_state or {}
 
-        async def chat(self, **_kwargs):
+        async def chat(self, **kwargs):
             self.calls += 1
+            function_name = kwargs["tools"][0]["function"]["name"]
             return {
                 "message": {
-                    "content": json.dumps(self.response_state),
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_state",
+                            "type": "function",
+                            "function": {
+                                "name": function_name,
+                                "arguments": self.response_state,
+                            },
+                        }
+                    ],
                 }
             }
 

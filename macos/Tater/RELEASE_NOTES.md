@@ -23,6 +23,15 @@ second generation (2021), model C76N8S, codename `cronos`.
 - Keeps Cronos separate from the visually similar Checkers target so an update
   for the wrong Echo Show 5 generation cannot be selected.
 
+### Hydra prompt and tool execution
+
+- Reduces planner prompt overhead while preserving routing, authorization,
+  pending-interaction, tool-ordering, and prerequisite-discovery rules.
+- Uses native structured tool schemas throughout Hydra planning, plan review,
+  and step execution instead of retrying with legacy JSON-in-text prompts.
+- Rejects missing or malformed native structured output rather than treating
+  JSON-like response text as a valid tool decision.
+
 ### Echo Firmware v4.1.0 companion release
 
 - Adds the first hardware-tested Tater Linux release for Cronos, including its

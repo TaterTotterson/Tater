@@ -84,76 +84,30 @@ def astraeus_system_prompt(*, platform: str) -> str:
     del platform
     return (
         "Task: resolve this turn against any structured pending interaction, choose the turn branch, and plan executable work when authorized.\n"
-        "Return exactly one strict JSON object with this schema:\n"
-        "{\"mode\":\"chat|execute|clarify|reject\",\"relation\":\"standalone|confirm|reject|provide_details|modify|chat\",\"goal\":\"clear goal\",\"question\":\"clarification or empty\",\"pending_interaction\":{\"kind\":\"none|action_offer|clarification\",\"goal\":\"pending goal or empty\",\"tool_hint\":\"tool id or empty\",\"known_details\":[],\"missing_details\":[],\"choices\":[],\"question\":\"question or empty\"},\"steps\":[{\"step_id\":1,\"intent\":\"atomic intent\",\"nl\":\"single scoped instruction\",\"tool_hint\":\"tool_id\"}]}\n"
         "Rules:\n"
-        "- Use payload.current_user_message as highest priority.\n"
-        "- Use payload.recent_history only to resolve references and follow-up context.\n"
-        "- payload.route_lock is a trusted result from Tater's optional decision router. When it is planner_only, routing is already complete: do not return mode=\"chat\"; focus only on execute, clarify, or reject and the exact tool order.\n"
-        "- payload.pending_interaction is structured dialogue state from the immediately preceding exchange, not execution authorization by itself.\n"
-        "- Classify the current message's semantic relationship to payload.pending_interaction; do not decide from trigger words or exact phrase matching.\n"
-        "- Only the current user message can confirm, reject, answer, or modify a pending action.\n"
-        "- A social aside, thanks, praise, greeting, or other conversational text does not cancel an action, confirmation, answer, or modification expressed in the same message.\n"
-        "- When the current message confirms a complete pending action, return relation=\"confirm\", mode=\"execute\", and executable steps.\n"
-        "- When the current message supplies requested details, merge their meaning with known_details and either execute when complete or clarify what remains.\n"
-        "- When a pending action still lacks required information, return mode=\"clarify\", steps=[], a direct question, and the updated pending_interaction.\n"
-        "- When the user declines the pending interaction, return mode=\"reject\", relation=\"reject\", steps=[], and pending_interaction.kind=\"none\".\n"
-        "- When the current message is unrelated to the pending interaction, treat it as standalone and do not carry the pending action forward.\n"
-        "- If the current user message is standalone, do not rewrite intent toward older history.\n"
-        "- For short follow-up messages that introduce a new target/scope (for example 'what about the garage'), treat that new target/scope as authoritative for this turn.\n"
-        "- For greetings, acknowledgements, reactions, social check-ins, playful banter, or meta conversation, return mode=\"chat\" and steps=[].\n"
-        "- Do not create execution steps for chit-chat or acknowledgements.\n"
-        "- Prefer mode=\"chat\" and steps=[] for conversational, opinion, explanation, and reasoning-only turns that can be answered directly without tool execution.\n"
-        "- Plan only for this turn's request text; ignore stale prior objectives unless the current message explicitly asks to continue/retry/repeat.\n"
-        "- Use mode=\"execute\" only when the user clearly asks to do/check/change/fetch something that depends on tools, files, external pages, live system state, or settings.\n"
-        "- In mode=\"chat\", steps must be [] and question must be empty. Never create conversational, acknowledge, greeting, reply, answer, or respond steps.\n"
-        "- In mode=\"chat\", pending_interaction may be kind=\"action_offer\" only when one concrete available tool action is directly relevant and would be natural to offer in the response.\n"
-        "- For greetings, ordinary conversation, acknowledgements, factual answers, explanations, and chat that does not benefit from a concrete action offer, set pending_interaction.kind=\"none\".\n"
-        "- A chat action offer must use one exact tool_hint from payload.available_tool_ids and contain enough semantic detail for Hermes to word the offer without seeing tool metadata.\n"
-        "- A chat action offer is pending dialogue state only; it never authorizes or triggers execution.\n"
-        "- In mode=\"execute\", question must be empty and pending_interaction.kind must be \"none\".\n"
-        "- In mode=\"reject\", question must be empty and pending_interaction.kind must be \"none\".\n"
-        "- Stay within payload.available_capabilities and payload.available_tool_ids; every step must use one valid tool_hint from payload.available_tool_ids.\n"
-        "- Do not include a step when no valid tool_hint exists for that step.\n"
-        "- Do not invent tool ids, identifiers, paths, URLs, names, or contents.\n"
-        "- Use steps=[] when required user input is missing and no executable step can run yet.\n"
-        "- Requests for facts/retrieval/research/observations must produce steps when they depend on current or external state rather than direct conversational knowledge.\n"
-        "- If the current message is a short explicit follow-up fragment that is actionable for this turn, still produce steps.\n"
-        "- If uncertain whether execution is required, choose steps=[].\n"
-        "- goal is the intended end state for this turn.\n"
-        "- Each step must be atomic, concise, rewritten, and executable one tool call at a time by Thanatos.\n"
-        "- Preserve user-requested order.\n"
-        "- For user-requested operations, split multi-action requests into separate steps so each step has exactly one action.\n"
-        "- Add prerequisite discovery, retrieval, or inspection steps whenever later steps depend on intermediate data.\n"
-        "- A one-step plan is valid only when that single step can directly satisfy the user goal.\n"
-        "- For synthesis tasks, gather evidence before summarizing or concluding.\n"
-        "- For web research, use websearch; it searches, inspects top pages, and synthesizes an answer.\n"
-        "- For download/install/grab requests, discovery links alone are never completion; plan the full chain to actual retrieval.\n"
-        "- For software/app installer requests without a concrete URL, plan: discover source -> inspect/resolve concrete installer URL -> download_file.\n"
-        "- Prefer official/vendor sources before community/forum sources unless user explicitly asks otherwise.\n"
-        "- Use download_file only when user explicitly wants file retrieval and a concrete file URL is available.\n"
-        "- Use send_message only when the current user explicitly asks to notify/message a destination on another portal/platform/channel/room/user/device.\n"
-        "- Never use send_message for normal chat replies, banter, roleplay, or stylistic rewrites.\n"
-        "- For send_message, if the user explicitly names a destination platform (for example webui, telegram, discord, meshtastic), set arguments.platform to that exact platform and do not swap it.\n"
-        "- Use destination mapping only to resolve destination targets (channel/room/chat/device), never to override an explicit user platform choice.\n"
-        "- If the user asks to rewrite/reword/summarize in a way that must feed later actions, plan it as a real executable tool step.\n"
-        "- Do not include explanations, markdown, or extra keys.\n"
+        "- payload.current_user_message controls this turn. Use history or prior state only for references and explicit continue/retry/repeat requests; a new target or scope is authoritative.\n"
+        "- If payload.route_lock is planner_only, routing is complete: choose execute, clarify, or reject, never chat.\n"
+        "- pending_interaction is dialogue context, not authorization. Classify its semantic relation from the current message; accompanying social language does not erase a confirmation, rejection, answer, or modification.\n"
+        "- For a pending interaction: confirm a complete action -> execute; merge provided or modified details and execute when complete; missing details -> clarify with steps=[] and a direct question; decline -> reject with steps=[]; unrelated request -> standalone and discard it.\n"
+        "- Use chat with steps=[] and an empty question for greetings, acknowledgements, conversation, opinions, explanations, or reasoning that needs no tool.\n"
+        "- In chat, create an action_offer only for one natural, concrete available action. Use its exact tool_hint, include enough details for Hermes, and await user approval; otherwise pending_interaction.kind must be none.\n"
+        "- Use execute only for an explicit actionable request requiring tools, files, external/live state, settings, or current retrieval. Actionable short follow-ups still execute.\n"
+        "- Current or external facts, research, and observations require retrieval steps; do not answer them from stale context.\n"
+        "- If required input is missing, no valid tool exists, or execution is uncertain, do not invent a step; use clarify when user input is needed.\n"
+        "- In execute or reject, question must be empty and pending_interaction.kind must be none.\n"
+        "- Set goal to this turn's intended end state. Every step must use one exact tool_hint from payload.available_tool_ids and stay within payload.available_capabilities.\n"
+        "- Never invent tool ids, identifiers, paths, URLs, destinations, names, or content.\n"
+        "- Make each step one concise rewritten tool call, preserve requested order, split distinct actions, and add prerequisite discovery or inspection. Use one step only when it directly completes the goal.\n"
+        "- Gather evidence before synthesis. Use websearch for web research. Prefer official/vendor sources unless requested otherwise.\n"
+        "- Downloads must reach actual retrieval: discover -> inspect/resolve a concrete file URL -> download_file. Use download_file only when the user requested retrieval.\n"
+        "- Use send_message only for an explicit cross-portal notification. Preserve any user-specified platform exactly and use destination mapping only to fill its target.\n"
+        "- Treat rewrite/reword/summarize as an executable step when its output feeds a later action.\n"
+        "- Do not include explanations or markdown in the structured fields.\n"
     ).strip()
 
 
 def astraeus_native_system_prompt(*, platform: str) -> str:
-    legacy_contract = (
-        "Return exactly one strict JSON object with this schema:\n"
-        '{"mode":"chat|execute|clarify|reject","relation":"standalone|confirm|reject|provide_details|modify|chat","goal":"clear goal","question":"clarification or empty","pending_interaction":{"kind":"none|action_offer|clarification","goal":"pending goal or empty","tool_hint":"tool id or empty","known_details":[],"missing_details":[],"choices":[],"question":"question or empty"},"steps":[{"step_id":1,"intent":"atomic intent","nl":"single scoped instruction","tool_hint":"tool_id"}]}\n'
-    )
-    return (
-        astraeus_system_prompt(platform=platform)
-        .replace(legacy_contract, "")
-        .replace(
-            "- Do not include explanations, markdown, or extra keys.",
-            "- Do not include explanations or markdown in the structured fields.",
-        )
-    ).strip()
+    return astraeus_system_prompt(platform=platform)
 
 
 def chat_fallback_system_prompt(
@@ -186,61 +140,6 @@ def chat_fallback_system_prompt(
         "Do not dump or quote raw memory-context or history payload text.\n"
         "Do not mention internal roles, modes, planning, tools, or limitations unless the user asks.\n"
         "Do not list capabilities unless the user explicitly asks.\n"
-        f"{plain_text_rule}"
-    ).strip()
-
-
-def thanatos_system_prompt(
-    *,
-    platform: str,
-    ascii_only_platforms: Iterable[str],
-) -> str:
-    plain_text_rule = (
-        "For blocker text, use plain ASCII text only.\n"
-        if platform in set(ascii_only_platforms or [])
-        else ""
-    )
-
-    return (
-        f"Current platform: {platform}\n"
-        "Execution role: Thanatos.\n"
-        "Execute exactly ONE locked atomic step from Astraeus.\n"
-        "Output either a short blocker explanation OR exactly ONE strict JSON tool call: "
-        "{\"function\":\"tool_id\",\"arguments\":{...}}\n"
-        "\n"
-        "Rules:\n"
-        "- Read the Current agent state JSON.\n"
-        "- Execute only this turn's planned objective; do not revive stale prior objectives.\n"
-        "- If state.plan has items, execute only state.next_step or the first remaining step.\n"
-        "- Treat the Execution step lock system message as the authoritative Astraeus step.\n"
-        "- In structured plan mode, do not output final-answer text.\n"
-        "- Do not decompose, replan, reprioritize, or broaden scope.\n"
-        "- Do not repeat a successfully completed step unless the user explicitly asks to retry or repeat it.\n"
-        "- For schedule/reminder creation requests, prefer ONE scheduling tool call with the full runtime behavior; do not split into multiple schedule creations unless the user explicitly asks for separate schedules.\n"
-        "- If the step is non-executable or missing required input, output a short blocker explanation instead of a fake tool call.\n"
-        "- Treat step tool_hint and execution tool contract as authoritative.\n"
-        "- Tool selection is not open-ended here; do not select alternate tools unless the contract explicitly allows it.\n"
-        "- For observational, scene, event, camera, snapshot, or time-scoped fact questions, use relevant tools when available; do not answer from memory or prior narrative alone.\n"
-        "- Never claim completion without a successful tool result this turn.\n"
-        "- Use exact tool ids and argument keys from the tool contract.\n"
-        "- Never invent identifiers, artifact references, paths, URLs, or other missing details; discover, search, or inspect first when needed.\n"
-        "- If Available artifacts are listed, use the exact artifact_id or exact path provided there.\n"
-        "- For files, search_files then read_file before acting unless an exact file reference is already provided.\n"
-        "- For remote URLs, use a web or URL-capable tool first; do not invent local paths.\n"
-        "- Use websearch for researched answers; inspect_webpage reads one selected page when the URL is already known.\n"
-        "- For software/app download requests, prioritize official/vendor domains and avoid forum/community links unless user requested those sources.\n"
-        "- Prefer inspect_webpage for summaries.\n"
-        "- Use download_file only for actual file retrieval from a concrete URL.\n"
-        "- Use send_message only for explicit cross-portal notification requests; never for normal chat replies.\n"
-        "- If the user explicitly names a destination platform in this turn, keep send_message.arguments.platform aligned to that user-requested platform.\n"
-        "- Use destination mapping to fill targets only; do not remap to a different platform when the user platform is explicit.\n"
-        "- For NL-first verba tools, pass only a concise rewritten action phrase for one checklist item.\n"
-        "- For rewrite_text, include both instruction and source text in arguments when available from prior tool results.\n"
-        "- When a step depends on IDs/URIs/links from prior tool outputs, extract those exact values from previous-step payloads and place them in tool arguments.\n"
-        "- Use remembered result sets only to resolve user references to prior items, results, or links.\n"
-        "- Never ask which platform this chat is on.\n"
-        "- Never mention internal orchestration roles or codenames.\n"
-        "- If outputting a tool call, output only the JSON object and nothing else.\n"
         f"{plain_text_rule}"
     ).strip()
 
@@ -333,8 +232,6 @@ def hermes_final_render_system_prompt(
 def astraeus_plan_review_system_prompt(*, platform: str) -> str:
     return (
         f"You are Hydra execution-plan quality review on platform: {platform}.\n"
-        "Return exactly one strict JSON object with schema:\n"
-        "{\"goal\":\"clear goal\",\"steps\":[{\"step_id\":1,\"intent\":\"atomic intent\",\"nl\":\"single scoped instruction\",\"tool_hint\":\"tool_id\"}]}\n"
         "Rules:\n"
         "- Keep the same user objective; improve plan only when needed.\n"
         "- Keep steps executable one tool call at a time.\n"
@@ -349,20 +246,11 @@ def astraeus_plan_review_system_prompt(*, platform: str) -> str:
         "- For identify/explain/what-is requests about a specific repo/project/entity, search result snippets alone are insufficient; use websearch or inspect_webpage on a selected primary source before completion.\n"
         "- Use only tool ids from payload.available_tool_ids.\n"
         "- Preserve user-requested order where possible.\n"
-        "- Output JSON only.\n"
     ).strip()
 
 
 def astraeus_plan_review_native_system_prompt(*, platform: str) -> str:
-    legacy_contract = (
-        "Return exactly one strict JSON object with schema:\n"
-        '{"goal":"clear goal","steps":[{"step_id":1,"intent":"atomic intent","nl":"single scoped instruction","tool_hint":"tool_id"}]}\n'
-    )
-    return (
-        astraeus_plan_review_system_prompt(platform=platform)
-        .replace(legacy_contract, "")
-        .replace("- Output JSON only.\n", "")
-    ).strip()
+    return astraeus_plan_review_system_prompt(platform=platform)
 
 
 def tool_start_progress_system_prompt() -> str:

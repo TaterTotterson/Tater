@@ -1709,41 +1709,6 @@ def _astraeus_capability_catalog(
     )
 
 
-def _tool_contract_row(
-    *,
-    tool_id: str,
-    platform: str,
-    registry: Dict[str, Any],
-    enabled_predicate: Optional[Callable[[str], bool]],
-    origin: Optional[Dict[str, Any]] = None,
-) -> str:
-    canonical = _canonical_tool_name(tool_id)
-    if not canonical:
-        return ""
-    kernel_tool_ids = {
-        _canonical_tool_name(item)
-        for item in _ordered_kernel_tool_ids(platform=platform, origin=origin)
-    }
-    if canonical in kernel_tool_ids:
-        return (
-            f"- id: {canonical} | description: {_kernel_tool_purpose(canonical, platform=platform)} | "
-            f"usage: {_kernel_tool_usage(canonical, platform=platform)}"
-        )
-    plugin = registry.get(canonical)
-    if plugin is None:
-        return ""
-    enabled_check = enabled_predicate or (lambda _name: True)
-    raw_tool_id = str(tool_id or "").strip()
-    if not (enabled_check(canonical) or (raw_tool_id and enabled_check(raw_tool_id))):
-        return ""
-    if not verba_supports_platform(plugin, platform):
-        return ""
-    return (
-        f"- id: {canonical} | description: {_tool_purpose(plugin)} | "
-        f"usage: {_plugin_usage_text(plugin)}"
-    )
-
-
 def _native_tool_for_step(
     *,
     current_plan_step: Optional[Dict[str, Any]],
@@ -1778,40 +1743,6 @@ def _native_tool_for_step(
         usage=_plugin_usage_text(plugin),
         plugin=plugin,
     )
-
-
-def _thanatos_execution_tool_contract_prompt(
-    *,
-    current_plan_step: Optional[Dict[str, Any]],
-    platform: str,
-    registry: Dict[str, Any],
-    enabled_predicate: Optional[Callable[[str], bool]],
-    fallback_tool_index: str,
-    origin: Optional[Dict[str, Any]] = None,
-) -> str:
-    step = current_plan_step if isinstance(current_plan_step, dict) else {}
-    hinted_tool = _canonical_tool_name(str(step.get("tool_hint") or "").strip())
-    if hinted_tool:
-        contract_row = _tool_contract_row(
-            tool_id=hinted_tool,
-            platform=platform,
-            registry=registry,
-            enabled_predicate=enabled_predicate,
-            origin=origin,
-        )
-        if contract_row:
-            return (
-                "Execution tool contract for this step:\n"
-                f"{contract_row}\n"
-                "Use this tool contract directly for tool id and argument shape."
-            )
-    if fallback_tool_index:
-        return (
-            "Execution contract missing for this step (no valid tool_hint resolved).\n"
-            "Do not choose from global catalogs.\n"
-            "Output a short blocker explanation so Astraeus can replan the step."
-        )
-    return ""
 
 
 def _compact_history(history_messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -2010,13 +1941,6 @@ def _thanatos_execution_step_prompt(
 def _current_datetime_context_message() -> str:
     now = datetime.now().astimezone()
     return "Current Local Date and Time: " + now.strftime("%A, %B %d, %Y at %I:%M %p %Z")
-
-
-def _thanatos_system_prompt(platform: str) -> str:
-    return prompts.thanatos_system_prompt(
-        platform=platform,
-        ascii_only_platforms=ASCII_ONLY_PLATFORMS,
-    ).strip()
 
 
 def _thanatos_native_tools_system_prompt(platform: str) -> str:
@@ -3414,13 +3338,11 @@ async def _run_thanatos_step(
     thanatos_messages: List[Dict[str, Any]],
     max_tokens: Optional[int],
     native_tools: Optional[List[Dict[str, Any]]] = None,
-    fallback_messages: Optional[List[Dict[str, Any]]] = None,
     debug_out: Optional[Dict[str, Any]] = None,
-) -> tuple[str, float, Optional[Dict[str, Any]], bool]:
+) -> tuple[str, float, Optional[Dict[str, Any]]]:
     started = time.perf_counter()
     text = ""
     native_tool_call: Optional[Dict[str, Any]] = None
-    used_legacy_fallback = False
     perf_before = _llm_perf_snapshot(llm_client)
     if isinstance(debug_out, dict):
         _populate_llm_prompt_debug(debug_out, messages=thanatos_messages)
@@ -3438,23 +3360,7 @@ async def _run_thanatos_step(
         }
         if native_tools:
             chat_kwargs["tools"] = native_tools
-        try:
-            thanatos_resp = await llm_client.chat(**chat_kwargs)
-        except Exception:
-            if not native_tools or not fallback_messages:
-                raise
-            used_legacy_fallback = True
-            thanatos_resp = await llm_client.chat(
-                messages=fallback_messages,
-                temperature=0.2,
-                activity="execution",
-                cache_namespace="hydra:thanatos:legacy",
-                **_chat_with_optional_max_tokens_kwargs(
-                    max_tokens=max_tokens,
-                    minimum=1,
-                    fallback=1,
-                ),
-            )
+        thanatos_resp = await llm_client.chat(**chat_kwargs)
         text = _coerce_text((thanatos_resp.get("message", {}) or {}).get("content", "")).strip()
         _populate_llm_reasoning_debug(debug_out, response=thanatos_resp)
         raw_tool_calls = (thanatos_resp.get("message", {}) or {}).get("tool_calls")
@@ -3482,6 +3388,8 @@ async def _run_thanatos_step(
                         "function": function_name,
                         "arguments": dict(parsed_arguments),
                     }
+        if native_tools and native_tool_call is None and _is_tool_candidate(text):
+            text = ""
     except Exception:
         text = ""
     elapsed_ms = (time.perf_counter() - started) * 1000.0
@@ -3490,13 +3398,12 @@ async def _run_thanatos_step(
         debug_out["wall_ms"] = int(max(0.0, elapsed_ms))
         debug_out["native_tools_requested"] = bool(native_tools)
         debug_out["native_tool_call"] = bool(native_tool_call)
-        debug_out["legacy_fallback_used"] = bool(used_legacy_fallback)
     _populate_llm_perf_debug(
         debug_out,
         before=perf_before,
         after=_llm_perf_snapshot(llm_client),
     )
-    return text, elapsed_ms, native_tool_call, used_legacy_fallback
+    return text, elapsed_ms, native_tool_call
 
 
 def _estimate_text_tokens_approx(text: Any) -> int:
@@ -6640,7 +6547,7 @@ async def _run_hydra_turn_impl(
             origin=origin_payload,
         )
         thanatos_messages: List[Dict[str, Any]] = [
-            {"role": "system", "content": _thanatos_system_prompt(platform)},
+            {"role": "system", "content": _thanatos_native_tools_system_prompt(platform)},
         ]
         thanatos_messages.extend([
             {
@@ -6683,64 +6590,42 @@ async def _run_hydra_turn_impl(
                     ),
                 }
             )
-            tool_contract_prompt = _thanatos_execution_tool_contract_prompt(
-                current_plan_step=current_plan_step,
-                platform=platform,
-                registry=registry,
-                enabled_predicate=enabled_predicate,
-                fallback_tool_index=tool_index,
-                origin=origin_payload,
-            )
-            if tool_contract_prompt:
-                thanatos_messages.append({"role": "system", "content": tool_contract_prompt})
-        legacy_thanatos_messages = _with_platform_preamble(
-            [dict(item) for item in thanatos_messages],
+        thanatos_messages = _with_platform_preamble(
+            thanatos_messages,
             platform_preamble=tool_platform_preamble,
         )
-        legacy_thanatos_messages.extend(history)
-        legacy_thanatos_messages.append({"role": "user", "content": round_request_text})
-        if native_tool:
-            native_messages: List[Dict[str, Any]] = []
-            for index, item in enumerate(thanatos_messages):
-                content = str(item.get("content") or "") if isinstance(item, dict) else ""
-                if content.startswith("Execution tool contract for this step:"):
-                    continue
-                copied = dict(item)
-                if index == 0:
-                    copied["content"] = _thanatos_native_tools_system_prompt(platform)
-                native_messages.append(copied)
-            thanatos_messages = _with_platform_preamble(
-                native_messages,
-                platform_preamble=tool_platform_preamble,
-            )
-            thanatos_messages.extend(history)
-            thanatos_messages.append({"role": "user", "content": round_request_text})
-        else:
-            thanatos_messages = legacy_thanatos_messages
+        thanatos_messages.extend(history)
+        thanatos_messages.append({"role": "user", "content": round_request_text})
 
         current_thanatos_debug: Dict[str, Any] = {
             "round": int(rounds_used + 1),
             "step_id": str(current_step_id or ""),
         }
-        thanatos_text, thanatos_ms, native_tool_call, used_legacy_fallback = await _run_thanatos_step(
-            llm_client=llm_client_thanatos,
-            thanatos_messages=thanatos_messages,
-            max_tokens=None,
-            native_tools=[native_tool] if native_tool else None,
-            fallback_messages=legacy_thanatos_messages if native_tool else None,
-            debug_out=current_thanatos_debug,
-        )
+        if native_tool:
+            thanatos_text, thanatos_ms, native_tool_call = await _run_thanatos_step(
+                llm_client=llm_client_thanatos,
+                thanatos_messages=thanatos_messages,
+                max_tokens=None,
+                native_tools=[native_tool],
+                debug_out=current_thanatos_debug,
+            )
+        else:
+            thanatos_text = "No valid native execution tool is available for this step."
+            thanatos_ms = 0.0
+            native_tool_call = None
+            current_thanatos_debug["native_tools_requested"] = False
+            current_thanatos_debug["native_tool_call"] = False
+            current_thanatos_debug["completion_chars"] = len(thanatos_text)
+            current_thanatos_debug["wall_ms"] = 0
         thanatos_debug = dict(current_thanatos_debug)
         thanatos_ms_total += thanatos_ms
 
         if native_tool_call:
             thanatos_text = json.dumps(native_tool_call, ensure_ascii=False, separators=(",", ":"))
             round_thanatos_kind = "native_tool"
-        elif used_legacy_fallback:
-            round_thanatos_kind = "legacy_fallback"
 
         if _is_tool_candidate(thanatos_text):
-            if round_thanatos_kind not in {"native_tool", "legacy_fallback"}:
+            if round_thanatos_kind != "native_tool":
                 round_thanatos_kind = "tool"
         else:
             round_thanatos_kind = "answer"
@@ -6830,7 +6715,7 @@ async def _run_hydra_turn_impl(
             repairs_used_count += 1
         if bool(tool_eval.get("repair_used")):
             round_thanatos_kind = "repaired_tool"
-        elif round_thanatos_kind not in {"native_tool", "legacy_fallback"}:
+        elif round_thanatos_kind != "native_tool":
             round_thanatos_kind = "tool"
 
         if not bool(tool_eval.get("ok")):

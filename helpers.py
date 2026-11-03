@@ -1620,10 +1620,6 @@ def _structured_output_from_response(
         arguments = _native_tool_arguments(function.get("arguments"))
         if _structured_output_matches_schema(arguments, schema):
             return arguments
-    content = message.get("content")
-    for value in _json_values_from_text(content):
-        if isinstance(value, dict) and _structured_output_matches_schema(value, schema):
-            return dict(value)
     return None
 
 
@@ -1652,14 +1648,15 @@ async def llm_structured_chat(
     description: str = "Submit the requested structured result.",
     **chat_kwargs: Any,
 ) -> Dict[str, Any]:
-    """Use native tool calling for JSON-shaped LLM work, then retry the legacy prompt.
+    """Use native tool calling for JSON-shaped LLM work.
 
     The returned shape deliberately matches ``LLMClient.chat`` and places the
     selected object in ``message.content``. Existing kernel tools, cores, and
     Verbas can therefore keep their current JSON parsing and validation logic.
-    ``native_messages`` or ``native_system_prompt`` may remove legacy JSON-format
-    instructions from the native attempt; ``messages`` is always retained
-    unchanged for a provider that rejects native tools.
+    ``native_messages`` or ``native_system_prompt`` may replace prompt-level JSON
+    formatting instructions with a semantic prompt for the native request.
+    Providers must support the supplied function contract; native failures are
+    propagated without a prompt-only retry.
     """
     output_schema: Dict[str, Any] = dict(
         schema
@@ -1707,8 +1704,8 @@ async def llm_structured_chat(
     native_instruction = (
         "Native structured-output mode is enabled for this request. Use the supplied "
         f"{safe_name} function exactly once with the requested result. Do not print the "
-        "JSON object or add explanatory prose. Any earlier request to return, print, or "
-        "format JSON describes the function arguments and remains the fallback behavior."
+        "JSON object or add explanatory prose. The supplied function schema is authoritative "
+        "for the output shape."
     )
     system_index = next(
         (index for index, item in enumerate(native_request_messages) if item.get("role") == "system"),
@@ -1720,34 +1717,21 @@ async def llm_structured_chat(
         prior = _coerce_content_to_text(native_request_messages[system_index].get("content"))
         native_request_messages[system_index]["content"] = f"{prior}\n\n{native_instruction}".strip()
 
-    fallback_kwargs = dict(chat_kwargs)
+    native_kwargs = dict(chat_kwargs)
     for key in ("tools", "tool_choice", "parallel_tool_calls"):
-        fallback_kwargs.pop(key, None)
-    native_kwargs = dict(fallback_kwargs)
+        native_kwargs.pop(key, None)
     native_kwargs["tools"] = [tool]
-    try:
-        native_response = await llm_client.chat(messages=native_request_messages, **native_kwargs)
-        native_value = _structured_output_from_response(
-            native_response,
-            function_name=safe_name,
-            schema=output_schema,
-        )
-        if native_value is not None:
-            return _structured_chat_response(native_response, native_value, "native_tool")
-    except Exception as exc:
-        logger.debug("Native structured output was unavailable; using prompt fallback: %s", exc)
-
-    fallback_response = await llm_client.chat(messages=original_messages, **fallback_kwargs)
-    fallback_value = _structured_output_from_response(
-        fallback_response,
+    native_response = await llm_client.chat(messages=native_request_messages, **native_kwargs)
+    native_value = _structured_output_from_response(
+        native_response,
         function_name=safe_name,
         schema=output_schema,
     )
-    if fallback_value is not None:
-        return _structured_chat_response(fallback_response, fallback_value, "prompt_fallback")
-    fallback_map = _mapping_from_object(fallback_response)
-    fallback_map["_structured_output_mode"] = "prompt_fallback_unparsed"
-    return fallback_map
+    if native_value is None:
+        raise ValueError(
+            f"Native structured output for {safe_name} did not match the supplied schema"
+        )
+    return _structured_chat_response(native_response, native_value, "native_tool")
 
 
 def _image_data_url(image_bytes: bytes, filename: str = "") -> str:
