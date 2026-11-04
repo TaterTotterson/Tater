@@ -320,3 +320,9 @@ Hydra model settings are saved by TaterOS and used at runtime. Base, Terminal, B
 - Local context length is configured in **Settings -> Models -> LLM / Vision**.
 - Thinking suppression is enabled by default for local providers when supported.
 - `run_ui.sh` starts Uvicorn with `--no-access-log` to suppress per-request log spam. Shutdown waits at most eight seconds for long-lived WebSocket and event-stream connections before cancelling them, so a stale satellite or browser connection cannot block a restart. Set `HTMLUI_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS` to override that connection-drain deadline.
+
+## License and trademarks
+
+This project is licensed under the [GNU Affero General Public License v3.0](LICENSE).
+
+The Tater name and logo are governed by the [Tater Trademark Policy](TRADEMARKS.md).
