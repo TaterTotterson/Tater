@@ -30,6 +30,7 @@ except Exception:  # Python 3.13 removed audioop
     _audioop = None
 import copy
 import contextlib
+import difflib
 import hashlib
 import html
 import importlib
@@ -6156,12 +6157,12 @@ def _native_wake_preroll_pending(session: VoiceSessionRuntime, now_ts: float) ->
     return deadline <= 0.0 or float(now_ts) < deadline
 
 
-def _native_discard_wake_preroll(
+def _native_account_wake_preroll(
     session: VoiceSessionRuntime,
     audio_bytes: bytes,
     now_ts: float,
 ) -> None:
-    """Account for wake audio that must not enter VAD or speech recognition."""
+    """Account for wake audio that also flows into the command STT/VAD path."""
     if not isinstance(session, VoiceSessionRuntime):
         return
     session.last_audio_ts = float(now_ts)
@@ -6186,17 +6187,60 @@ async def _native_mark_wake_preroll_complete(selector: str) -> bool:
             return True
         session.wake_preroll_boundary_received = True
         session.vad_startup_ignore_until_ts = 0.0
-        excluded_chunks = int(session.wake_preroll_chunks or 0)
-        excluded_bytes = int(session.wake_preroll_bytes or 0)
+        preroll_chunks = int(session.wake_preroll_chunks or 0)
+        preroll_bytes = int(session.wake_preroll_bytes or 0)
         session_id = _text(session.session_id)
     logger.info(
-        "[native-voice] wake pre-roll complete selector=%s session_id=%s excluded_stt_chunks=%s excluded_stt_bytes=%s — command STT/VAD live",
+        "[native-voice] wake pre-roll complete selector=%s session_id=%s wake_preroll_chunks=%s wake_preroll_bytes=%s included_with_command_stt — command STT/VAD live",
         token,
         session_id,
-        excluded_chunks,
-        excluded_bytes,
+        preroll_chunks,
+        preroll_bytes,
     )
     return True
+
+
+def _strip_leading_wake_phrase(transcript: str, wake_word: str) -> str:
+    """Remove the wake phrase spoken at the start of a command transcript.
+
+    The command STT hears the wake phrase too (wake pre-roll audio is
+    transcribed with the command clip), so strip it from the text instead of
+    from the audio: case/punctuation insensitive, multi-token wake words
+    supported. A one-character mishearing ("Travis" for "Jarvis") is tolerated
+    only when the remainder is non-empty, so a wake-only utterance strips to
+    "" and falls through to the existing empty-transcript no-op path.
+    """
+    text = re.sub(r"\s+", " ", _text(transcript)).strip()
+    wake_tokens = re.findall(r"[a-z0-9']+", _text(wake_word).lower())
+    if not wake_tokens or not text:
+        return text
+    spoken_tokens = re.findall(r"[a-z0-9']+", text.lower())
+    token_spans = list(re.finditer(r"[A-Za-z0-9']+", text))
+    if not spoken_tokens or len(spoken_tokens) < len(wake_tokens):
+        return text
+    if len(token_spans) != len(spoken_tokens):
+        return text  # defensive: unexpected tokenization, never strip
+    near_match = False
+    for index, wake_token in enumerate(wake_tokens):
+        spoken_token = spoken_tokens[index]
+        if spoken_token == wake_token:
+            continue
+        # Tolerate a one-phoneme mishearing ("Travis" for "Jarvis" ratios
+        # 0.67); unrelated first tokens ("what" for "Jarvis" ratios 0.20)
+        # never come close.
+        if difflib.SequenceMatcher(None, wake_token, spoken_token).ratio() < 0.6:
+            return text  # leading tokens are not the wake phrase — never strip
+        near_match = True
+    if near_match and len(spoken_tokens) == len(wake_tokens):
+        # A misheard wake-only utterance may not be the wake phrase at all.
+        return text
+    removed = text[token_spans[len(wake_tokens) - 1].end():]
+    remainder = re.sub(r"^[^\w']+", "", removed)
+    _native_debug(
+        f"STT wake phrase stripped prefix={text[: len(text) - len(removed)]!r} "
+        f"remainder={remainder!r}"
+    )
+    return remainder
 
 
 def _mark_stt_stream_unhealthy(session: VoiceSessionRuntime, reason: str) -> None:
@@ -7682,23 +7726,24 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
                 _record_wake_arbitration_audio(session_for_arbitration, audio_bytes, audio_format)
 
         if wake_boundary_pending:
-            # The firmware marker is authoritative: audio through the local
-            # wake detector's crossing belongs to the wake phrase. Keep it for
-            # room arbitration/diagnostics, but never append it to an STT
-            # buffer or stream it to a remote recognizer.
+            # The firmware marker still bounds the wake phrase, but that audio
+            # is recorded, not discarded: the command STT transcribes wake +
+            # command as one continuous clip (the wake phrase is stripped from
+            # the transcript text instead). The detector crossing fires after
+            # the phrase ends (score ramp lag), so an exclusion boundary would
+            # crop the first spoken command words.
             async with lock:
                 active_session = runtime.get("session")
                 if (
                     isinstance(active_session, VoiceSessionRuntime)
                     and active_session.session_id == sid
                 ):
-                    _native_discard_wake_preroll(active_session, audio_bytes, now_ts)
+                    _native_account_wake_preroll(active_session, audio_bytes, now_ts)
                     if active_session.wake_preroll_chunks == 1:
                         _native_debug(
-                            f"native wake pre-roll excluded from STT/VAD selector={token} "
+                            f"native wake pre-roll recorded with command STT/VAD selector={token} "
                             f"session_id={sid}"
                         )
-            return
 
         if now_ts < gate_ts:
             async with lock:
@@ -7721,9 +7766,10 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
 
         metrics: Dict[str, Any] = {}
         should_finalize = False
-        vad_startup_ignored = wake_boundary_pending or (
-            vad_ignore_ts > 0.0 and now_ts < vad_ignore_ts
-        )
+        # Pre-boundary wake audio is VAD-processed as ordinary audio: the
+        # endpointer must see the wake-word speech that precedes the command.
+        # The ignore window here is only the continued-chat reopen gate.
+        vad_startup_ignored = vad_ignore_ts > 0.0 and now_ts < vad_ignore_ts
         spud_stream = None
         spud_stream_active = False
         spud_speech_seen = False

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import ast
+import difflib
 import pathlib
+import re
 import sys
 import types
 import unittest
@@ -39,8 +41,9 @@ def _load_pipeline_boundary_helpers():
     tree = ast.parse(source)
     wanted = {
         "_native_wake_preroll_pending",
-        "_native_discard_wake_preroll",
+        "_native_account_wake_preroll",
         "_native_mark_wake_preroll_complete",
+        "_strip_leading_wake_phrase",
     }
     functions = [
         node
@@ -54,6 +57,9 @@ def _load_pipeline_boundary_helpers():
         "_text": lambda value: str(value or "").strip(),
         "_selector_runtime": lambda _selector: {},
         "logger": mock.Mock(),
+        "_native_debug": mock.Mock(),
+        "re": re,
+        "difflib": difflib,
     }
     module = ast.Module(body=functions, type_ignores=[])
     exec(compile(ast.fix_missing_locations(module), "<native-wake-preroll>", "exec"), namespace)
@@ -169,23 +175,26 @@ class NativeWakePrerollTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(boundary_pending(session, 100.1))
         self.assertEqual(0.0, session.vad_startup_ignore_until_ts)
 
-    def test_pre_boundary_audio_is_accounted_but_not_added_to_stt(self) -> None:
+    def test_pre_boundary_audio_is_counted_not_dropped(self) -> None:
         session = _VoiceSessionRuntime(
             last_audio_ts=0.0,
             wake_preroll_chunks=0,
             wake_preroll_bytes=0,
             audio_buffer=bytearray(b"existing-command"),
         )
-        discard = PIPELINE_HELPERS["_native_discard_wake_preroll"]
+        account = PIPELINE_HELPERS["_native_account_wake_preroll"]
 
-        discard(session, b"wake-word-audio", 123.5)
+        account(session, b"wake-word-audio", 123.5)
 
         self.assertEqual(123.5, session.last_audio_ts)
         self.assertEqual(1, session.wake_preroll_chunks)
         self.assertEqual(len(b"wake-word-audio"), session.wake_preroll_bytes)
+        # Accounting only: the chunk itself reaches audio_buffer/STT through
+        # the normal fall-through path (pinned structurally by the AST test
+        # below), so the helper must not append it a second time.
         self.assertEqual(bytearray(b"existing-command"), session.audio_buffer)
 
-    def test_pre_boundary_path_returns_before_stt_capture(self) -> None:
+    def test_pre_boundary_path_falls_through_to_stt_capture(self) -> None:
         source = (
             REPO_ROOT / "tater_voice" / "voice_pipeline" / "__init__.py"
         ).read_text(encoding="utf-8")
@@ -213,13 +222,43 @@ class NativeWakePrerollTests(unittest.IsolatedAsyncioTestCase):
             any(
                 isinstance(node, ast.Call)
                 and isinstance(node.func, ast.Name)
-                and node.func.id == "_native_discard_wake_preroll"
+                and node.func.id == "_native_account_wake_preroll"
                 for node in ast.walk(boundary_branch)
             )
         )
-        self.assertTrue(
+        # Pre-boundary audio must continue into the normal buffer/STT/VAD
+        # path: no early return may remain in the branch.
+        self.assertFalse(
             any(isinstance(node, ast.Return) for node in ast.walk(boundary_branch))
         )
+
+    def test_strip_leading_wake_phrase_cases(self) -> None:
+        strip = PIPELINE_HELPERS["_strip_leading_wake_phrase"]
+
+        cases = [
+            # (transcript, wake word, expected)
+            ("Jarvis, what time is it?", "Jarvis", "what time is it?"),
+            ("Hey Tater, set a timer", "hey tater", "set a timer"),
+            ("Travis, what time is it", "Jarvis", "what time is it"),
+            ("Jarvis", "Jarvis", ""),
+            ("what time is it", "Jarvis", "what time is it"),
+            ("anything at all", "", "anything at all"),
+            ("JARVIS! What Time Is It?", "Jarvis", "What Time Is It?"),
+            ("Jarvis Jarvis, what time is it", "Jarvis", "Jarvis, what time is it"),
+        ]
+        for transcript, wake_word, expected in cases:
+            self.assertEqual(
+                expected,
+                strip(transcript, wake_word),
+                f"transcript={transcript!r} wake_word={wake_word!r}",
+            )
+
+    def test_strip_leading_wake_phrase_keeps_misheard_wake_only(self) -> None:
+        strip = PIPELINE_HELPERS["_strip_leading_wake_phrase"]
+
+        # A near-match with no remainder may not be the wake phrase at all:
+        # never strip, let the verifier / empty-path handling deal with it.
+        self.assertEqual("Travis", strip("Travis", "Jarvis"))
 
     def test_wake_boundary_can_reuse_post_marker_spud_stt_stream(self) -> None:
         source = (

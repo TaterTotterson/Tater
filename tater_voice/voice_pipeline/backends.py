@@ -2496,12 +2496,21 @@ async def _transcribe_buffered_stt_fallback(session: VoiceSessionRuntime, reason
 async def _native_transcribe_session_audio(session: VoiceSessionRuntime) -> str:
     vp = _vp()
     backend = vp._normalize_stt_backend(vp._text(session.stt_backend_effective) or vp._text(session.stt_backend))
+    # Wake pre-roll audio is transcribed with the command clip, so the wake
+    # phrase is stripped from the transcript text on every STT route.
+    wake_word = vp._text(getattr(session, "wake_word", ""))
+
+    def _strip_wake(transcript: str) -> str:
+        return vp._strip_leading_wake_phrase(transcript, wake_word)
+
     spud_stream = getattr(session, "spud_link_stt_stream", None)
     if spud_stream is not None and bool(getattr(session, "spud_link_endpointing_reuse_stt", False)):
         try:
             remote = await spud_stream.wait_final(timeout=120.0)
             session.stt_backend_effective = "spud_link"
-            session.stt_transcript = vp._sanitize_stt_transcript(vp._text(remote.get("text")))
+            session.stt_transcript = _strip_wake(
+                vp._sanitize_stt_transcript(vp._text(remote.get("text")))
+            )
             vp._native_debug(
                 f"Spud Hub streaming STT transcript selector={session.selector} "
                 f"session_id={session.session_id} transcript_len={len(session.stt_transcript)}"
@@ -2537,7 +2546,9 @@ async def _native_transcribe_session_audio(session: VoiceSessionRuntime) -> str:
                 redis_conn=vp.redis_client,
             )
             session.stt_backend_effective = "spud_link"
-            session.stt_transcript = vp._sanitize_stt_transcript(vp._text(remote.get("text")))
+            session.stt_transcript = _strip_wake(
+                vp._sanitize_stt_transcript(vp._text(remote.get("text")))
+            )
             return session.stt_transcript
         except Exception:
             if not spud_link_allow_local_fallback("stt", redis_conn=vp.redis_client):
@@ -2560,17 +2571,18 @@ async def _native_transcribe_session_audio(session: VoiceSessionRuntime) -> str:
                 session.stt_task.cancel()
                 with contextlib.suppress(BaseException):
                     await session.stt_task
-        final_text = vp._sanitize_stt_transcript(session.stt_transcript)
+        final_text = _strip_wake(vp._sanitize_stt_transcript(session.stt_transcript))
         if final_text != vp._text(session.stt_transcript):
             session.stt_transcript = final_text
         if final_text and not bool(session.stt_stream_unhealthy):
             return final_text
-        fallback = vp._text(session.partial_transcript)
+        fallback = _strip_wake(vp._text(session.partial_transcript))
         if bool(session.stt_stream_unhealthy):
             buffered = await _transcribe_buffered_stt_fallback(
                 session,
                 vp._text(session.stt_stream_fallback_reason) or f"{stream_label}_stream_unhealthy",
             )
+            buffered = _strip_wake(buffered)
             if buffered:
                 return buffered
         if final_text:
@@ -2599,7 +2611,7 @@ async def _native_transcribe_session_audio(session: VoiceSessionRuntime) -> str:
         partial=False,
     )
 
-    session.stt_transcript = vp._text(transcript)
+    session.stt_transcript = _strip_wake(vp._text(transcript))
     vp._native_debug(f"STT {backend} transcript={session.stt_transcript!r}")
     return session.stt_transcript
 
