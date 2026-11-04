@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import asyncio
 import pathlib
 import sys
 import unittest
@@ -84,7 +85,8 @@ class OutputChainSettingsTests(unittest.TestCase):
         self.assertEqual([0.0] * 8, capable["eqBands"])
         self.assertFalse(capable["eqLoudness"])
         self.assertTrue(capable["bassGuardEnabled"])
-        self.assertEqual(-30.0, capable["bassGuardDb"])
+        # Radar has a larger speaker, so its board default floor is -10 dB.
+        self.assertEqual(-10.0, capable["bassGuardDb"])
         self.assertTrue(capable["limiterEnabled"])
         self.assertEqual(-1.0, capable["limiterThreshold"])
         self.assertEqual(150.0, capable["limiterRelease"])
@@ -184,6 +186,80 @@ class OutputChainSettingsTests(unittest.TestCase):
         self.assertIn("setEqualizerBand", source)
         self.assertIn("Reset flat", source)
         self.assertIn(".tm-equalizer-bands", styles)
+
+    @staticmethod
+    def _redis_with_device(device_row: dict) -> mock.Mock:
+        fake = OutputChainSettingsTests._redis()
+        markers = dict(fake.hgetall.return_value)
+
+        def hgetall(key: str) -> dict:
+            if str(key).startswith(native_live_settings.DEVICE_SETTINGS_HASH_PREFIX):
+                return dict(device_row)
+            return dict(markers)
+
+        fake.hgetall.side_effect = hgetall
+        return fake
+
+    def test_larger_echo_speakers_default_to_a_shallower_bass_floor(self) -> None:
+        with mock.patch.object(native_live_settings, "redis_client", self._redis_with_device({})):
+            for board in ("radar", "crown", "athena", "A8H3N2", "echo-show-8"):
+                current = native_live_settings.settings_snapshot(f"native:{board}", board=board)
+                self.assertEqual(-10.0, current["bass_guard_db"], board)
+            for board in ("biscuit", "checkers", "cronos", "rook"):
+                current = native_live_settings.settings_snapshot(f"native:{board}", board=board)
+                self.assertEqual(-30.0, current["bass_guard_db"], board)
+
+    def test_a_satellite_value_replaces_the_board_speaker_default(self) -> None:
+        fake = self._redis_with_device({"bass_guard_db": "-25"})
+        with mock.patch.object(native_live_settings, "redis_client", fake):
+            current = native_live_settings.settings_snapshot("native:radar", board="radar")
+        self.assertEqual(-25.0, current["bass_guard_db"])
+
+    def test_bass_floor_field_shows_the_board_default(self) -> None:
+        with mock.patch.object(native_live_settings, "redis_client", self._redis_with_device({})):
+            radar = native_live_settings.settings_fields(
+                "native:radar", board="radar", capabilities={"output_chain": True}
+            )
+            biscuit = native_live_settings.settings_fields(
+                "native:biscuit", board="biscuit", capabilities={"output_chain": True}
+            )
+        radar_floor = next(field for field in radar if field.get("key") == "bass_guard_db")
+        biscuit_floor = next(field for field in biscuit if field.get("key") == "bass_guard_db")
+        self.assertEqual(-10.0, radar_floor["default"])
+        self.assertEqual(-10.0, radar_floor["value"])
+        self.assertEqual(-30.0, biscuit_floor["default"])
+
+    def test_offline_partial_save_keeps_the_saved_board_speaker_default(self) -> None:
+        fake = self._redis_with_device({})
+        credentials = {
+            "devices": {
+                "native:radar": {
+                    "selector": "native:radar",
+                    "board": "radar",
+                }
+            }
+        }
+        with (
+            mock.patch.object(native_live_settings, "redis_client", fake),
+            mock.patch.object(native_satellite, "_clients", {}),
+            mock.patch.object(native_satellite, "_load_selector_aliases", return_value={}),
+            mock.patch.object(native_satellite, "_load_credentials_unlocked", return_value=credentials),
+        ):
+            result = asyncio.run(
+                native_satellite.save_live_settings(
+                    {"volume_percent": 81},
+                    selector="native:radar",
+                    push=False,
+                )
+            )
+
+        self.assertEqual(-10.0, result["settings"]["bass_guard_db"])
+        device_write = next(
+            call
+            for call in fake.hset.call_args_list
+            if str(call.args[0]).startswith(native_live_settings.DEVICE_SETTINGS_HASH_PREFIX)
+        )
+        self.assertEqual(-10.0, float(device_write.kwargs["mapping"]["bass_guard_db"]))
 
 
 if __name__ == "__main__":

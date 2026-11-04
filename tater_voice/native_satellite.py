@@ -1062,6 +1062,39 @@ def _save_device_credential(selector: str, payload: Dict[str, Any], device_token
         _save_credentials_unlocked(data)
 
 
+def _saved_board_for_selector(selector: Any) -> str:
+    """Return the last reported board when a known satellite is offline."""
+    token = _canonical_selector(selector)
+    if not token:
+        return ""
+    with _pairing_lock:
+        data = _load_credentials_unlocked()
+        devices = data.get("devices") if isinstance(data.get("devices"), dict) else {}
+        row = devices.get(token) if isinstance(devices.get(token), dict) else {}
+        board = _text(row.get("board"))
+        if board:
+            return board
+        for candidate in devices.values():
+            if not isinstance(candidate, dict):
+                continue
+            if _canonical_selector(candidate.get("selector")) != token:
+                continue
+            board = _text(candidate.get("board"))
+            if board:
+                return board
+    with contextlib.suppress(Exception):
+        for candidate in _vp()._load_satellite_registry():
+            if not isinstance(candidate, dict):
+                continue
+            if _canonical_selector(candidate.get("selector")) != token:
+                continue
+            metadata = candidate.get("metadata") if isinstance(candidate.get("metadata"), dict) else {}
+            board = _text(metadata.get("board") or candidate.get("board"))
+            if board:
+                return board
+    return ""
+
+
 def _remove_device_credentials(selector: Any) -> int:
     token = _text(selector)
     if not token:
@@ -4934,6 +4967,8 @@ async def save_live_settings(
         row = _clients.get(token) if token else {}
         hello = row.get("hello") if isinstance(row, dict) and isinstance(row.get("hello"), dict) else {}
         board = _text(_message_payload(hello).get("board"))
+    if token and not board:
+        board = _saved_board_for_selector(token)
     if wake_family:
         if token:
             raise ValueError("Wake-family settings cannot be saved as a device override.")
