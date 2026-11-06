@@ -112,6 +112,17 @@ class TaterBuildVersionTests(unittest.TestCase):
         self.assertIn("type=raw,value=nvidia", nvidia_job)
         self.assertIn("type=ref,event=tag,suffix=-nvidia", nvidia_job)
 
+    def test_docker_publish_can_pin_llama_cpp_for_recovery_builds(self) -> None:
+        workflow = (REPO_ROOT / ".github" / "workflows" / "docker-publish.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("llama_cpp_ref:", workflow)
+        self.assertEqual(
+            workflow.count("LLAMA_CPP_REF=${{ inputs.llama_cpp_ref || 'master' }}"),
+            2,
+        )
+
     def test_auth_bootstrap_and_sidebar_display_are_wired(self) -> None:
         backend = (REPO_ROOT / "tateros_app.py").read_text(encoding="utf-8")
         app_js = (REPO_ROOT / "tateros_static" / "app.js").read_text(encoding="utf-8")

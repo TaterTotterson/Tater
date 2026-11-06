@@ -20,6 +20,10 @@ on:
         description: Optional explicit image tag for a manual publish
         required: false
         type: string
+      llama_cpp_ref:
+        description: Optional llama.cpp revision override for a manual publish
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -76,6 +80,8 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            LLAMA_CPP_REF=${{ inputs.llama_cpp_ref || 'master' }}
           cache-from: type=gha,scope=tater-cpu
           cache-to: type=gha,mode=max,scope=tater-cpu,ignore-error=true
 
@@ -118,5 +124,7 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            LLAMA_CPP_REF=${{ inputs.llama_cpp_ref || 'master' }}
           cache-from: type=gha,scope=tater-nvidia
           cache-to: type=gha,mode=max,scope=tater-nvidia,ignore-error=true
