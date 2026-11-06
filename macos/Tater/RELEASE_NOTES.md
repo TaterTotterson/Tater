@@ -1,43 +1,47 @@
-# Tater v2.0.4
+# Tater v2.0.5
 
-Tater v2.0.4 adds complete management support for the Amazon Echo Show 5
-second generation (2021), model C76N8S, codename `cronos`.
+Tater v2.0.5 keeps voice conversations coherent across satellites, prevents
+Pocket TTS setup failures before they reach playback, and improves the default
+bass protection on larger Echo speakers.
 
-## What's Changed
+## What's New
 
-### Echo Show 5 second-generation support
+### Shared, user-aware voice conversations
 
-- Recognizes Cronos as its own Echo target instead of treating it as a generic
-  screen satellite or first-generation Checkers device.
-- Shows the correct device name and artwork throughout Satellites, settings,
-  firmware status, Sat Chat, and display controls.
-- Enables the full supported screen settings, including themes, photos,
-  cameras, climate, clock format, screen power, Do Not Disturb, SSH, audio
-  output, and live conversation displays.
-- Uses Cronos's native video profile for Sat Chat and camera relay playback.
+- Keeps one rolling Voice Core conversation across every satellite and wake
+  activation instead of starting without context after each wake word.
+- Labels historical turns with the recognized person and room, allowing one
+  household member to confirm or modify another member's preceding request.
+- Gives the shared context to the Decision model, Astraeus, and Hermes so short
+  follow-ups such as “yes,” “then do it,” and “make that three” resolve against
+  the preceding conversation.
+- Retains the existing two-hour inactivity timeout and per-conversation storage
+  compatibility.
+- Keeps action-shaped and contextual requests in the full planning path when a
+  high-confidence chat route would otherwise discard the action.
 
-### Factory and OTA updates
+### Pocket TTS access check
 
-- Selects the target-matched Cronos factory archive and verified application
-  and System OTA artifacts from the shared Echo firmware manifest.
-- Keeps Cronos separate from the visually similar Checkers target so an update
-  for the wrong Echo Show 5 generation cannot be selected.
+- Checks gated Pocket TTS voice-cloning model access before saving and loading
+  Pocket TTS as a reply or announcement backend.
+- Shows the exact remaining setup steps when access is blocked: install and
+  enable the Hugging Face integration, add the account token, and accept the
+  Pocket TTS model terms with that account.
+- Rechecks access on every save until the model weights can be downloaded, then
+  stops interrupting normal Pocket TTS saves.
 
-### Hydra prompt and tool execution
+### Better bass defaults for larger Echo speakers
 
-- Reduces planner prompt overhead while preserving routing, authorization,
-  pending-interaction, tool-ordering, and prerequisite-discovery rules.
-- Uses native structured tool schemas throughout Hydra planning, plan review,
-  and step execution instead of retrying with legacy JSON-in-text prompts.
-- Rejects missing or malformed native structured output rather than treating
-  JSON-like response text as a valid tool decision.
+- Defaults the bass-protection floor to -10 dB on Radar, Crown, and Athena,
+  preserving more low-frequency output on Echo 2nd generation and Echo Show 8
+  speakers. Smaller Dot, Show 5, and Spot models retain the -30 dB default.
+- Preserves explicit per-satellite settings and the board-aware default during
+  partial or offline settings saves.
+- Recognizes Athena's `A8H3N2` hardware-model alias when selecting defaults.
 
-### Echo Firmware v4.1.0 companion release
+### Project policy documentation
 
-- Adds the first hardware-tested Tater Linux release for Cronos, including its
-  factory installer, native display and audio stack, TWRP recovery, A/B OTA,
-  and automatic USB Ethernet with Wi-Fi fallback.
-- See the [Echo Firmware v4.1.0 release](https://github.com/TaterTotterson/Tater-Echo-Firmware/releases/tag/v4.1.0)
-  for firmware downloads and complete device-side notes.
+- Documents the Tater trademark policy and clarifies the relationship between
+  the project's AGPL software license and use of the Tater name and logo.
 
-**Full Changelog**: [v2.0.3...v2.0.4](https://github.com/TaterTotterson/Tater/compare/v2.0.3...v2.0.4)
+**Full Changelog**: [v2.0.4...v2.0.5](https://github.com/TaterTotterson/Tater/compare/v2.0.4...v2.0.5)

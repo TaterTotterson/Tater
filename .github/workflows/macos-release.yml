@@ -9,6 +9,7 @@ on:
 
 permissions:
   contents: write
+  pull-requests: read
 
 concurrency:
   group: macos-release-${{ github.ref_name }}
@@ -119,6 +120,7 @@ jobs:
       DMG_PATH: macos/Tater/releases/Tater-${{ github.ref_name }}.dmg
       MANIFEST_PATH: macos/Tater/update-manifest.json
       RELEASE_NOTES_PATH: macos/Tater/RELEASE_NOTES.md
+      RENDERED_RELEASE_NOTES_PATH: macos/Tater/RELEASE_NOTES.generated.md
 
     steps:
       - name: Check out release metadata
@@ -141,6 +143,26 @@ jobs:
           test -f "${DMG_PATH}"
           test -f "${MANIFEST_PATH}"
           sha256sum "${ZIP_PATH}" "${DMG_PATH}" "${MANIFEST_PATH}"
+
+      - name: Resolve release comparison
+        id: release_range
+        shell: bash
+        run: |
+          set -euo pipefail
+          previous_tag="$(git describe --tags --abbrev=0 "${VERSION_LABEL}^")"
+          echo "previous_tag=${previous_tag}" >> "${GITHUB_OUTPUT}"
+          echo "Rendering contributor acknowledgements for ${previous_tag}...${VERSION_LABEL}"
+
+      - name: Add contributor acknowledgements
+        uses: actions/github-script@v7
+        env:
+          PREVIOUS_TAG: ${{ steps.release_range.outputs.previous_tag }}
+        with:
+          script: |
+            const { renderReleaseNotes } = require(
+              `${process.env.GITHUB_WORKSPACE}/.github/scripts/render-release-notes.cjs`
+            );
+            await renderReleaseNotes({ github, context, core });
 
       - name: Clean stale GitHub release assets
         uses: actions/github-script@v7
@@ -195,7 +217,7 @@ jobs:
           name: Tater ${{ env.VERSION_LABEL }}
           prerelease: false
           make_latest: true
-          body_path: ${{ env.RELEASE_NOTES_PATH }}
+          body_path: ${{ env.RENDERED_RELEASE_NOTES_PATH }}
           files: |
             ${{ env.ZIP_PATH }}
             ${{ env.DMG_PATH }}
