@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { getJson, postJson } from "../../shared/api";
+import PopupTransition from "../../shared/PopupTransition.vue";
 import type { JsonRow, ModelsSettingsPayload, SettingsMountOptions } from "../types";
 import HuggingFaceModels from "./models/HuggingFaceModels.vue";
 import FaceModels from "./models/FaceModels.vue";
@@ -55,6 +56,14 @@ const modelApplyOpen = ref(false);
 const modelWarmup = ref<JsonRow>({});
 const modelWarmupPollError = ref("");
 const localModelsRefreshing = ref(false);
+const pocketSetupOpen = ref(false);
+const pocketSetupLoading = ref(false);
+const pocketSetupError = ref("");
+const pocketSetupStatus = ref<JsonRow>(
+  props.settings.hf_browser_integration && typeof props.settings.hf_browser_integration === "object"
+    ? clone(props.settings.hf_browser_integration as JsonRow)
+    : {},
+);
 let faceTimer: number | null = null;
 let modelWarmupTimer: number | null = null;
 
@@ -79,6 +88,7 @@ const faceModels = computed<JsonRow[]>(() => Array.isArray(faceSettings.value.av
   { id: "facenet512", label: "FaceNet512" },
   { id: "adaface_ir50_webface4m", label: "AdaFace IR-50 · WebFace4M", experimental: true },
 ]);
+const pocketSetupReady = computed(() => Boolean(pocketSetupStatus.value.ready) && !pocketSetupLoading.value && !pocketSetupError.value);
 
 function normalizeTab(value: unknown): string {
   const token = String(value || "").trim().toLowerCase();
@@ -257,6 +267,47 @@ function speechPayload(): JsonRow {
   return Object.fromEntries(speechKeys.map((key) => [key, draft[key]]));
 }
 
+function usesPocketTts(settings: JsonRow): boolean {
+  return [settings.speech_tts_backend, settings.speech_announcement_tts_backend]
+    .some((backend) => String(backend || "").trim().toLowerCase() === "pocket_tts");
+}
+
+async function refreshPocketSetupStatus(): Promise<boolean> {
+  if (pocketSetupLoading.value) return false;
+  pocketSetupLoading.value = true;
+  pocketSetupError.value = "";
+  try {
+    const status = await getJson<JsonRow>(props.endpoints.modelsHuggingFaceStatus);
+    pocketSetupStatus.value = status;
+    draft.hf_browser_integration = clone(status);
+    return Boolean(status.ready);
+  } catch (statusError) {
+    pocketSetupError.value = statusError instanceof Error ? statusError.message : "Hugging Face setup status could not be checked.";
+    pocketSetupStatus.value = { ...pocketSetupStatus.value, ready: false };
+    return false;
+  } finally {
+    pocketSetupLoading.value = false;
+  }
+}
+
+function closePocketSetup() {
+  pocketSetupOpen.value = false;
+}
+
+function openIntegrations() {
+  closePocketSetup();
+  const url = new URL(window.location.href);
+  url.hash = "/integrations";
+  window.history.pushState({ ...(window.history.state || {}), taterView: "integrations" }, "", url);
+  window.dispatchEvent(new PopStateEvent("popstate", { state: window.history.state }));
+}
+
+async function continuePocketSetup() {
+  if (!pocketSetupReady.value) return;
+  pocketSetupOpen.value = false;
+  await runPrimaryAction();
+}
+
 function mediaPayload(kinds: Array<"vision" | "audio" | "video">): JsonRow {
   const payload: JsonRow = {};
   const targets: Array<JsonRow | null> = [];
@@ -364,12 +415,20 @@ async function reconnectModelWarmup() {
 }
 
 async function runPrimaryAction() {
-  if (!actionSpec.value || saving.value) return;
+  if (!actionSpec.value || saving.value || pocketSetupLoading.value) return;
   saving.value = true;
   error.value = "";
   notice.value = "";
   let localApplyStarted = false;
   try {
+    if (activeTab.value === "speech" && usesPocketTts(draft)) {
+      const pocketReady = await refreshPocketSetupStatus();
+      if (!pocketReady) {
+        pocketSetupOpen.value = true;
+        return;
+      }
+      pocketSetupOpen.value = false;
+    }
     let result: JsonRow = {};
     if (activeTab.value === "routing") {
       const validation = validateLlm();
@@ -473,5 +532,38 @@ onBeforeUnmount(() => {
     </footer>
 
     <LocalModelApplyProgress :open="modelApplyOpen" :snapshot="modelWarmup" :poll-error="modelWarmupPollError" @close="modelApplyOpen = false" />
+
+    <PopupTransition :open="pocketSetupOpen" backdrop-class="tv-modal-backdrop tset-modal" @close="closePocketSetup">
+      <section class="tv-modal tm-pocket-setup" role="dialog" aria-modal="true" aria-labelledby="tm-pocket-setup-title">
+        <header class="tv-modal-header">
+          <div><span class="tv-eyebrow">Pocket TTS access check</span><h2 id="tm-pocket-setup-title">Pocket TTS cannot download its voice-cloning model</h2><p>Tater will keep Pocket TTS blocked until the Hugging Face integration and gated model access are ready. Once access succeeds, future saves continue without this popup.</p></div>
+          <button class="tv-button" type="button" @click="closePocketSetup">Close</button>
+        </header>
+
+        <div v-if="pocketSetupLoading" class="tv-notice" role="status">Checking your Hugging Face setup…</div>
+        <div v-else-if="pocketSetupError" class="tv-notice error" role="alert">{{ pocketSetupError }}</div>
+        <div v-else class="tm-pocket-setup-summary" :class="{ ready: pocketSetupStatus.ready }">
+          <i aria-hidden="true">{{ pocketSetupStatus.ready ? "✓" : "!" }}</i>
+          <div><strong>{{ pocketSetupStatus.ready ? "Pocket TTS model access confirmed" : "Hugging Face setup needed" }}</strong><span>{{ pocketSetupStatus.message || "Tater could not access the gated Pocket TTS weights." }}</span></div>
+        </div>
+
+        <ol class="tm-pocket-setup-steps">
+          <li :class="{ complete: pocketSetupStatus.installed && pocketSetupStatus.enabled }">
+            <span>1</span><div><strong>Install and enable the Hugging Face integration</strong><p>Open Integrations, install Hugging Face if needed, and make sure it is enabled.</p></div><b>{{ pocketSetupStatus.installed && pocketSetupStatus.enabled ? "Ready" : pocketSetupStatus.installed ? "Enable it" : "Install it" }}</b>
+          </li>
+          <li :class="{ complete: pocketSetupStatus.has_token }">
+            <span>2</span><div><strong>Add your Hugging Face access token</strong><p>Save the API token from the same Hugging Face account that will accept the model terms.</p></div><b>{{ pocketSetupStatus.has_token ? "Ready" : "Token needed" }}</b>
+          </li>
+          <li :class="{ complete: pocketSetupStatus.weights_accessible }">
+            <span>3</span><div><strong>Accept the Pocket TTS terms</strong><p>Open the model page while signed into the same account as the saved token. Tater verifies access directly against the gated weights.</p><a href="https://huggingface.co/kyutai/pocket-tts" target="_blank" rel="noopener noreferrer">Open Pocket TTS terms on Hugging Face ↗</a></div><b>{{ pocketSetupStatus.weights_accessible ? "Access confirmed" : "Access blocked" }}</b>
+          </li>
+        </ol>
+
+        <footer class="tm-pocket-setup-actions">
+          <span>{{ pocketSetupReady ? "Model access confirmed. Pocket TTS can load now." : "Fix the blocked item, then refresh the access check." }}</span>
+          <div><button class="tv-button" type="button" :disabled="pocketSetupLoading" @click="refreshPocketSetupStatus">{{ pocketSetupLoading ? "Checking model access…" : "Refresh access" }}</button><button v-if="!pocketSetupStatus.installed || !pocketSetupStatus.enabled || !pocketSetupStatus.has_token" class="tv-button" type="button" @click="openIntegrations">Open Integrations</button><button class="tv-button primary" type="button" :disabled="!pocketSetupReady" @click="continuePocketSetup">Save &amp; Load Pocket TTS</button></div>
+        </footer>
+      </section>
+    </PopupTransition>
   </section>
 </template>

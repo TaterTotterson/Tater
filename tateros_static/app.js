@@ -910,6 +910,7 @@ function createSettingsVueDescriptor(settings, redisStatus, redisEncryptionStatu
       modelsHuggingFace: withBasePath("/api/settings/huggingface/models"),
       modelsHuggingFaceDetail: withBasePath("/api/settings/huggingface/model"),
       modelsHuggingFaceDownload: withBasePath("/api/settings/huggingface/download"),
+      modelsHuggingFaceStatus: withBasePath("/api/settings/huggingface/status"),
       modelsHfWarmup: withBasePath("/api/settings/hf-llm/warmup"),
       modelsHfWarmupCancel: withBasePath("/api/settings/hf-llm/warmup/cancel"),
       modelsRemoteLlm: withBasePath("/api/settings/llama-cpp/remote-models"),

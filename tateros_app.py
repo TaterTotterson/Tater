@@ -2226,6 +2226,146 @@ def _hf_browser_integration_status() -> Dict[str, Any]:
     }
 
 
+POCKET_TTS_HF_REPO = "kyutai/pocket-tts"
+POCKET_TTS_HF_WEIGHT_PATHS = (
+    "languages/english/model.safetensors",
+    "tts_b6369a24.safetensors",
+)
+
+
+def _pocket_tts_weights_access_status(token: str) -> Dict[str, Any]:
+    access_token = str(token or "").strip()
+    if not access_token:
+        return {
+            "weights_checked": False,
+            "weights_accessible": False,
+            "weights_file": "",
+            "weights_http_status": 0,
+            "weights_error": "A Hugging Face access token is required.",
+        }
+
+    class _NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(
+            self,
+            req: Any,
+            fp: Any,
+            code: int,
+            msg: str,
+            headers: Any,
+            newurl: str,
+        ) -> None:
+            return None
+
+    opener = urllib.request.build_opener(_NoRedirect())
+    timeout_raw = str(os.getenv("TATER_POCKET_TTS_ACCESS_CHECK_TIMEOUT_SECONDS") or "8").strip()
+    try:
+        timeout_seconds = max(2.0, min(20.0, float(timeout_raw)))
+    except Exception:
+        timeout_seconds = 8.0
+    last_status = 0
+    last_error = "Pocket TTS model access could not be verified."
+
+    for filename in POCKET_TTS_HF_WEIGHT_PATHS:
+        url = (
+            f"https://huggingface.co/{POCKET_TTS_HF_REPO}/resolve/main/"
+            f"{quote(filename, safe='/')}"
+        )
+        request = urllib.request.Request(
+            url,
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Accept": "application/octet-stream",
+                "User-Agent": "Tater-Pocket-TTS-Access-Check/1.0",
+            },
+            method="HEAD",
+        )
+        try:
+            with opener.open(request, timeout=timeout_seconds) as response:
+                status_code = int(getattr(response, "status", 0) or response.getcode() or 0)
+            if 200 <= status_code < 400:
+                return {
+                    "weights_checked": True,
+                    "weights_accessible": True,
+                    "weights_file": filename,
+                    "weights_http_status": status_code,
+                    "weights_error": "",
+                }
+            last_status = status_code
+            last_error = f"Hugging Face returned HTTP {status_code} for the Pocket TTS weights."
+        except urllib.error.HTTPError as exc:
+            status_code = int(exc.code or 0)
+            close_error = getattr(exc, "close", None)
+            if callable(close_error):
+                close_error()
+            if 300 <= status_code < 400:
+                return {
+                    "weights_checked": True,
+                    "weights_accessible": True,
+                    "weights_file": filename,
+                    "weights_http_status": status_code,
+                    "weights_error": "",
+                }
+            if status_code == 404:
+                last_status = status_code
+                last_error = "The Pocket TTS weights were not found in the model repository."
+                continue
+            if status_code in {401, 403}:
+                return {
+                    "weights_checked": True,
+                    "weights_accessible": False,
+                    "weights_file": filename,
+                    "weights_http_status": status_code,
+                    "weights_error": (
+                        "The saved Hugging Face token cannot access the gated Pocket TTS weights. "
+                        "Verify the token and accept the Pocket TTS terms with the same account."
+                    ),
+                }
+            last_status = status_code
+            last_error = f"Hugging Face returned HTTP {status_code} while checking Pocket TTS access."
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            last_error = f"Pocket TTS model access could not be checked: {str(exc) or type(exc).__name__}"
+            break
+
+    return {
+        "weights_checked": True,
+        "weights_accessible": False,
+        "weights_file": "",
+        "weights_http_status": last_status,
+        "weights_error": last_error,
+    }
+
+
+def _pocket_tts_huggingface_status() -> Dict[str, Any]:
+    status = dict(_hf_browser_integration_status())
+    integration_ready = bool(status.get("ready"))
+    status["integration_ready"] = integration_ready
+    status.update(
+        {
+            "weights_checked": False,
+            "weights_accessible": False,
+            "weights_file": "",
+            "weights_http_status": 0,
+            "weights_error": "",
+        }
+    )
+    if not integration_ready:
+        status["ready"] = False
+        status["setup_needed"] = True
+        return status
+
+    access = _pocket_tts_weights_access_status(_hf_browser_token() or "")
+    status.update(access)
+    weights_accessible = bool(access.get("weights_accessible"))
+    status["ready"] = weights_accessible
+    status["setup_needed"] = not weights_accessible
+    status["message"] = (
+        "Hugging Face integration and Pocket TTS model access are ready."
+        if weights_accessible
+        else str(access.get("weights_error") or "Pocket TTS model access is blocked.")
+    )
+    return status
+
+
 def _hf_browser_error_detail(exc: Exception, fallback: str) -> Dict[str, Any]:
     raw_message = str(exc).strip() or fallback
     lowered = raw_message.lower()
@@ -22195,6 +22335,11 @@ def save_local_llm_chat_template(request: LlamaCppChatTemplateRequest) -> Dict[s
     info["ok"] = True
     info["unload"] = unload_result
     return info
+
+
+@app.get("/api/settings/huggingface/status")
+def get_huggingface_integration_status() -> Dict[str, Any]:
+    return _pocket_tts_huggingface_status()
 
 
 @app.get("/api/settings/huggingface/models")

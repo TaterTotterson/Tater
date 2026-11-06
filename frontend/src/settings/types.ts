@@ -167,6 +167,7 @@ export interface SettingsMountOptions {
     modelsHuggingFace: string;
     modelsHuggingFaceDetail: string;
     modelsHuggingFaceDownload: string;
+    modelsHuggingFaceStatus: string;
     modelsHfWarmup: string;
     modelsHfWarmupCancel: string;
     modelsRemoteLlm: string;
