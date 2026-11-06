@@ -163,6 +163,8 @@ from helpers import (
     HYDRA_LLAMA_CPP_VISION_CONTEXT_TOKENS_KEY,
     LLAMA_CPP_SPECULATIVE_METHODS,
     HfLlmDownloadCancelled,
+    LLM_REQUEST_CLASS_BACKGROUND,
+    LLM_REQUEST_CLASS_INTERACTIVE,
     LocalLlmQueueFullError,
     LocalLlmQueueTimeoutError,
     LocalLlmRequestSupersededError,
@@ -184,6 +186,7 @@ from helpers import (
     get_vision_call_runtime_summary,
     get_llm_client_from_env,
     llm_request_context,
+    normalize_llm_request_class,
     preload_llama_cpp_llm_model,
     preload_llama_cpp_decision_model,
     migrate_current_redis_to_internal,
@@ -17960,12 +17963,23 @@ async def spud_link_tater_llm(
     if not messages:
         raise HTTPException(status_code=400, detail="messages must include at least one text message.")
 
+    request_metadata = payload.metadata if isinstance(payload.metadata, dict) else {}
+    request_class = normalize_llm_request_class(
+        request_metadata.get("tater_request_class"),
+        default=LLM_REQUEST_CLASS_INTERACTIVE,
+    )
+    request_activity = str(request_metadata.get("tater_activity") or "").strip()[:80]
+    if not request_activity:
+        request_activity = "spud_link_model"
+
     _spud_link_touch_node_from_request(node, request)
     node["activity"] = _spud_link_sanitize_activity(
         {
             "last_call_at": time.time(),
             "last_call_mode": "spudlet_native_llm",
             "last_model": str(payload.model or "tater/base"),
+            "last_request_class": request_class,
+            "last_request_activity": request_activity,
             "role": role,
         },
         allow_previews=bool(settings.get("request_previews_enabled")),
@@ -17974,10 +17988,22 @@ async def spud_link_tater_llm(
 
     node_id = str(node.get("id") or "").strip()
     node_name = str(node.get("name") or node_id or "Spudlet").strip()[:120] or "Spudlet"
+    if request_class == LLM_REQUEST_CLASS_BACKGROUND:
+        priority = 50
+        timeout_env = "TATER_SPUD_LINK_BACKGROUND_LLM_QUEUE_TIMEOUT_SECONDS"
+        timeout_default = 5.0
+        timeout_minimum = 1.0
+        timeout_maximum = 30.0
+    else:
+        priority = 0
+        timeout_env = "TATER_SPUD_LINK_LLM_QUEUE_TIMEOUT_SECONDS"
+        timeout_default = 60.0
+        timeout_minimum = 3.0
+        timeout_maximum = 120.0
     try:
-        queue_timeout = float(os.getenv("TATER_SPUD_LINK_LLM_QUEUE_TIMEOUT_SECONDS") or "15")
+        queue_timeout = float(os.getenv(timeout_env) or str(timeout_default))
     except Exception:
-        queue_timeout = 15.0
+        queue_timeout = timeout_default
     try:
         with llm_request_context(
             kind="spudlet",
@@ -17985,9 +18011,11 @@ async def spud_link_tater_llm(
             source_label=f"Spudlet - {node_name}",
             module="spud_link",
             function="direct_reply",
+            activity=request_activity,
+            request_class=request_class,
             queue_key=f"spudlet:{node_id or node_name}",
-            priority=0,
-            queue_timeout=max(3.0, min(60.0, queue_timeout)),
+            priority=priority,
+            queue_timeout=max(timeout_minimum, min(timeout_maximum, queue_timeout)),
         ):
             return await _run_spud_link_native_llm_completion(payload, messages)
     except LocalLlmRequestSupersededError as exc:

@@ -397,6 +397,73 @@ class LocalLlmSchedulerTests(unittest.TestCase):
         first_lease.release()
         latest_future.result(timeout=1).release()
 
+    def test_interactive_work_cancels_active_background_generation(self):
+        scheduler = helpers._LocalLlmRequestScheduler(max_active=1, max_pending=8)
+        _background_id, background_future = scheduler.submit(
+            call_id="memory",
+            priority=50,
+            queue_key="spudlet:kitchen",
+            request_class="background",
+        )
+        background_lease = background_future.result(timeout=1)
+
+        _interactive_id, interactive_future = scheduler.submit(
+            call_id="voice",
+            priority=0,
+            queue_key="spudlet:kitchen",
+            request_class="interactive",
+        )
+
+        self.assertTrue(background_lease.is_superseded())
+        self.assertTrue(background_lease.cancel_event.is_set())
+        self.assertFalse(interactive_future.done())
+        background_lease.release()
+        interactive_future.result(timeout=1).release()
+
+    def test_background_work_does_not_supersede_interactive_work(self):
+        scheduler = helpers._LocalLlmRequestScheduler(max_active=1, max_pending=8)
+        _interactive_id, interactive_future = scheduler.submit(
+            call_id="voice",
+            priority=0,
+            queue_key="spudlet:kitchen",
+            request_class="interactive",
+        )
+        interactive_lease = interactive_future.result(timeout=1)
+
+        _background_id, background_future = scheduler.submit(
+            call_id="memory",
+            priority=50,
+            queue_key="spudlet:kitchen",
+            request_class="background",
+        )
+
+        self.assertFalse(interactive_lease.is_superseded())
+        self.assertFalse(interactive_lease.cancel_event.is_set())
+        self.assertFalse(background_future.done())
+        interactive_lease.release()
+        background_future.result(timeout=1).release()
+
+    def test_background_work_waits_until_scheduler_is_idle(self):
+        scheduler = helpers._LocalLlmRequestScheduler(max_active=2, max_pending=8)
+        _interactive_id, interactive_future = scheduler.submit(
+            call_id="voice",
+            priority=0,
+            queue_key="spudlet:kitchen",
+            request_class="interactive",
+        )
+        interactive_lease = interactive_future.result(timeout=1)
+
+        _background_id, background_future = scheduler.submit(
+            call_id="memory",
+            priority=50,
+            queue_key="",
+            request_class="background",
+        )
+
+        self.assertFalse(background_future.done())
+        interactive_lease.release()
+        background_future.result(timeout=1).release()
+
 
 class LlamaCppPerformanceTests(unittest.TestCase):
     def test_default_slot_layout_uses_one_shared_context(self):
@@ -1218,6 +1285,55 @@ class LlamaCppPerformanceTests(unittest.TestCase):
         self.assertEqual(payload["timings"]["prompt_n"], 2)
         self.assertTrue(response.closed)
 
+    def test_native_stream_cancellation_closes_the_active_response(self):
+        class Response:
+            status_code = 200
+            text = ""
+
+            def __init__(self):
+                self.started = threading.Event()
+                self.closed = threading.Event()
+
+            def raise_for_status(self):
+                return None
+
+            def iter_lines(self, decode_unicode=False):
+                del decode_unicode
+                self.started.set()
+                self.closed.wait(timeout=2)
+                raise RuntimeError("response closed")
+                yield b""
+
+            def close(self):
+                self.closed.set()
+
+        response = Response()
+        session = SimpleNamespace(post=lambda *_args, **_kwargs: response)
+        cancel_event = threading.Event()
+
+        with (
+            mock.patch.object(
+                helpers,
+                "_llama_cpp_native_http_session",
+                return_value=session,
+            ),
+            ThreadPoolExecutor(max_workers=1) as executor,
+        ):
+            future = executor.submit(
+                helpers._llama_cpp_native_stream_post,
+                "http://127.0.0.1:1234",
+                "/completion",
+                {"prompt": "x"},
+                stream_callback=lambda _chunk: None,
+                cancel_event=cancel_event,
+            )
+            self.assertTrue(response.started.wait(timeout=1))
+            cancel_event.set()
+            with self.assertRaises(helpers.LocalLlmRequestSupersededError):
+                future.result(timeout=1)
+
+        self.assertTrue(response.closed.is_set())
+
 
 class ProviderCompatibilityTests(unittest.IsolatedAsyncioTestCase):
     def test_model_thinking_is_opt_in_by_default(self):
@@ -1822,6 +1938,7 @@ class ProviderCompatibilityTests(unittest.IsolatedAsyncioTestCase):
             vision=False,
             slot_id=None,
             stream_callback=None,
+            cancel_event=None,
         ):
             captured.update(
                 {
@@ -1829,6 +1946,7 @@ class ProviderCompatibilityTests(unittest.IsolatedAsyncioTestCase):
                     "chat_kwargs": dict(chat_kwargs),
                     "slot_id": slot_id,
                     "vision": vision,
+                    "cancel_event": cancel_event,
                 }
             )
             stream_callback("o")
@@ -1852,6 +1970,7 @@ class ProviderCompatibilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["message"]["content"], "ok")
         self.assertEqual(chunks, ["o", "k"])
         self.assertEqual(captured["slot_id"], 0)
+        self.assertIsInstance(captured["cancel_event"], threading.Event)
         self.assertNotIn("cache_namespace", captured["chat_kwargs"])
 
     async def test_local_llama_explicit_slot_is_not_remapped_by_role(self):
@@ -1870,6 +1989,7 @@ class ProviderCompatibilityTests(unittest.IsolatedAsyncioTestCase):
             vision=False,
             slot_id=None,
             stream_callback=None,
+            cancel_event=None,
         ):
             captured["slot_id"] = slot_id
             return _local_result()
@@ -2117,6 +2237,11 @@ class ProviderCompatibilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("cache_namespace", fake_http.body)
         self.assertNotIn("activity", fake_http.body)
         self.assertNotIn("max_tokens", fake_http.body)
+        self.assertEqual(
+            fake_http.body["metadata"]["tater_request_class"],
+            "interactive",
+        )
+        self.assertEqual(fake_http.body["metadata"]["tater_activity"], "chat")
 
     async def test_spud_link_preserves_explicit_context_bounded_request(self):
         class Response:
@@ -2411,6 +2536,11 @@ class ProviderCompatibilityTests(unittest.IsolatedAsyncioTestCase):
                 "_run_spud_link_native_llm_completion",
                 side_effect=run_completion,
             ),
+            mock.patch.dict(
+                os.environ,
+                {"TATER_SPUD_LINK_LLM_QUEUE_TIMEOUT_SECONDS": ""},
+                clear=False,
+            ),
         ):
             result = await tateros_app.spud_link_tater_llm(payload, SimpleNamespace())
 
@@ -2419,6 +2549,56 @@ class ProviderCompatibilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(captured["source_label"], "Spudlet - Game Room")
         self.assertEqual(captured["queue_key"], "spudlet:spud-game-room")
         self.assertEqual(captured["priority"], 0)
+        self.assertEqual(captured["request_class"], "interactive")
+        self.assertEqual(captured["queue_timeout"], 60.0)
+
+    async def test_spud_link_endpoint_defers_background_model_work(self):
+        import tateros_app
+
+        captured = {}
+
+        async def run_completion(_payload, _messages):
+            captured.update(helpers._llm_request_context_snapshot())
+            return {"ok": True}
+
+        payload = tateros_app.OpenAIChatCompletionRequest(
+            messages=[{"role": "user", "content": "summarize memory"}],
+            metadata={
+                "tater_request_class": "background",
+                "tater_activity": "memory",
+            },
+        )
+        node = {
+            "id": "spud-game-room",
+            "name": "Game Room",
+            "role": tateros_app.SPUD_LINK_MODE_SPUDLET,
+        }
+        with (
+            mock.patch.object(
+                tateros_app,
+                "_require_spud_link_node_request",
+                return_value=({"mode": tateros_app.SPUD_LINK_MODE_HUB}, node),
+            ),
+            mock.patch.object(tateros_app, "_spud_link_touch_node_from_request"),
+            mock.patch.object(tateros_app, "_spud_link_store_node"),
+            mock.patch.object(
+                tateros_app,
+                "_run_spud_link_native_llm_completion",
+                side_effect=run_completion,
+            ),
+            mock.patch.dict(
+                os.environ,
+                {"TATER_SPUD_LINK_BACKGROUND_LLM_QUEUE_TIMEOUT_SECONDS": ""},
+                clear=False,
+            ),
+        ):
+            result = await tateros_app.spud_link_tater_llm(payload, SimpleNamespace())
+
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(captured["request_class"], "background")
+        self.assertEqual(captured["activity"], "memory")
+        self.assertEqual(captured["priority"], 50)
+        self.assertEqual(captured["queue_timeout"], 5.0)
 
     async def test_round_robin_is_role_affine_but_plain_calls_still_rotate(self):
         class Client:
@@ -2913,6 +3093,38 @@ class PromptCacheLayoutTests(unittest.TestCase):
         self.assertEqual(messages[-3], {"role": "system", "content": "Dynamic memory context"})
         self.assertTrue(messages[-2]["content"].startswith("Current Local Date and Time: "))
         self.assertEqual(messages[-1], {"role": "user", "content": "what time is it"})
+
+    def test_spud_link_chat_failure_reports_the_connection_problem(self):
+        class Client:
+            provider = "spud_link"
+            host = "http://main-tater:8501"
+
+            async def chat(self, **_kwargs):
+                raise RuntimeError("Spud Link model request timed out")
+
+        result = asyncio.run(
+            hydra_runtime._run_chat_fallback_reply(
+                llm_client=Client(),
+                platform="voice_core",
+                user_text="hello",
+                history=[],
+                registry={},
+                enabled_predicate=None,
+                redis_client=None,
+                memory_context_message="",
+                pending_interaction=None,
+                platform_preamble="",
+                max_history_items=6,
+                max_tokens=360,
+            )
+        )
+
+        self.assertEqual(
+            result["text"],
+            "I couldn't reach the main Tater's model just now. "
+            "Please try again in a moment.",
+        )
+        self.assertIsNone(result["pending_interaction"])
 
     def test_provider_message_sanitizer_preserves_standard_tool_arguments(self):
         arguments = '{"path":"/tmp/a.txt"}'

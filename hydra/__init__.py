@@ -3979,7 +3979,12 @@ async def _run_chat_fallback_reply(
     except Exception as exc:
         provider = str(getattr(llm_client, "provider", "") or "").strip().lower()
         host = str(getattr(llm_client, "host", "") or "").strip().lower()
-        if provider == "llama_cpp" or host.startswith("llama-cpp://"):
+        if provider == "spud_link":
+            response_text = (
+                "I couldn't reach the main Tater's model just now. "
+                "Please try again in a moment."
+            )
+        elif provider == "llama_cpp" or host.startswith("llama-cpp://"):
             detail = _short_text(str(exc) or type(exc).__name__, limit=420)
             if not detail:
                 detail = type(exc).__name__

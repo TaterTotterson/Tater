@@ -1,47 +1,39 @@
-# Tater v2.0.5
+# Tater v2.0.6
 
-Tater v2.0.5 keeps voice conversations coherent across satellites, prevents
-Pocket TTS setup failures before they reach playback, and improves the default
-bass protection on larger Echo speakers.
+Tater v2.0.6 keeps the built-in model responsive while background intelligence
+work is running, improves SpudLink reliability, and makes Voice Core honor the
+configured conversation-history limits.
 
 ## What's New
 
-### Shared, user-aware voice conversations
+### Responsive built-in model scheduling
 
-- Keeps one rolling Voice Core conversation across every satellite and wake
-  activation instead of starting without context after each wake word.
-- Labels historical turns with the recognized person and room, allowing one
-  household member to confirm or modify another member's preceding request.
-- Gives the shared context to the Decision model, Astraeus, and Hermes so short
-  follow-ups such as “yes,” “then do it,” and “make that three” resolve against
-  the preceding conversation.
-- Retains the existing two-hour inactivity timeout and per-conversation storage
-  compatibility.
-- Keeps action-shaped and contextual requests in the full planning path when a
-  high-confidence chat route would otherwise discard the action.
+- Separates live interactive requests from background memory, summary,
+  discovery, and cleanup work when using Tater's built-in llama.cpp engine.
+- Runs background model work only while the engine is idle and immediately
+  cancels active background inference when a live request needs the GPU.
+- Closes the active llama.cpp response stream during cancellation so prompt or
+  generation work releases the engine instead of continuing behind the queue.
+- Applies the same policy to regular Tater requests and requests received from
+  a connected Spudlet.
 
-### Pocket TTS access check
+### More reliable SpudLink replies
 
-- Checks gated Pocket TTS voice-cloning model access before saving and loading
-  Pocket TTS as a reply or announcement backend.
-- Shows the exact remaining setup steps when access is blocked: install and
-  enable the Hugging Face integration, add the account token, and accept the
-  Pocket TTS model terms with that account.
-- Rechecks access on every save until the model weights can be downloaded, then
-  stops interrupting normal Pocket TTS saves.
+- Carries request activity and interactive/background priority from a Spudlet
+  to the main Tater instead of treating every remote model call the same.
+- Allows interactive SpudLink requests to wait longer for the built-in model
+  while quickly dropping background work that cannot start during an idle
+  window.
+- Replaces the unrelated generic chat response after a SpudLink model failure
+  with a clear message that the main Tater's model could not be reached.
 
-### Better bass defaults for larger Echo speakers
+### Configurable Voice Core history
 
-- Defaults the bass-protection floor to -10 dB on Radar, Crown, and Athena,
-  preserving more low-frequency output on Echo 2nd generation and Echo Show 8
-  speakers. Smaller Dot, Show 5, and Spot models retain the -30 dB default.
-- Preserves explicit per-satellite settings and the board-aware default during
-  partial or offline settings saves.
-- Recognizes Athena's `A8H3N2` hardware-model alias when selecting defaults.
+- Uses the shared conversation settings for both retained Voice Core history
+  and the history sent to the model instead of always using fixed 20-message
+  storage and 8-message prompt limits.
+- Preserves the shared, user-aware satellite conversation and its two-hour
+  inactivity timeout while allowing installations to choose larger or smaller
+  context windows.
 
-### Project policy documentation
-
-- Documents the Tater trademark policy and clarifies the relationship between
-  the project's AGPL software license and use of the Tater name and logo.
-
-**Full Changelog**: [v2.0.4...v2.0.5](https://github.com/TaterTotterson/Tater/compare/v2.0.4...v2.0.5)
+**Full Changelog**: [v2.0.5...v2.0.6](https://github.com/TaterTotterson/Tater/compare/v2.0.5...v2.0.6)

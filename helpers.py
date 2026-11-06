@@ -691,7 +691,44 @@ class LocalLlmQueueTimeoutError(LocalLlmSchedulingError):
 
 
 class LocalLlmRequestSupersededError(LocalLlmSchedulingError):
-    """Raised when a newer request replaces stale work from the same Spudlet."""
+    """Raised when a newer request replaces stale local-model work."""
+
+
+LLM_REQUEST_CLASS_INTERACTIVE = "interactive"
+LLM_REQUEST_CLASS_BACKGROUND = "background"
+_LLM_BACKGROUND_ACTIVITIES = {
+    "cleanup",
+    "discovery",
+    "memory",
+    "summary",
+}
+
+
+def normalize_llm_request_class(value: Any, *, default: str = "") -> str:
+    token = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if token in {"interactive", "foreground", "user", "realtime"}:
+        return LLM_REQUEST_CLASS_INTERACTIVE
+    if token in {"background", "maintenance", "passive", "idle"}:
+        return LLM_REQUEST_CLASS_BACKGROUND
+    return str(default or "").strip().lower()
+
+
+def _llm_request_class_for_call(row: Dict[str, Any]) -> str:
+    explicit = normalize_llm_request_class((row or {}).get("request_class"))
+    if explicit:
+        return explicit
+    kind = str((row or {}).get("kind") or "other").strip().lower()
+    function = str((row or {}).get("function") or "").strip().lower()
+    activity = str((row or {}).get("activity") or "").strip().lower()
+    if kind in {"hydra", "webui", "spudlet"}:
+        return LLM_REQUEST_CLASS_INTERACTIVE
+    if kind == "portal":
+        if "passive" in function or "reaction" in activity:
+            return LLM_REQUEST_CLASS_BACKGROUND
+        return LLM_REQUEST_CLASS_INTERACTIVE
+    if kind == "core" or activity in _LLM_BACKGROUND_ACTIVITIES:
+        return LLM_REQUEST_CLASS_BACKGROUND
+    return LLM_REQUEST_CLASS_INTERACTIVE
 
 
 @contextlib.contextmanager
@@ -733,9 +770,15 @@ def _local_llm_effective_capacity(model_identifier: Any) -> int:
 
 
 class _LocalLlmLease:
-    def __init__(self, scheduler: "_LocalLlmRequestScheduler", item_id: str):
+    def __init__(
+        self,
+        scheduler: "_LocalLlmRequestScheduler",
+        item_id: str,
+        cancel_event: threading.Event,
+    ):
         self._scheduler = scheduler
         self.item_id = str(item_id)
+        self.cancel_event = cancel_event
         self._released = False
 
     def is_superseded(self) -> bool:
@@ -766,16 +809,36 @@ class _LocalLlmRequestScheduler:
             self._max_pending = max(1, int(max_pending))
             self._dispatch_locked()
 
-    def submit(self, *, call_id: str, priority: int, queue_key: str) -> Tuple[str, Future]:
+    def submit(
+        self,
+        *,
+        call_id: str,
+        priority: int,
+        queue_key: str,
+        request_class: str = LLM_REQUEST_CLASS_INTERACTIVE,
+    ) -> Tuple[str, Future]:
         future: Future = Future()
         item_id = str(uuid.uuid4())
         queue_token = str(queue_key or "").strip()
+        class_token = normalize_llm_request_class(
+            request_class,
+            default=LLM_REQUEST_CLASS_INTERACTIVE,
+        )
+        cancel_event = threading.Event()
         with self._lock:
             if queue_token:
                 for existing in list(self._items.values()):
+                    existing_class = normalize_llm_request_class(
+                        existing.get("request_class"),
+                        default=LLM_REQUEST_CLASS_INTERACTIVE,
+                    )
                     if (
                         str(existing.get("queue_key") or "") == queue_token
                         and str(existing.get("status") or "") == "pending"
+                        and not (
+                            class_token == LLM_REQUEST_CLASS_BACKGROUND
+                            and existing_class == LLM_REQUEST_CLASS_INTERACTIVE
+                        )
                     ):
                         self._cancel_locked(
                             str(existing.get("item_id") or ""),
@@ -784,8 +847,34 @@ class _LocalLlmRequestScheduler:
                             ),
                         )
                 for existing in self._active.values():
-                    if str(existing.get("queue_key") or "") == queue_token:
+                    existing_class = normalize_llm_request_class(
+                        existing.get("request_class"),
+                        default=LLM_REQUEST_CLASS_INTERACTIVE,
+                    )
+                    if (
+                        str(existing.get("queue_key") or "") == queue_token
+                        and not (
+                            class_token == LLM_REQUEST_CLASS_BACKGROUND
+                            and existing_class == LLM_REQUEST_CLASS_INTERACTIVE
+                        )
+                    ):
                         existing["superseded"] = True
+                        existing_event = existing.get("cancel_event")
+                        if isinstance(existing_event, threading.Event):
+                            existing_event.set()
+
+            if class_token == LLM_REQUEST_CLASS_INTERACTIVE:
+                for existing in self._active.values():
+                    existing_class = normalize_llm_request_class(
+                        existing.get("request_class"),
+                        default=LLM_REQUEST_CLASS_INTERACTIVE,
+                    )
+                    if existing_class != LLM_REQUEST_CLASS_BACKGROUND:
+                        continue
+                    existing["superseded"] = True
+                    existing_event = existing.get("cancel_event")
+                    if isinstance(existing_event, threading.Event):
+                        existing_event.set()
 
             pending_count = sum(
                 1 for item in self._items.values() if str(item.get("status") or "") == "pending"
@@ -802,6 +891,8 @@ class _LocalLlmRequestScheduler:
                 "priority": int(priority),
                 "sequence": int(self._sequence),
                 "queue_key": queue_token,
+                "request_class": class_token,
+                "cancel_event": cancel_event,
                 "future": future,
                 "status": "pending",
                 "superseded": False,
@@ -828,6 +919,16 @@ class _LocalLlmRequestScheduler:
                 item = self._items.get(entry[2])
                 if not isinstance(item, dict) or str(item.get("status") or "") != "pending":
                     continue
+                if (
+                    self._active
+                    and normalize_llm_request_class(
+                        item.get("request_class"),
+                        default=LLM_REQUEST_CLASS_INTERACTIVE,
+                    )
+                    == LLM_REQUEST_CLASS_BACKGROUND
+                ):
+                    deferred.append(entry)
+                    continue
                 queue_key = str(item.get("queue_key") or "")
                 if queue_key and queue_key in active_keys:
                     deferred.append(entry)
@@ -843,7 +944,15 @@ class _LocalLlmRequestScheduler:
             selected["status"] = "active"
             self._active[item_id] = selected
             if isinstance(future, Future) and not future.done():
-                future.set_result(_LocalLlmLease(self, item_id))
+                future.set_result(
+                    _LocalLlmLease(
+                        self,
+                        item_id,
+                        selected.get("cancel_event")
+                        if isinstance(selected.get("cancel_event"), threading.Event)
+                        else threading.Event(),
+                    )
+                )
 
     def _cancel_locked(self, item_id: str, error: Exception) -> bool:
         item = self._items.get(str(item_id or ""))
@@ -5895,7 +6004,12 @@ def _llama_cpp_native_stream_post(
     stream_callback: Callable[[str], Any],
     timeout: float = 600.0,
     api_key: Any = "",
+    cancel_event: Optional[threading.Event] = None,
 ) -> Dict[str, Any]:
+    if isinstance(cancel_event, threading.Event) and cancel_event.is_set():
+        raise LocalLlmRequestSupersededError(
+            "A newer interactive request replaced this model task."
+        )
     response = _llama_cpp_native_http_session().post(
         _llama_cpp_native_url(base_url, endpoint),
         json=payload,
@@ -5913,6 +6027,26 @@ def _llama_cpp_native_stream_post(
             f"llama-server POST {endpoint} failed with HTTP {response.status_code}{suffix}"
         ) from exc
 
+    cancel_watcher_stop = threading.Event()
+
+    def _close_response_when_cancelled() -> None:
+        if not isinstance(cancel_event, threading.Event):
+            return
+        while not cancel_watcher_stop.is_set():
+            if cancel_event.wait(timeout=0.1):
+                try:
+                    response.close()
+                except Exception:
+                    pass
+                return
+
+    if isinstance(cancel_event, threading.Event):
+        threading.Thread(
+            target=_close_response_when_cancelled,
+            name="tater-llama-stream-cancel",
+            daemon=True,
+        ).start()
+
     content_parts: List[str] = []
     final_payload: Dict[str, Any] = {}
     try:
@@ -5921,6 +6055,10 @@ def _llama_cpp_native_stream_post(
         # decode UTF-8 as Latin-1 and turn characters such as “ and 👋 into
         # mojibake. Keep the wire data as bytes and decode it explicitly.
         for raw_line in response.iter_lines(decode_unicode=False):
+            if isinstance(cancel_event, threading.Event) and cancel_event.is_set():
+                raise LocalLlmRequestSupersededError(
+                    "A newer interactive request replaced this model task."
+                )
             if isinstance(raw_line, bytes):
                 line = raw_line.decode("utf-8", errors="replace").strip()
             else:
@@ -5945,7 +6083,18 @@ def _llama_cpp_native_stream_post(
                     stream_callback(chunk)
                 except Exception:
                     logger.debug("[llama-cpp-native] stream callback failed", exc_info=True)
+        if isinstance(cancel_event, threading.Event) and cancel_event.is_set():
+            raise LocalLlmRequestSupersededError(
+                "A newer interactive request replaced this model task."
+            )
+    except Exception as exc:
+        if isinstance(cancel_event, threading.Event) and cancel_event.is_set():
+            raise LocalLlmRequestSupersededError(
+                "A newer interactive request replaced this model task."
+            ) from exc
+        raise
     finally:
+        cancel_watcher_stop.set()
         response.close()
     final_payload["content"] = "".join(content_parts)
     return final_payload
@@ -7038,6 +7187,7 @@ def _llama_cpp_native_worker_chat(
     media_kind: str = "",
     slot_id: Any = None,
     stream_callback: Optional[Callable[[str], Any]] = None,
+    cancel_event: Optional[threading.Event] = None,
     timeout: float,
 ) -> Dict[str, Any]:
     requested_media_kind = _normalize_llama_cpp_media_kind(media_kind, vision=vision)
@@ -7114,15 +7264,25 @@ def _llama_cpp_native_worker_chat(
     if stall_timeout > 0:
         request_timeout = min(request_timeout, stall_timeout)
     generation_started = time.perf_counter()
-    if callable(stream_callback) or stall_timeout > 0:
+    if callable(stream_callback) or stall_timeout > 0 or isinstance(cancel_event, threading.Event):
         completion_payload["stream"] = True
         completion_payload["return_progress"] = bool(stall_timeout > 0)
+
+        def _emit_chunk(chunk: str) -> None:
+            if isinstance(cancel_event, threading.Event) and cancel_event.is_set():
+                raise LocalLlmRequestSupersededError(
+                    "A newer interactive request replaced this model task."
+                )
+            if callable(stream_callback):
+                stream_callback(chunk)
+
         completion_response = _llama_cpp_native_stream_post(
             base_url,
             "/completion",
             completion_payload,
-            stream_callback=stream_callback if callable(stream_callback) else (lambda _chunk: None),
+            stream_callback=_emit_chunk,
             timeout=request_timeout,
+            cancel_event=cancel_event,
         )
     else:
         completion_response = _llama_cpp_native_json_post(
@@ -7306,6 +7466,7 @@ class _TaterLlamaCppEngineProcess:
         *,
         timeout: Optional[float] = None,
         stream_callback: Optional[Callable[[str], Any]] = None,
+        cancel_event: Optional[threading.Event] = None,
     ) -> Any:
         self.start()
         proc = self.process
@@ -7336,11 +7497,32 @@ class _TaterLlamaCppEngineProcess:
                 raise RuntimeError("Tater llama.cpp engine is not accepting requests.") from exc
 
         deadline = time.monotonic() + float(timeout) if timeout and timeout > 0 else 0.0
+        cancel_sent = False
         try:
             with self._response_cv:
                 while request_id not in self._responses:
                     if proc.poll() is not None:
                         raise RuntimeError(self._exit_detail(op))
+                    if (
+                        not cancel_sent
+                        and isinstance(cancel_event, threading.Event)
+                        and cancel_event.is_set()
+                    ):
+                        cancel_message = {
+                            "id": str(uuid.uuid4()),
+                            "protocol": _LLAMA_CPP_ENGINE_PROTOCOL_VERSION,
+                            "op": "cancel",
+                            "payload": {"target_id": request_id},
+                        }
+                        with self._send_lock:
+                            try:
+                                proc.stdin.write(
+                                    json.dumps(cancel_message, separators=(",", ":")) + "\n"
+                                )
+                                proc.stdin.flush()
+                                cancel_sent = True
+                            except Exception:
+                                pass
                     if deadline > 0:
                         remaining = deadline - time.monotonic()
                         if remaining <= 0:
@@ -7695,6 +7877,7 @@ def _llama_cpp_engine_chat_completion(
     media_kind: str = "",
     slot_id: Any = None,
     stream_callback: Optional[Callable[[str], Any]] = None,
+    cancel_event: Optional[threading.Event] = None,
 ) -> Dict[str, Any]:
     requested_media_kind = _normalize_llama_cpp_media_kind(
         media_kind or _multimodal_payload_kind(messages),
@@ -7731,6 +7914,7 @@ def _llama_cpp_engine_chat_completion(
             },
             timeout=timeout_seconds,
             stream_callback=stream_callback,
+            cancel_event=cancel_event,
         )
     except Exception as exc:
         lowered = str(exc or "").strip().lower()
@@ -8473,7 +8657,8 @@ def _register_active_llm_call(
         value = str(request_context.get(key) or "").strip()
         if value:
             origin[key] = value
-    activity = _normalize_llm_activity_hint(activity_hint) or _infer_llm_call_activity(
+    context_activity = _normalize_llm_activity_hint(request_context.get("activity"))
+    activity = context_activity or _normalize_llm_activity_hint(activity_hint) or _infer_llm_call_activity(
         origin=origin,
         messages=(messages if isinstance(messages, list) else []),
     )
@@ -8505,7 +8690,9 @@ def _register_active_llm_call(
         "queue_key": str(request_context.get("queue_key") or "").strip(),
         "priority": request_context.get("priority"),
         "queue_timeout": request_context.get("queue_timeout"),
+        "request_class": normalize_llm_request_class(request_context.get("request_class")),
     }
+    row["request_class"] = _llm_request_class_for_call(row)
     with _ACTIVE_LLM_CALLS_LOCK:
         _ACTIVE_LLM_CALLS[call_id] = row
         _LLM_CALL_COUNTERS["started"] = int(_LLM_CALL_COUNTERS.get("started") or 0) + 1
@@ -8563,22 +8750,25 @@ def _local_llm_priority_for_call(row: Dict[str, Any]) -> int:
             return max(0, min(100, int(explicit)))
         except Exception:
             pass
+    request_class = _llm_request_class_for_call(row)
+    if request_class == LLM_REQUEST_CLASS_BACKGROUND:
+        return 50
     kind = str((row or {}).get("kind") or "other").strip().lower()
-    activity = str((row or {}).get("activity") or "").strip().lower()
     if kind == "spudlet":
         return 0
-    if activity in {"memory", "summary", "discovery", "cleanup", "verification"}:
-        return 50
     if kind in {"webui", "hydra"}:
         return 10
-    if kind == "core":
-        return 40
     return 20
 
 
 def _local_llm_queue_timeout_for_call(row: Dict[str, Any]) -> float:
     explicit = row.get("queue_timeout") if isinstance(row, dict) else None
-    raw = explicit if explicit is not None and str(explicit).strip() else os.getenv("TATER_LOCAL_LLM_QUEUE_TIMEOUT_SECONDS")
+    if explicit is not None and str(explicit).strip():
+        raw = explicit
+    elif _llm_request_class_for_call(row) == LLM_REQUEST_CLASS_BACKGROUND:
+        raw = os.getenv("TATER_BACKGROUND_LLM_QUEUE_TIMEOUT_SECONDS") or "5"
+    else:
+        raw = os.getenv("TATER_LOCAL_LLM_QUEUE_TIMEOUT_SECONDS")
     try:
         value = float(raw) if raw is not None and str(raw).strip() else 60.0
     except Exception:
@@ -8624,6 +8814,7 @@ def _finish_active_llm_call(
             "path": str(row.get("path") or ""),
             "function": str(row.get("function") or ""),
             "activity": str(row.get("activity") or "").strip(),
+            "request_class": _llm_request_class_for_call(row),
             "host": str(row.get("host") or ""),
             "model": str(response_model or row.get("model") or "").strip(),
             "stream": bool(row.get("stream")),
@@ -8687,6 +8878,7 @@ def get_active_llm_calls_snapshot(*, limit: int = 100) -> List[Dict[str, Any]]:
                 "path": str(row.get("path") or ""),
                 "function": str(row.get("function") or ""),
                 "activity": str(row.get("activity") or "").strip(),
+                "request_class": _llm_request_class_for_call(row),
                 "host": str(row.get("host") or ""),
                 "model": str(row.get("model") or ""),
                 "stream": bool(row.get("stream")),
@@ -9907,6 +10099,7 @@ class SpudLinkLLMClientWrapper:
             raise RuntimeError("Spud Link native LLM routing does not support streaming model calls yet.")
         activity_hint = kwargs.pop("activity", "")
         kwargs.pop("cache_namespace", "")
+        supplied_metadata = kwargs.pop("metadata", None)
         model = str(kwargs.pop("model", self.model) or self.model).strip() or "tater/base"
 
         if "temperature" not in kwargs:
@@ -9927,6 +10120,21 @@ class SpudLinkLLMClientWrapper:
         )
         call_error: Optional[Exception] = None
         final_model = model
+        call_row = _llm_debug_row_for_call(call_id)
+        request_metadata = (
+            dict(supplied_metadata)
+            if isinstance(supplied_metadata, dict)
+            else {}
+        )
+        request_metadata.update(
+            {
+                "tater_request_class": _llm_request_class_for_call(call_row),
+                "tater_activity": str(call_row.get("activity") or "").strip()[:80],
+                "tater_kind": str(call_row.get("kind") or "").strip()[:40],
+                "tater_source": str(call_row.get("source") or "").strip()[:120],
+                "tater_function": str(call_row.get("function") or "").strip()[:120],
+            }
+        )
 
         try:
             _append_llm_debug_event(
@@ -9943,6 +10151,7 @@ class SpudLinkLLMClientWrapper:
                 "model": model,
                 "messages": messages,
                 "stream": False,
+                "metadata": request_metadata,
             }
             for key in (
                 "max_tokens",
@@ -10246,6 +10455,7 @@ class LlamaCppLLMClientWrapper:
         vision_requested = bool(self.vision or _vision_payload_has_image_url(messages))
         cache_namespace = kwargs.pop("_cache_namespace", "")
         stream_callback = kwargs.pop("_stream_callback", None)
+        cancel_event = kwargs.pop("_cancel_event", None)
         chat_kwargs = self._build_chat_kwargs(timeout, kwargs)
         local_messages = _llama_cpp_disable_thinking_messages(messages)
         request_slot = _llama_cpp_cache_namespace_slot(
@@ -10265,6 +10475,7 @@ class LlamaCppLLMClientWrapper:
             vision=vision_requested,
             slot_id=request_slot,
             stream_callback=stream_callback,
+            cancel_event=cancel_event if isinstance(cancel_event, threading.Event) else None,
         )
 
     async def chat(self, messages, **kwargs):
@@ -10343,6 +10554,7 @@ class LlamaCppLLMClientWrapper:
                     call_id=call_id,
                     priority=_local_llm_priority_for_call(call_row),
                     queue_key=str(call_row.get("queue_key") or ""),
+                    request_class=_llm_request_class_for_call(call_row),
                 )
                 queue_timeout = _local_llm_queue_timeout_for_call(call_row)
                 try:
@@ -10388,6 +10600,11 @@ class LlamaCppLLMClientWrapper:
                     _cache_namespace=cache_namespace,
                     _stream_callback=(
                         thread_stream_callback if callable(stream_callback) else None
+                    ),
+                    _cancel_event=(
+                        scheduler_lease.cancel_event
+                        if scheduler_lease is not None
+                        else None
                     ),
                     **kwargs,
                 )
@@ -10445,6 +10662,11 @@ class LlamaCppLLMClientWrapper:
             )
             return result
         except Exception as exc:
+            if scheduler_lease is not None and scheduler_lease.is_superseded():
+                call_error = LocalLlmRequestSupersededError(
+                    "A newer interactive request replaced this model task."
+                )
+                raise call_error from exc
             call_error = exc
             raise
         except asyncio.CancelledError as exc:
@@ -11724,6 +11946,8 @@ def _llama_cpp_engine_worker_main() -> int:
     return_code = 0
     state_lock = threading.RLock()
     reply_lock = threading.Lock()
+    chat_cancel_lock = threading.RLock()
+    chat_cancel_events: Dict[str, threading.Event] = {}
     chat_executor = ThreadPoolExecutor(
         max_workers=max(1, _llama_cpp_slot_count()),
         thread_name_prefix="tater-llama-chat",
@@ -11779,7 +12003,11 @@ def _llama_cpp_engine_worker_main() -> int:
                 raise RuntimeError(f"This llama.cpp model does not advertise support for {label} input.")
             return bundle
 
-    def _handle_chat(request_id: str, payload: Dict[str, Any]) -> None:
+    def _handle_chat(
+        request_id: str,
+        payload: Dict[str, Any],
+        cancel_event: threading.Event,
+    ) -> None:
         try:
             model_token = str((payload or {}).get("model") or "").strip()
             if not model_token:
@@ -11828,6 +12056,7 @@ def _llama_cpp_engine_worker_main() -> int:
                     if _boolish((payload or {}).get("stream"), default=False)
                     else None
                 ),
+                cancel_event=cancel_event,
                 timeout=float((payload or {}).get("timeout") or 0.0),
             )
             _reply({"id": request_id, "ok": True, "result": result})
@@ -11839,6 +12068,9 @@ def _llama_cpp_engine_worker_main() -> int:
                     "error": str(exc) or exc.__class__.__name__,
                 }
             )
+        finally:
+            with chat_cancel_lock:
+                chat_cancel_events.pop(request_id, None)
 
     def _handle_decision(request_id: str, payload: Dict[str, Any]) -> None:
         try:
@@ -11907,7 +12139,23 @@ def _llama_cpp_engine_worker_main() -> int:
                 _reply({"id": request_id, "ok": True, "result": result})
                 continue
             if op == "chat":
-                chat_executor.submit(_handle_chat, request_id, dict(payload or {}))
+                cancel_event = threading.Event()
+                with chat_cancel_lock:
+                    chat_cancel_events[request_id] = cancel_event
+                chat_executor.submit(
+                    _handle_chat,
+                    request_id,
+                    dict(payload or {}),
+                    cancel_event,
+                )
+                continue
+            if op == "cancel":
+                target_id = str((payload or {}).get("target_id") or "").strip()
+                if target_id:
+                    with chat_cancel_lock:
+                        target_event = chat_cancel_events.get(target_id)
+                    if isinstance(target_event, threading.Event):
+                        target_event.set()
                 continue
             if op == "decision":
                 chat_executor.submit(_handle_decision, request_id, dict(payload or {}))
