@@ -2652,12 +2652,46 @@ def _generic_chat_fallback_text(text: str) -> str:
     return "I'm here and ready to talk or help."
 
 
+_DECISION_ACTION_PREFIX_RE = re.compile(
+    r"^(?:please\s+)?(?:play|pause|resume|skip|turn|set|start|stop|open|close|show|find|locate|search|"
+    r"look\s+up|download|send|schedule|remind|alert|wake|request|generate)\b",
+    flags=re.IGNORECASE,
+)
+_DECISION_CONTEXT_FOLLOWUP_RE = re.compile(
+    r"^(?:yes|yeah|yep|sure|okay|ok|no|nope|do\s+it|then\s+do\s+it|that\s+one|this\s+one|"
+    r"make\s+that\b|change\s+that\b|instead\b|the\s+other\s+one\b)",
+    flags=re.IGNORECASE,
+)
+
+
+def _decision_chat_route_needs_full_planner(
+    current_user_text: str,
+    *,
+    recent_history: Optional[List[Dict[str, Any]]] = None,
+) -> bool:
+    text = " ".join(str(current_user_text or "").strip().split())
+    if not text:
+        return False
+    if _DECISION_ACTION_PREFIX_RE.search(text):
+        return True
+    if len(text) <= 120 and _DECISION_CONTEXT_FOLLOWUP_RE.search(text):
+        return True
+    if recent_history and len(text.split()) <= 5 and re.search(
+        r"\b(?:it|that|this|them|those|one|ones|same|instead)\b",
+        text,
+        flags=re.IGNORECASE,
+    ):
+        return True
+    return False
+
+
 async def _run_decision_router(
     *,
     model: str,
     current_user_text: str,
     platform: str,
     available_tools: List[Dict[str, str]],
+    recent_history: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     del platform
     capability_rows: List[str] = []
@@ -2677,14 +2711,29 @@ async def _run_decision_router(
         "or live lookup that a listed tool can directly fulfill.\n"
         "- Choose chat for social conversation, acknowledgments, refusals, greetings, thanks, opinions, ordinary "
         "knowledge, writing, reasoning, math, and unsupported requests.\n"
-        "- Do not infer an unstated action or invent a tool request from a short or context-dependent conversational "
-        "fragment.\n"
-        "- A context-dependent follow-up still needs a tool when it clearly expresses an action that a listed tool "
-        "can fulfill.\n"
+        "- Use recent conversation only to resolve references and follow-ups in the current message.\n"
+        "- A confirmation, correction, answer, or modification such as yes, no, do it, that one, or make it three "
+        "needs a tool when the resulting request requires a listed tool.\n"
+        "- A request to play a named artist, song, video, or other media needs a listed playback or media tool; "
+        "the full planner will resolve the catalog item.\n"
+        "- If a short context-dependent message may continue a tool action but its reference is uncertain, choose "
+        "needs_tool so the full planner can resolve or clarify it.\n"
         "- If no listed tool clearly fulfills the message, choose chat."
     )
+    history_rows: List[str] = []
+    for item in (recent_history or [])[-4:]:
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role") or "").strip().lower()
+        if role not in {"user", "assistant"}:
+            continue
+        content = _short_text(_coerce_text(item.get("content")), limit=220).strip()
+        if content:
+            history_rows.append(f"{role}: {content}")
+    history_summary = "\n".join(history_rows) if history_rows else "(none)"
     state = (
         f"Current user message:\n{str(current_user_text or '')}\n\n"
+        f"Recent conversation (oldest to newest):\n{history_summary}\n\n"
         f"{routing_policy}\n\n"
         f"Available Tater tools:\n{capability_summary}"
     )
@@ -5928,6 +5977,7 @@ async def _run_hydra_turn_impl(
                 current_user_text=current_user_turn_text,
                 platform=platform,
                 available_tools=tool_capabilities,
+                recent_history=_chat_history_window(history, max_items=4),
             )
             decision_debug.update(decision_result)
             decision_elapsed_ms = float(decision_result.get("elapsed_ms") or 0.0)
@@ -5935,8 +5985,14 @@ async def _run_hydra_turn_impl(
             choice = str(decision_result.get("choice") or "")
             probability = float(decision_result.get("probability") or 0.0)
             high_confidence = probability >= decision_threshold
+            chat_route_guarded = _decision_chat_route_needs_full_planner(
+                current_user_turn_text,
+                recent_history=history,
+            )
             if decision_mode == "observe":
                 decision_debug["outcome"] = "observed_full"
+            elif high_confidence and choice == "chat" and chat_route_guarded:
+                decision_debug["outcome"] = "context_guard_full"
             elif high_confidence and choice == "chat":
                 bypass_astraeus = True
                 decision_debug["outcome"] = "chat"

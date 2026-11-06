@@ -15,6 +15,8 @@ def _vp():
 
 
 CONVERSATION_DISPLAY_MIN_INTERVAL_S = 0.09
+SHARED_VOICE_HISTORY_KEY = "tater:voice:shared:history"
+SHARED_VOICE_HYDRA_SCOPE = "household"
 
 
 async def _dispatch_conversation_display(
@@ -259,7 +261,30 @@ def _history_ctx_key(conv_id: str) -> str:
     return f"tater:voice:conv:{conv_id}:ctx"
 
 
-def _to_template_msg(role: str, content: Any) -> Optional[Dict[str, Any]]:
+def _voice_turn_history_content(role: str, content: str, voice_turn: Any = None) -> str:
+    text = str(content or "").strip()
+    if role != "user" or not text or not isinstance(voice_turn, dict):
+        return text
+
+    person_name = str(voice_turn.get("person_name") or voice_turn.get("speaker_name") or "").strip()
+    person_id = str(voice_turn.get("person_id") or "").strip()
+    speaker_id = str(voice_turn.get("speaker_id") or "").strip()
+    area_name = str(voice_turn.get("area_name") or "").strip()
+    trusted_fields: List[str] = []
+    if person_name:
+        trusted_fields.append(f"person={json.dumps(person_name, ensure_ascii=False)}")
+    if person_id:
+        trusted_fields.append(f"person_id={json.dumps(person_id, ensure_ascii=False)}")
+    elif speaker_id:
+        trusted_fields.append(f"speaker_id={json.dumps(speaker_id, ensure_ascii=False)}")
+    if area_name:
+        trusted_fields.append(f"room={json.dumps(area_name, ensure_ascii=False)}")
+    if not trusted_fields:
+        trusted_fields.append("person=\"unrecognized voice user\"")
+    return "[Trusted voice speaker: " + "; ".join(trusted_fields) + "]\n" + text
+
+
+def _to_template_msg(role: str, content: Any, voice_turn: Any = None) -> Optional[Dict[str, Any]]:
     vp = _vp()
     if isinstance(content, dict) and content.get("marker") == "plugin_wait":
         return None
@@ -274,13 +299,14 @@ def _to_template_msg(role: str, content: Any) -> Optional[Dict[str, Any]]:
         except Exception:
             return None
     if isinstance(content, str):
-        return {"role": role, "content": content}
-    return {"role": role, "content": str(content)}
+        return {"role": role, "content": _voice_turn_history_content(role, content, voice_turn)}
+    return {"role": role, "content": _voice_turn_history_content(role, str(content), voice_turn)}
 
 
-async def _load_history(conv_id: str, limit: int) -> List[Dict[str, Any]]:
+async def _load_history(conv_id: str, limit: int, *, shared: bool = False) -> List[Dict[str, Any]]:
     vp = _vp()
-    raw = vp.redis_client.lrange(_history_key(conv_id), -limit, -1) or []
+    key = SHARED_VOICE_HISTORY_KEY if shared else _history_key(conv_id)
+    raw = vp.redis_client.lrange(key, -limit, -1) or []
     out: List[Dict[str, Any]] = []
     for line in raw:
         with contextlib.suppress(Exception):
@@ -290,26 +316,64 @@ async def _load_history(conv_id: str, limit: int) -> List[Dict[str, Any]]:
             role = vp._text(item.get("role") or "assistant")
             if role not in {"user", "assistant"}:
                 role = "assistant"
-            templ = _to_template_msg(role, item.get("content"))
+            templ = _to_template_msg(role, item.get("content"), item.get("voice_turn"))
             if templ:
                 out.append(templ)
     return out
 
 
-async def _save_history_message(conv_id: str, role: str, content: Any) -> None:
+async def _save_history_message(
+    conv_id: str,
+    role: str,
+    content: Any,
+    *,
+    voice_turn: Optional[Dict[str, Any]] = None,
+    include_shared: bool = True,
+) -> None:
     vp = _vp()
     cfg = vp._voice_config_snapshot()
     limits = cfg.get("limits") if isinstance(cfg.get("limits"), dict) else {}
     max_store = int(limits.get("history_store") or vp.DEFAULT_HISTORY_MAX_STORE)
     ttl = int(limits.get("session_ttl_s") or vp.DEFAULT_SESSION_TTL_SECONDS)
 
-    key = _history_key(conv_id)
-    payload = json.dumps({"role": role, "content": content}, ensure_ascii=False)
+    payload_row: Dict[str, Any] = {"role": role, "content": content}
+    if isinstance(voice_turn, dict) and voice_turn:
+        payload_row["voice_turn"] = dict(voice_turn)
+    payload = json.dumps(payload_row, ensure_ascii=False)
+    keys = [_history_key(conv_id)]
+    if include_shared:
+        keys.append(SHARED_VOICE_HISTORY_KEY)
     pipe = vp.redis_client.pipeline()
-    pipe.rpush(key, payload)
-    pipe.ltrim(key, -max_store, -1)
-    pipe.expire(key, ttl)
+    for key in keys:
+        pipe.rpush(key, payload)
+        pipe.ltrim(key, -max_store, -1)
+        pipe.expire(key, ttl)
     pipe.execute()
+
+
+def _voice_turn_metadata(
+    *,
+    session: VoiceSessionRuntime,
+    origin: Dict[str, Any],
+    area_name: str,
+    device_name: str,
+) -> Dict[str, Any]:
+    return {
+        key: value
+        for key, value in {
+            "person_id": str(origin.get("person_id") or "").strip(),
+            "person_name": str(origin.get("person_name") or "").strip(),
+            "speaker_id": str(origin.get("speaker_id") or "").strip(),
+            "speaker_name": str(origin.get("speaker_name") or "").strip(),
+            "area_name": str(area_name or "").strip(),
+            "device_id": str(session.selector or "").strip(),
+            "device_name": str(device_name or "").strip(),
+            "session_id": str(session.session_id or "").strip(),
+            "conversation_id": str(session.conversation_id or "").strip(),
+            "timestamp": time.time(),
+        }.items()
+        if value not in (None, "")
+    }
 
 
 async def _load_context(conv_id: str) -> Dict[str, Any]:
@@ -344,11 +408,6 @@ async def _run_hydra_turn_for_voice(*, transcript: str, conv_id: str, session: V
     cfg = vp._voice_config_snapshot()
     limits = cfg.get("limits") if isinstance(cfg.get("limits"), dict) else {}
     max_llm = int(limits.get("history_llm") or vp.DEFAULT_HISTORY_MAX_LLM)
-
-    await _save_history_message(conv_id, "user", user_text)
-    history = await _load_history(conv_id, max_llm)
-    if not history or vp._text(history[-1].get("role")) != "user":
-        history.append({"role": "user", "content": user_text})
 
     context = await _load_context(conv_id)
     if not isinstance(context, dict):
@@ -420,6 +479,23 @@ async def _run_hydra_turn_for_voice(*, transcript: str, conv_id: str, session: V
             redis_client=vp.redis_client,
         )
 
+    voice_turn = _voice_turn_metadata(
+        session=session,
+        origin=origin,
+        area_name=area_name,
+        device_name=device_name,
+    )
+    # Voice Core is one household conversation shared across every satellite.
+    # Load the prior rolling window before recording the current turn so Hydra
+    # receives the current message exactly once via user_text.
+    history = await _load_history(conv_id, max_llm, shared=True)
+    await _save_history_message(
+        conv_id,
+        "user",
+        user_text,
+        voice_turn=voice_turn,
+    )
+
     platform_preamble = ""
     tool_platform_preamble = ""
     person_name = vp._text(origin.get("person_name"))
@@ -482,6 +558,8 @@ async def _run_hydra_turn_for_voice(*, transcript: str, conv_id: str, session: V
                 conv_id,
                 "assistant",
                 {"marker": "plugin_wait", "content": text, "payload": progress_payload},
+                voice_turn=voice_turn,
+                include_shared=False,
             )
             callback = session.live_tool_progress_callback if callable(session.live_tool_progress_callback) else None
             if callback is not None:
@@ -497,7 +575,7 @@ async def _run_hydra_turn_for_voice(*, transcript: str, conv_id: str, session: V
             enabled_predicate=vp.get_verba_enabled,
             context=context,
             user_text=user_text,
-            scope=conv_id,
+            scope=SHARED_VOICE_HYDRA_SCOPE,
             origin=origin,
             redis_client=vp.redis_client,
             max_rounds=max_rounds,
@@ -524,6 +602,7 @@ async def _run_hydra_turn_for_voice(*, transcript: str, conv_id: str, session: V
         conv_id,
         "assistant",
         {"marker": "plugin_response", "phase": "final", "content": response_text},
+        voice_turn=voice_turn,
     )
     await _save_context(conv_id, context)
     return response_text

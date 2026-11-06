@@ -62,6 +62,37 @@ class DecisionRuntimeTests(unittest.TestCase):
 
 
 class DecisionHydraTests(unittest.IsolatedAsyncioTestCase):
+    def test_chat_route_guard_keeps_action_and_context_followups_in_full_planner(self):
+        history = [
+            {"role": "user", "content": "Would you go to work for me?"},
+            {"role": "assistant", "content": "Do you want me to do that?"},
+        ]
+
+        self.assertTrue(
+            hydra_runtime._decision_chat_route_needs_full_planner(
+                "Play some Stick Figure.",
+                recent_history=[],
+            )
+        )
+        self.assertTrue(
+            hydra_runtime._decision_chat_route_needs_full_planner(
+                "Then do it, buddy.",
+                recent_history=history,
+            )
+        )
+        self.assertFalse(
+            hydra_runtime._decision_chat_route_needs_full_planner(
+                "How are you doing?",
+                recent_history=history,
+            )
+        )
+        self.assertFalse(
+            hydra_runtime._decision_chat_route_needs_full_planner(
+                "Thanks!",
+                recent_history=history,
+            )
+        )
+
     def test_router_configuration_reads_per_model_threshold(self):
         redis = mock.Mock()
         redis.get.side_effect = lambda key: {
@@ -90,10 +121,14 @@ class DecisionHydraTests(unittest.IsolatedAsyncioTestCase):
         with mock.patch.object(hydra_runtime, "run_llama_cpp_decision_model", return_value=response) as decision:
             result = await hydra_runtime._run_decision_router(
                 model="julia.gguf",
-                current_user_text="turn on the kitchen light",
+                current_user_text="yes, do that",
                 platform="webui",
                 available_tools=[
                     {"id": "homeassistant", "description": "Read and control Home Assistant devices"}
+                ],
+                recent_history=[
+                    {"role": "user", "content": "Should we turn on the kitchen light?"},
+                    {"role": "assistant", "content": "Would you like me to turn it on?"},
                 ],
             )
 
@@ -102,10 +137,12 @@ class DecisionHydraTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["probability"], 0.98)
         self.assertEqual(result["usage"]["output_tokens"], 0)
         state = decision.call_args.kwargs["state"]
-        self.assertIn("Current user message:\nturn on the kitchen light", state)
+        self.assertIn("Current user message:\nyes, do that", state)
+        self.assertIn("Recent conversation (oldest to newest):", state)
+        self.assertIn("assistant: Would you like me to turn it on?", state)
         self.assertIn("Routing policy:", state)
         self.assertIn("acknowledgments, refusals", state)
-        self.assertIn("Do not infer an unstated action", state)
+        self.assertIn("yes, no, do it, that one, or make it three", state)
         self.assertIn("If no listed tool clearly fulfills the message, choose chat.", state)
         self.assertIn("Available Tater tools:", state)
         self.assertIn("homeassistant: Read and control Home Assistant devices", state)
