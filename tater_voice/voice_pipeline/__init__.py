@@ -470,6 +470,8 @@ DEFAULT_STT_TRAILING_SILENCE_KEEP_S = 0.35
 DEFAULT_SESSION_TTL_SECONDS = 2 * 60 * 60
 DEFAULT_HISTORY_MAX_STORE = 20
 DEFAULT_HISTORY_MAX_LLM = 8
+HYDRA_HISTORY_MAX_STORE_KEY = "tater:max_store"
+HYDRA_HISTORY_MAX_LLM_KEY = "tater:max_llm"
 
 VOICE_STATE_LISTENING = "listening"
 VOICE_STATE_THINKING = "thinking"
@@ -2423,6 +2425,40 @@ def _get_float_setting(name: str, default: float, *, minimum: Optional[float] = 
     return _as_float(_voice_setting_or_environment(name), default, minimum=minimum, maximum=maximum)
 
 
+def _get_conversation_window_setting(
+    redis_key: str,
+    legacy_voice_name: str,
+    default: int,
+    *,
+    minimum: int,
+) -> int:
+    """Use the shared Hydra conversation setting, retaining legacy fallbacks."""
+    try:
+        raw = redis_client.get(redis_key)
+    except Exception:
+        raw = None
+    if raw is None or not str(raw).strip():
+        raw = _voice_setting_or_environment(legacy_voice_name)
+    return _as_int(raw, default, minimum=minimum)
+
+
+def _conversation_history_limits() -> Dict[str, int]:
+    return {
+        "history_store": _get_conversation_window_setting(
+            HYDRA_HISTORY_MAX_STORE_KEY,
+            "MAX_STORE",
+            DEFAULT_HISTORY_MAX_STORE,
+            minimum=0,
+        ),
+        "history_llm": _get_conversation_window_setting(
+            HYDRA_HISTORY_MAX_LLM_KEY,
+            "MAX_LLM",
+            DEFAULT_HISTORY_MAX_LLM,
+            minimum=1,
+        ),
+    }
+
+
 def _normalize_stt_backend(value: Any) -> str:
     token = _lower(value).replace("-", "_").replace(" ", "_")
     if token in {"", "default"}:
@@ -3001,8 +3037,7 @@ def _build_voice_config_snapshot() -> Dict[str, Any]:
             "max_audio_bytes": _get_int_setting("VOICE_NATIVE_MAX_AUDIO_BYTES", DEFAULT_MAX_AUDIO_BYTES, minimum=4096, maximum=16 * 1024 * 1024),
             "tts_url_ttl_s": _get_float_setting("VOICE_NATIVE_TTS_URL_TTL_S", DEFAULT_TTS_URL_TTL_S, minimum=30.0, maximum=900.0),
             "session_ttl_s": _get_int_setting("SESSION_TTL_SECONDS", DEFAULT_SESSION_TTL_SECONDS, minimum=300, maximum=24 * 60 * 60),
-            "history_store": _get_int_setting("MAX_STORE", DEFAULT_HISTORY_MAX_STORE, minimum=4, maximum=200),
-            "history_llm": _get_int_setting("MAX_LLM", DEFAULT_HISTORY_MAX_LLM, minimum=2, maximum=80),
+            **_conversation_history_limits(),
         },
     }
 

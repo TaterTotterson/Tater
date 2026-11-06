@@ -333,7 +333,10 @@ async def _save_history_message(
     vp = _vp()
     cfg = vp._voice_config_snapshot()
     limits = cfg.get("limits") if isinstance(cfg.get("limits"), dict) else {}
-    max_store = int(limits.get("history_store") or vp.DEFAULT_HISTORY_MAX_STORE)
+    try:
+        max_store = max(0, int(limits.get("history_store", vp.DEFAULT_HISTORY_MAX_STORE)))
+    except (TypeError, ValueError):
+        max_store = int(vp.DEFAULT_HISTORY_MAX_STORE)
     ttl = int(limits.get("session_ttl_s") or vp.DEFAULT_SESSION_TTL_SECONDS)
 
     payload_row: Dict[str, Any] = {"role": role, "content": content}
@@ -346,7 +349,8 @@ async def _save_history_message(
     pipe = vp.redis_client.pipeline()
     for key in keys:
         pipe.rpush(key, payload)
-        pipe.ltrim(key, -max_store, -1)
+        if max_store > 0:
+            pipe.ltrim(key, -max_store, -1)
         pipe.expire(key, ttl)
     pipe.execute()
 
@@ -407,7 +411,10 @@ async def _run_hydra_turn_for_voice(*, transcript: str, conv_id: str, session: V
 
     cfg = vp._voice_config_snapshot()
     limits = cfg.get("limits") if isinstance(cfg.get("limits"), dict) else {}
-    max_llm = int(limits.get("history_llm") or vp.DEFAULT_HISTORY_MAX_LLM)
+    try:
+        max_llm = max(1, int(limits.get("history_llm", vp.DEFAULT_HISTORY_MAX_LLM)))
+    except (TypeError, ValueError):
+        max_llm = int(vp.DEFAULT_HISTORY_MAX_LLM)
 
     context = await _load_context(conv_id)
     if not isinstance(context, dict):

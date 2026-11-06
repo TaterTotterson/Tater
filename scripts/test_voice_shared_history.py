@@ -3,6 +3,7 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
+from tater_voice import voice_pipeline
 from tater_voice.voice_pipeline import conversation
 
 
@@ -16,7 +17,9 @@ class _Pipeline:
 
     def ltrim(self, key, start, end):
         rows = self.redis.rows.setdefault(key, [])
-        self.redis.rows[key] = rows[start:] if start < 0 else rows[start : end + 1]
+        normalized_start = max(0, len(rows) + start) if start < 0 else start
+        normalized_end = len(rows) if end == -1 else end + 1
+        self.redis.rows[key] = rows[normalized_start:normalized_end]
         return self
 
     def expire(self, key, ttl):
@@ -47,13 +50,17 @@ class _Redis:
 class SharedVoiceHistoryTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.redis = _Redis()
+        self.limits = {
+            "history_store": 20,
+            "history_llm": 8,
+            "session_ttl_s": 2 * 60 * 60,
+        }
         self.vp = SimpleNamespace(
             redis_client=self.redis,
             DEFAULT_HISTORY_MAX_STORE=20,
+            DEFAULT_HISTORY_MAX_LLM=8,
             DEFAULT_SESSION_TTL_SECONDS=2 * 60 * 60,
-            _voice_config_snapshot=lambda: {
-                "limits": {"history_store": 20, "session_ttl_s": 2 * 60 * 60}
-            },
+            _voice_config_snapshot=lambda: {"limits": dict(self.limits)},
             _text=lambda value: str(value or "").strip(),
         )
         self.patch = mock.patch.object(conversation, "_vp", return_value=self.vp)
@@ -116,6 +123,63 @@ class SharedVoiceHistoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(conversation.SHARED_VOICE_HISTORY_KEY, self.redis.rows)
         stored = json.loads(self.redis.rows[conversation._history_key("conversation-one")][0])
         self.assertEqual(stored["content"]["marker"], "plugin_wait")
+
+    async def test_shared_history_uses_configured_storage_limit(self):
+        self.limits["history_store"] = 2
+        for index in range(4):
+            await conversation._save_history_message(
+                "conversation-one",
+                "user",
+                f"Message {index}",
+            )
+
+        shared = self.redis.rows[conversation.SHARED_VOICE_HISTORY_KEY]
+        per_conversation = self.redis.rows[conversation._history_key("conversation-one")]
+        self.assertEqual(len(shared), 2)
+        self.assertEqual(len(per_conversation), 2)
+        self.assertEqual(json.loads(shared[0])["content"], "Message 2")
+
+    async def test_zero_storage_limit_keeps_unlimited_shared_history(self):
+        self.limits["history_store"] = 0
+        for index in range(25):
+            await conversation._save_history_message(
+                "conversation-one",
+                "user",
+                f"Message {index}",
+            )
+
+        self.assertEqual(len(self.redis.rows[conversation.SHARED_VOICE_HISTORY_KEY]), 25)
+        self.assertEqual(len(self.redis.rows[conversation._history_key("conversation-one")]), 25)
+
+
+class VoiceHistoryConfigurationTests(unittest.TestCase):
+    def test_voice_history_uses_shared_hydra_conversation_settings(self):
+        values = {
+            voice_pipeline.HYDRA_HISTORY_MAX_STORE_KEY: "64",
+            voice_pipeline.HYDRA_HISTORY_MAX_LLM_KEY: "18",
+        }
+        with mock.patch.object(
+            voice_pipeline.redis_client,
+            "get",
+            side_effect=lambda key: values.get(key),
+        ):
+            limits = voice_pipeline._conversation_history_limits()
+
+        self.assertEqual(limits, {"history_store": 64, "history_llm": 18})
+
+    def test_zero_max_store_preserves_unlimited_ui_behavior(self):
+        values = {
+            voice_pipeline.HYDRA_HISTORY_MAX_STORE_KEY: "0",
+            voice_pipeline.HYDRA_HISTORY_MAX_LLM_KEY: "1",
+        }
+        with mock.patch.object(
+            voice_pipeline.redis_client,
+            "get",
+            side_effect=lambda key: values.get(key),
+        ):
+            limits = voice_pipeline._conversation_history_limits()
+
+        self.assertEqual(limits, {"history_store": 0, "history_llm": 1})
 
 
 if __name__ == "__main__":
