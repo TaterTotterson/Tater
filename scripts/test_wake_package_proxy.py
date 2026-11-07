@@ -333,6 +333,48 @@ class WakePackageProxyTests(unittest.TestCase):
         self.assertEqual(manifest["model"], "model.tflite")
         self.assertEqual(manifest["micro"]["probability_cutoff"], 0.82)
 
+    def test_schema_four_boundary_model_is_rewritten_and_verified(self) -> None:
+        source_url = "https://trainer.example/wakes/hey_tater.wake-bundle.json"
+        local_url = wake_package_proxy.register_bundle("http://10.4.20.210:8501", source_url)
+        package_id = urlsplit(local_url).path.split("/")[-2]
+        tflite = b"\x1c\x00\x00\x00TFL3wake-model"
+        boundary = b"\x1c\x00\x00\x00TFL3boundary-model"
+        bundle = {
+            "schema_version": 4,
+            "type": "tater_wake_word_bundle",
+            "wake_word": "Hey Tater",
+            "key": "hey_tater",
+            "micro_wake_word": {
+                "type": "micro", "wake_word": "Hey Tater",
+                "model": "hey_tater.tflite",
+                "model_sha256": hashlib.sha256(tflite).hexdigest(),
+                "model_size_bytes": len(tflite), "version": 2,
+                "micro": {"probability_cutoff": 0.82, "sliding_window_size": 4},
+            },
+            "wake_boundary": {
+                "type": "wake_word_end",
+                "model": "hey_tater.boundary.tflite",
+                "model_sha256": hashlib.sha256(boundary).hexdigest(),
+                "model_size_bytes": len(boundary),
+                "model_format": "tflite_stream_state_internal_quant",
+                "quantization": "int8", "sample_rate": 16000,
+                "threshold": 0.8, "tensor_arena_size": 65536,
+                "search_before_ms": 700, "search_after_ms": 120,
+            },
+        }
+        with mock.patch.object(
+            wake_package_proxy,
+            "_download",
+            side_effect=[
+                (json.dumps(bundle).encode(), source_url),
+                (boundary, "https://trainer.example/wakes/hey_tater.boundary.tflite"),
+            ],
+        ):
+            proxied = json.loads(wake_package_proxy.bundle_bytes(package_id))
+            self.assertEqual(wake_package_proxy.boundary_model_bytes(package_id), boundary)
+        self.assertEqual(proxied["schema_version"], 4)
+        self.assertEqual(proxied["wake_boundary"]["model"], "boundary-model.tflite")
+
     def test_mww_nww_mode_uses_one_proxied_bundle_for_both_models(self) -> None:
         selector = "native:echo-test"
         source_url = "https://trainer.example/hey_tater.wake-bundle.json"

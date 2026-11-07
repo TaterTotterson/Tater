@@ -6054,104 +6054,27 @@ async def _queue_selector_audio_url(
     }
 
 
-def _transcript_is_low_signal(transcript: str) -> bool:
+def _transcript_is_actionable(transcript: str) -> bool:
+    """Return whether STT produced words worth sending to the assistant.
+
+    VAD remains responsible for endpointing, but it must not overrule a final
+    transcript just because the command was short or quiet. Reject only audio
+    that produced no lexical words or filler and keep every other one- or
+    multi-word result, including commands such as "go" and "you're cool".
+    """
     text = _text(transcript).lower()
     if not text:
-        return True
+        return False
     words = re.findall(r"[a-z0-9']+", text)
     if not words:
-        return True
-    preserved = {"yes", "no", "stop", "cancel", "play", "pause", "next", "back"}
-    if len(words) == 1 and words[0] in preserved:
         return False
     filler = {"um", "uh", "hmm", "mm", "huh", "er", "ah", "uhh", "umm", "mmm"}
-    if len(words) == 1 and words[0] in filler:
-        return True
-    compact = "".join(words)
-    return len(compact) < 3
+    return not all(word in filler for word in words)
 
 
-def _continued_chat_retry_evidence(session: VoiceSessionRuntime, transcript: str = "") -> bool:
-    if not isinstance(session, VoiceSessionRuntime):
-        return False
-    if not (
-        bool(getattr(session, "continued_chat_reopen", False))
-        or bool(_text(getattr(session, "wake_word", "")))
-    ):
-        return False
-
-    # Do not turn background noise or buffered audio packets into a spoken
-    # retry. A retry requires VAD-confirmed speech, even when STT returned text.
-    speech_s = max(0.0, float(getattr(session, "speech_duration_s", 0.0) or 0.0))
-    if speech_s < 0.12:
-        return False
-
-    transcript_text = _text(transcript)
-    if not transcript_text:
-        return False
-    return not _transcript_is_low_signal(transcript_text)
-
-
-def _claim_continued_chat_retry(session: VoiceSessionRuntime, transcript: str = "") -> bool:
-    if not _continued_chat_retry_evidence(session, transcript):
-        return False
-
-    runtime = _selector_runtime(session.selector)
-    conversation_id = _text(session.conversation_id) or _text(session.session_id)
-    prior_conversation_id = _text(runtime.get("continued_chat_retry_conversation_id"))
-    if bool(runtime.get("continued_chat_retry_used")) and prior_conversation_id == conversation_id:
-        return False
-
-    runtime["continued_chat_retry_conversation_id"] = conversation_id
-    runtime["continued_chat_retry_used"] = True
-    return True
-
-
-def _continued_chat_retry_response_text(transcript: str = "") -> str:
+def _incomplete_transcript_retry_response_text(transcript: str = "") -> str:
     _ = transcript
-    return "I didn't catch that. Could you say it again?"
-
-
-def _voice_turn_has_low_speech_evidence(session: VoiceSessionRuntime, transcript: str) -> bool:
-    if not isinstance(session, VoiceSessionRuntime):
-        return False
-
-    words = re.findall(r"[a-z0-9']+", _text(transcript).lower())
-    if not words:
-        return True
-
-    is_brief_command = len(words) == 1 and words[0] in {"yes", "no", "stop", "cancel", "play", "pause", "next", "back"}
-    speech_s = max(0.0, float(getattr(session, "speech_duration_s", 0.0) or 0.0))
-    max_prob = max(0.0, float(getattr(session, "max_probability", 0.0) or 0.0))
-    vad_peak = (
-        float(getattr(session, "vad_audio_peak_dbfs", -120.0) or -120.0)
-        if int(getattr(session, "vad_audio_level_chunks", 0) or 0) > 0
-        else -120.0
-    )
-
-    if speech_s >= 0.35:
-        return False
-    if max_prob >= 0.50:
-        return False
-    # A short sentence can be fully transcribed even when VAD only catches the
-    # leading edge of it. Once VAD has confirmed enough speech to qualify for a
-    # continued-chat retry, a multi-word transcript is stronger evidence than
-    # the duration/loudness heuristics below. Without this, valid
-    # phrases such as "turn on the tv" and "what time is it" are replaced by a
-    # retry prompt, then silently discarded when the one allowed retry is used.
-    if speech_s >= 0.12 and len(words) >= 3:
-        return False
-    if speech_s < 0.12 and max_prob < 0.25 and not is_brief_command:
-        return True
-    if len(words) >= 7 and vad_peak >= -36.0:
-        return False
-    if is_brief_command and (max_prob >= 0.12 or vad_peak >= -34.0):
-        return False
-    if len(words) <= 6 and speech_s < 0.22 and max_prob < 0.32 and vad_peak < -34.0:
-        return True
-    if speech_s < 0.10 and max_prob < 0.45 and vad_peak < -28.0:
-        return True
-    return False
+    return "I only caught part of that. Could you say it again?"
 
 
 def _apply_startup_preroll(session: VoiceSessionRuntime) -> int:
@@ -6383,39 +6306,7 @@ async def _process_voice_turn(session: VoiceSessionRuntime) -> Dict[str, Any]:
             "no_op_reason": "empty_transcript",
         }
 
-    if _voice_turn_has_low_speech_evidence(session, transcript):
-        retry_text = (
-            _continued_chat_retry_response_text(transcript)
-            if _claim_continued_chat_retry(session, transcript)
-            else ""
-        )
-        if retry_text:
-            logger.info(
-                "[native-voice] continued-chat low-evidence retry selector=%s session_id=%s transcript=%r speech_s=%.2f max_prob=%.3f vad_peak_dbfs=%.1f",
-                session.selector,
-                session.session_id,
-                transcript,
-                float(session.speech_duration_s or 0.0),
-                float(session.max_probability or 0.0),
-                float(session.vad_audio_peak_dbfs or -120.0),
-            )
-            return {
-                "transcript": transcript,
-                "response_text": retry_text,
-            }
-        _native_debug(
-            f"low-evidence transcript bypass selector={session.selector} session_id={session.session_id} "
-            f"transcript={transcript!r} speech_s={float(session.speech_duration_s or 0.0):.2f} "
-            f"max_prob={float(session.max_probability or 0.0):.3f} "
-            f"vad_peak_dbfs={float(session.vad_audio_peak_dbfs or -120.0):.1f}"
-        )
-        return {
-            "transcript": transcript,
-            "no_op": True,
-            "no_op_reason": "low_signal_transcript",
-        }
-
-    if _transcript_is_low_signal(transcript):
+    if not _transcript_is_actionable(transcript):
         _native_debug(
             f"low-signal transcript bypass selector={session.selector} session_id={session.session_id} transcript={transcript!r}"
         )
@@ -6423,6 +6314,21 @@ async def _process_voice_turn(session: VoiceSessionRuntime) -> Dict[str, Any]:
             "transcript": transcript,
             "no_op": True,
             "no_op_reason": "low_signal_transcript",
+        }
+
+    transcript_assessment = _transcript_completeness_assessment(transcript)
+    if not bool(transcript_assessment.get("complete", True)):
+        logger.info(
+            "[native-voice] incomplete transcript retry selector=%s session_id=%s transcript=%r reason=%s",
+            session.selector,
+            session.session_id,
+            transcript,
+            _text(transcript_assessment.get("reason")) or "incomplete",
+        )
+        return {
+            "transcript": transcript,
+            "response_text": _incomplete_transcript_retry_response_text(transcript),
+            "transcript_retry": True,
         }
 
     try:
@@ -6616,76 +6522,25 @@ async def _finalize_session(
                     session.stt_metric_recorded = True
 
             recovered_transcript = _text(session.stt_transcript)
-            seg_threshold = float(seg.threshold) if isinstance(seg, SegmenterState) else float(DEFAULT_SILERO_THRESHOLD)
             recovered_words = re.findall(r"[a-z0-9']+", recovered_transcript.lower())
             recovered_assessment = (
                 _transcript_completeness_assessment(recovered_transcript) if recovered_transcript else {"complete": True}
             )
             recovered_complete = bool(recovered_assessment.get("complete", True))
-            recovered_low_signal = _transcript_is_low_signal(recovered_transcript)
-            is_brief_command = bool(
-                len(recovered_words) == 1
-                and recovered_words[0] in {"yes", "no", "stop", "cancel", "play", "pause", "next", "back"}
-            )
-            recovery_prob_threshold = (
-                max(seg_threshold, 0.28) if is_brief_command else max(0.60, seg_threshold + 0.10)
-            )
-            recovery_low_prob_threshold = max(0.10, min(0.24, seg_threshold * 0.5))
-            recovery_prob = float(session.max_probability or 0.0)
+            recovered_actionable = _transcript_is_actionable(recovered_transcript)
             recovery_audio_peak = (
                 float(session.vad_audio_peak_dbfs or -120.0)
                 if int(session.vad_audio_level_chunks or 0) > 0
                 else -120.0
             )
-            recovery_audio_evidence = recovery_audio_peak >= -38.0
-            recovery_voice_evidence = (
-                seg_speech_s >= 0.12
-                or recovery_prob >= 0.25
-                or (is_brief_command and recovery_prob >= 0.08)
-            )
-            recovery_by_transcript = (
-                (recovery_voice_evidence and len(recovered_words) >= 2 and recovery_prob >= recovery_low_prob_threshold)
-                or (recovery_voice_evidence and len(recovered_words) >= 5 and recovery_audio_evidence)
-                or (is_brief_command and recovery_prob >= 0.08)
-            )
-            partial_recovery = (
-                bool(recovered_transcript)
-                and (not recovered_low_signal)
-                and (not recovered_complete)
-                and 2 <= len(recovered_words) <= 6
-                and (
-                    recovery_prob >= recovery_low_prob_threshold
-                    or (len(recovered_words) >= 5 and recovery_audio_evidence)
-                )
-            )
-            recovery_ok = (
-                bool(recovered_transcript)
-                and (not recovered_low_signal)
-                and recovery_voice_evidence
-                and (recovered_complete or len(recovered_words) >= 7 or partial_recovery)
-                and (
-                    recovery_prob >= float(recovery_prob_threshold)
-                    or recovery_by_transcript
-                    or partial_recovery
-                )
-            )
-            followup_retry_ok = (
-                (not recovery_ok)
-                and _continued_chat_retry_evidence(session, recovered_transcript)
-            )
-            if recovery_ok or followup_retry_ok:
+            if recovered_actionable:
                 session.no_speech_recovered_transcript = True
-                session.no_speech_recovered_partial = bool(partial_recovery or followup_retry_ok)
-                if followup_retry_ok:
-                    session.followup_retry_prompt = True
-                    session.followup_retry_reason = no_speech_reason
+                session.no_speech_recovered_partial = not recovered_complete
                 _native_debug(
                     f"no-speech guard recovered transcript selector={token} session_id={session.session_id} "
                     f"reason={no_speech_reason} transcript_len={len(recovered_transcript)} words={len(recovered_words)} "
-                    f"max_prob={session.max_probability:.3f} threshold={recovery_prob_threshold:.3f} "
+                    f"max_prob={session.max_probability:.3f} "
                     f"vad_peak_dbfs={recovery_audio_peak:.1f} "
-                    f"transcript_recovery={bool(recovery_by_transcript)} partial={bool(partial_recovery)} "
-                    f"followup_retry={bool(followup_retry_ok)} "
                     f"complete={recovered_complete} complete_reason={_text(recovered_assessment.get('reason')) or '-'}"
                 )
             else:
@@ -7221,9 +7076,6 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
             else:
                 followup_conv = _claim_pending_followup(runtime)
                 continued_chat_reopen = bool(followup_conv)
-            if not continued_chat_reopen:
-                runtime["continued_chat_retry_conversation_id"] = ""
-                runtime["continued_chat_retry_used"] = False
         conv = explicit_conv or followup_conv or sid
         if continued_chat_reopen:
             _native_debug(f"continued chat reuse selector={token} session_id={sid} conversation_id={conv}")

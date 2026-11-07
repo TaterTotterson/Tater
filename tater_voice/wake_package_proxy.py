@@ -89,6 +89,7 @@ def register_manifest(base_url: Any, source_url: Any) -> str:
             "oww_metadata_url": "",
             "oww_model_url": "",
             "nww_model_urls": {},
+            "boundary_model_url": "",
         },
     )
     return f"{base}/api/tater/satellite/v1/wake-package/{package_id}/manifest.json"
@@ -109,6 +110,7 @@ def register_bundle(base_url: Any, source_url: Any) -> str:
             "oww_metadata_url": "",
             "oww_model_url": "",
             "nww_model_urls": {},
+            "boundary_model_url": "",
         },
     )
     return f"{base}/api/tater/satellite/v1/wake-package/{package_id}/bundle.wake-bundle.json"
@@ -263,15 +265,17 @@ def _bundle_bytes_uncached(token: str) -> bytes:
         raise WakePackageProxyError(f"Wake bundle is not valid JSON: {exc}") from exc
     if not isinstance(payload, dict):
         raise WakePackageProxyError("Wake bundle must contain a JSON object")
-    if payload.get("schema_version") not in {1, 2, 3} or payload.get("type") != "tater_wake_word_bundle":
+    if payload.get("schema_version") not in {1, 2, 3, 4} or payload.get("type") != "tater_wake_word_bundle":
         raise WakePackageProxyError("Wake bundle schema is unsupported")
     micro = payload.get("micro_wake_word")
     oww = payload.get("open_wake_word")
     nano = payload.get("nano_wake_word")
+    boundary = payload.get("wake_boundary")
     if not isinstance(micro, dict):
         raise WakePackageProxyError("Wake bundle must contain a micro_wake_word fallback")
     oww = dict(oww) if isinstance(oww, dict) else {}
     nano = dict(nano) if isinstance(nano, dict) else {}
+    boundary = dict(boundary) if isinstance(boundary, dict) else {}
 
     def valid_digest(value: str) -> bool:
         return len(value) == 64 and all(character in "0123456789abcdef" for character in value)
@@ -360,6 +364,48 @@ def _bundle_bytes_uncached(token: str) -> bytes:
         rewritten.pop("artifacts", None)
         rewritten_variants[architecture] = rewritten
 
+    boundary_model_url = ""
+    boundary_model_sha = ""
+    boundary_model_size = 0
+    boundary_ref = str(boundary.get("model") or "").strip()
+    if boundary:
+        boundary_model_sha = str(boundary.get("model_sha256") or "").strip().lower()
+        try:
+            boundary_model_size = int(boundary.get("model_size_bytes") or 0)
+        except (TypeError, ValueError):
+            boundary_model_size = 0
+        try:
+            boundary_threshold = float(boundary.get("threshold"))
+            boundary_arena = int(boundary.get("tensor_arena_size"))
+            boundary_rate = int(boundary.get("sample_rate"))
+            boundary_before = int(boundary.get("search_before_ms"))
+            boundary_after = int(boundary.get("search_after_ms"))
+        except (TypeError, ValueError):
+            boundary_threshold = 0.0
+            boundary_arena = 0
+            boundary_rate = 0
+            boundary_before = 0
+            boundary_after = -1
+        if (
+            payload.get("schema_version") != 4
+            or str(boundary.get("type") or "") != "wake_word_end"
+            or not boundary_ref.lower().endswith(".tflite")
+            or not valid_digest(boundary_model_sha)
+            or not (0 < boundary_model_size <= 200 * 1024)
+            or str(boundary.get("model_format") or "") != "tflite_stream_state_internal_quant"
+            or str(boundary.get("quantization") or "") != "int8"
+            or boundary_rate != 16000
+            or not (0.0 < boundary_threshold <= 1.0)
+            or not (64 * 1024 <= boundary_arena <= 256 * 1024)
+            or not (0 < boundary_before <= 2000)
+            or not (0 <= boundary_after <= 500)
+        ):
+            raise WakePackageProxyError("Wake bundle boundary model is invalid")
+        boundary_model_url = _validated_http_url(
+            urljoin(final_bundle_url, boundary_ref),
+            label="wake boundary model URL",
+        )
+
     with _PACKAGES_LOCK:
         current = _PACKAGES.get(token)
         if isinstance(current, dict):
@@ -376,6 +422,9 @@ def _bundle_bytes_uncached(token: str) -> bytes:
             current["nww_model_urls"] = nww_model_urls
             current["nww_model_sha256"] = nww_model_sha256
             current["nww_model_sizes"] = nww_model_sizes
+            current["boundary_model_url"] = boundary_model_url
+            current["boundary_model_sha256"] = boundary_model_sha
+            current["boundary_model_size"] = boundary_model_size
     micro = dict(micro)
     micro["manifest"] = "manifest.json"
     micro["model"] = "model.tflite"
@@ -393,12 +442,16 @@ def _bundle_bytes_uncached(token: str) -> bytes:
         oww["artifacts"] = {"onnx": rewritten}
     if rewritten_variants:
         nano["variants"] = rewritten_variants
+    if boundary:
+        boundary["model"] = "boundary-model.tflite"
     payload = dict(payload)
     payload["micro_wake_word"] = micro
     if oww:
         payload["open_wake_word"] = oww
     if nano:
         payload["nano_wake_word"] = nano
+    if boundary:
+        payload["wake_boundary"] = boundary
     encoded = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     if len(encoded) > MAX_MANIFEST_BYTES:
         raise WakePackageProxyError(f"Wake bundle exceeds {MAX_MANIFEST_BYTES} bytes")
@@ -484,4 +537,37 @@ def _nww_model_bytes_uncached(token: str, architecture: str) -> bytes:
         raise WakePackageProxyError("NanoWakeWord model size does not match the selected wake bundle")
     if expected_sha and not hmac.compare_digest(hashlib.sha256(body).hexdigest(), expected_sha):
         raise WakePackageProxyError("NanoWakeWord model does not match the selected wake bundle")
+    return body
+
+
+def boundary_model_bytes(package_id: Any) -> bytes:
+    token = str(package_id or "").strip().lower()
+    return _artifact_bytes(
+        token,
+        "boundary_model_body",
+        lambda: _boundary_model_bytes_uncached(token),
+    )
+
+
+def _boundary_model_bytes_uncached(token: str) -> bytes:
+    row = _package(token)
+    model_url = str(row.get("boundary_model_url") or "").strip()
+    if not model_url:
+        bundle_bytes(token)
+        row = _package(token)
+        model_url = str(row.get("boundary_model_url") or "").strip()
+    if not model_url:
+        raise WakePackageProxyError("Wake boundary model is unavailable")
+    body, _ = _download(model_url, 200 * 1024)
+    if len(body) < 8 or body[4:8] != b"TFL3":
+        raise WakePackageProxyError("Wake boundary model is not a TFLite FlatBuffer")
+    try:
+        expected_size = int(row.get("boundary_model_size") or 0)
+    except (TypeError, ValueError):
+        expected_size = 0
+    if expected_size and len(body) != expected_size:
+        raise WakePackageProxyError("Wake boundary model size does not match the selected wake bundle")
+    expected_sha = str(row.get("boundary_model_sha256") or "").strip().lower()
+    if expected_sha and not hmac.compare_digest(hashlib.sha256(body).hexdigest(), expected_sha):
+        raise WakePackageProxyError("Wake boundary model does not match the selected wake bundle")
     return body

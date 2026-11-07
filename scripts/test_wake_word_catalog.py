@@ -142,9 +142,9 @@ class WakeWordCatalogTests(unittest.TestCase):
         self.assertEqual(firmware["oww_patience"], 2)
         self.assertTrue(firmware["oww_model_revision"])
 
-    def test_schema_three_bundle_exposes_embedded_mww_and_nww_architectures(self) -> None:
+    def test_schema_four_bundle_exposes_boundary_embedded_mww_and_nww_architectures(self) -> None:
         bundle = {
-            "schema_version": 3,
+            "schema_version": 4,
             "type": "tater_wake_word_bundle",
             "wake_word": "Hey Tater",
             "micro_wake_word": {
@@ -178,6 +178,17 @@ class WakeWordCatalogTests(unittest.TestCase):
                         }
                     },
                 },
+            },
+            "wake_boundary": {
+                "type": "wake_word_end",
+                "model": "hey_tater.boundary.tflite",
+                "model_sha256": "d" * 64,
+                "model_size_bytes": 150,
+                "model_format": "tflite_stream_state_internal_quant",
+                "quantization": "int8",
+                "sample_rate": 16000,
+                "threshold": 0.8,
+                "tensor_arena_size": 65536,
             },
         }
 
@@ -216,6 +227,7 @@ class WakeWordCatalogTests(unittest.TestCase):
         self.assertEqual(nww_settings["nww_patience"], 4)
         self.assertTrue(profile["bundle_has_mww"])
         self.assertFalse(profile["bundle_has_oww"])
+        self.assertTrue(profile["bundle_has_boundary"])
         self.assertTrue(profile["wake_bundle_embedded_micro"])
         self.assertEqual(profile["wake_profile_threshold"], 0.84)
         self.assertEqual(profile["wake_profile_sliding_window"], 4)

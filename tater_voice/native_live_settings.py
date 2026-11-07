@@ -285,6 +285,7 @@ GLOBAL_WAKE_PROFILE_KEYS = (
     "nww_gru_profile_patience",
     "bundle_has_mww",
     "bundle_has_oww",
+    "bundle_has_boundary",
     "wake_bundle_embedded_micro",
     "oww_profile_name",
     "oww_profile_threshold",
@@ -347,6 +348,7 @@ GLOBAL_SATELLITE_DEVICE_FIELD_KEYS = set(GLOBAL_SATELLITE_CONTROL_KEYS) | {
     "oww_wake_word_catalog_url",
     "wake_profile_name",
     "oww_profile_name",
+    "wake_bundle_models",
     "training_section",
     "playback_section",
     "model_override_section",
@@ -442,6 +444,7 @@ BUILTIN_OWW_PROFILES: Dict[str, Dict[str, Any]] = {
         "nww_gru_profile_patience": 2,
         "bundle_has_mww": True,
         "bundle_has_oww": True,
+        "bundle_has_boundary": True,
         "wake_bundle_embedded_micro": True,
     }
 }
@@ -849,6 +852,7 @@ def _oww_profile_from_source(source: Dict[str, Any], wake_word: str, bundle_url:
             ),
             "bundle_has_mww": _as_bool(source.get("bundle_has_mww"), False),
             "bundle_has_oww": _as_bool(source.get("bundle_has_oww"), False),
+            "bundle_has_boundary": _as_bool(source.get("bundle_has_boundary"), False),
             "wake_bundle_embedded_micro": _as_bool(source.get("wake_bundle_embedded_micro"), False),
         }
     return {
@@ -869,6 +873,7 @@ def _oww_profile_from_source(source: Dict[str, Any], wake_word: str, bundle_url:
         "nww_gru_profile_patience": int(DEFAULTS["nww_gru_profile_patience"]),
         "bundle_has_mww": wake_word == "hey_tater",
         "bundle_has_oww": wake_word == "hey_tater",
+        "bundle_has_boundary": False,
         "wake_bundle_embedded_micro": False,
     }
 
@@ -892,6 +897,7 @@ def _fetch_oww_profile_json(bundle_url: str) -> Dict[str, Any]:
         "nww_gru_profile_patience": int(DEFAULTS["nww_gru_profile_patience"]),
         "bundle_has_mww": False,
         "bundle_has_oww": False,
+        "bundle_has_boundary": False,
         "wake_bundle_embedded_micro": False,
     }
     if not _is_url(url):
@@ -962,6 +968,23 @@ def _fetch_oww_profile_json(bundle_url: str) -> Dict[str, Any]:
     )
     has_oww = has_onnx and valid_digest(onnx_sha) and (
         not _text(oww.get("metadata")) or valid_digest(metadata_sha)
+    )
+    boundary = payload.get("wake_boundary") if isinstance(payload.get("wake_boundary"), dict) else {}
+    boundary_size = _as_int(boundary.get("model_size_bytes"), 0, minimum=0, maximum=200 * 1024)
+    boundary_rate = _as_int(boundary.get("sample_rate"), 0, minimum=0, maximum=192000)
+    boundary_arena = _as_int(boundary.get("tensor_arena_size"), 0, minimum=0, maximum=256 * 1024)
+    boundary_threshold = _as_float(boundary.get("threshold"), 0.0, minimum=0.0, maximum=1.0)
+    has_boundary = (
+        schema_version >= 4
+        and _text(boundary.get("type")) == "wake_word_end"
+        and _text(boundary.get("model")).lower().endswith(".tflite")
+        and valid_digest(_text(boundary.get("model_sha256")).lower())
+        and boundary_size > 0
+        and _text(boundary.get("model_format")) == "tflite_stream_state_internal_quant"
+        and _text(boundary.get("quantization")) == "int8"
+        and boundary_rate == 16000
+        and 0.0 < boundary_threshold <= 1.0
+        and 64 * 1024 <= boundary_arena <= 256 * 1024
     )
     nano = payload.get("nano_wake_word") if isinstance(payload.get("nano_wake_word"), dict) else {}
     variants = nano.get("variants") if isinstance(nano.get("variants"), dict) else {}
@@ -1040,7 +1063,7 @@ def _fetch_oww_profile_json(bundle_url: str) -> Dict[str, Any]:
         3,
     )
     error = ""
-    if schema_version not in {1, 2, 3} or bundle_type != "tater_wake_word_bundle" or not has_micro:
+    if schema_version not in {1, 2, 3, 4} or bundle_type != "tater_wake_word_bundle" or not has_micro:
         error = "URL is not a complete Tater wake bundle with a verified microWakeWord fallback."
     revision = hashlib.sha256(raw).hexdigest()
     profile_name = _text(payload.get("wake_word") or payload.get("label") or payload.get("key")) or "Custom Wake Word"
@@ -1062,6 +1085,7 @@ def _fetch_oww_profile_json(bundle_url: str) -> Dict[str, Any]:
         "nww_gru_profile_patience": nano_profiles.get("gru", (0.0, int(DEFAULTS["nww_gru_profile_patience"])))[1],
         "bundle_has_mww": has_micro,
         "bundle_has_oww": has_oww,
+        "bundle_has_boundary": has_boundary,
         "wake_bundle_embedded_micro": embedded_micro,
         "wake_bundle_url": url,
         "wake_bundle_manifest_url": urljoin(url, manifest_ref) if manifest_ref else "",
@@ -2111,6 +2135,10 @@ def normalize_settings(values: Dict[str, Any], *, base: Dict[str, Any] | None = 
         "nww_model_revision": _text(oww_profile.get("nww_model_revision")),
         "nww_architecture": nww_architecture,
         "nww_available_architectures": _text(oww_profile.get("nww_available_architectures")),
+        "bundle_has_mww": _as_bool(oww_profile.get("bundle_has_mww"), False),
+        "bundle_has_oww": _as_bool(oww_profile.get("bundle_has_oww"), False),
+        "bundle_has_boundary": _as_bool(oww_profile.get("bundle_has_boundary"), False),
+        "wake_bundle_embedded_micro": _as_bool(oww_profile.get("wake_bundle_embedded_micro"), False),
         "oww_profile_name": _text(oww_profile.get("oww_profile_name")) or str(DEFAULTS["oww_profile_name"]),
         "oww_profile_threshold": oww_profile_threshold,
         "oww_profile_patience": oww_profile_patience,
@@ -2755,6 +2783,48 @@ def settings_fields(
         "Use the .wake-bundle.json from a Tater trainer. Tater validates the selected models, "
         "sends microWakeWord to MWW-only satellites, and sends the requested detector mode to capable firmware."
     )
+    nww_bundle_architectures = {
+        item.strip().lower()
+        for item in _text(current.get("nww_available_architectures")).split(",")
+        if item.strip()
+    }
+    wake_bundle_models = [
+        {
+            "key": "mww",
+            "mark": "MW",
+            "label": "microWakeWord",
+            "description": "Fallback model for every MWW-only satellite.",
+            "included": _as_bool(current.get("bundle_has_mww"), False),
+        },
+        {
+            "key": "oww",
+            "mark": "OW",
+            "label": "openWakeWord",
+            "description": "Available for OWW and MWW + OWW detection.",
+            "included": _as_bool(current.get("bundle_has_oww"), False),
+        },
+        {
+            "key": "nww_cnn",
+            "mark": "NC",
+            "label": "NanoWakeWord CNN",
+            "description": "Available for NWW and MWW + NWW detection.",
+            "included": "cnn" in nww_bundle_architectures,
+        },
+        {
+            "key": "nww_gru",
+            "mark": "NG",
+            "label": "NanoWakeWord GRU",
+            "description": "Available for NWW and MWW + NWW detection.",
+            "included": "gru" in nww_bundle_architectures,
+        },
+        {
+            "key": "boundary",
+            "mark": "WB",
+            "label": "Wake boundary",
+            "description": "Finds the wake-word ending so following speech is preserved.",
+            "included": _as_bool(current.get("bundle_has_boundary"), False),
+        },
+    ]
     fields = [
         {
             "key": "ssh_section",
@@ -2991,6 +3061,14 @@ def settings_fields(
             ),
         },
         {
+            "key": "wake_bundle_models",
+            "label": "Included Bundle Models",
+            "type": "readonly",
+            "value": current["oww_profile_name"],
+            "models": wake_bundle_models,
+            "description": "Read-only contents reported by the currently loaded wake bundle.",
+        },
+        {
             "key": "nww_architecture",
             "label": "NanoWakeWord Architecture",
             "type": "select",
@@ -3000,11 +3078,7 @@ def settings_fields(
                 {
                     "value": architecture,
                     "label": architecture.upper(),
-                    "disabled": architecture not in {
-                        item.strip().lower()
-                        for item in _text(current.get("nww_available_architectures")).split(",")
-                        if item.strip()
-                    },
+                    "disabled": architecture not in nww_bundle_architectures,
                 }
                 for architecture in ("cnn", "gru")
             ],
@@ -3784,7 +3858,7 @@ def shared_wake_model_settings_sections() -> List[Dict[str, Any]]:
                     "wake_engine", "wake_detector_mode",
                     "wake_word", "wake_word_catalog_url", "wake_word_url", "wake_profile_name",
                     "oww_wake_word", "oww_wake_word_catalog_url", "oww_wake_word_url",
-                    "oww_profile_name", "nww_architecture",
+                    "oww_profile_name", "wake_bundle_models", "nww_architecture",
                     "mww_tuning_override_enabled", "mww_threshold_override", "mww_sliding_window_override",
                     "oww_tuning_override_enabled", "oww_threshold_override", "oww_patience_override",
                     "nww_tuning_override_enabled", "nww_threshold_override", "nww_patience_override",

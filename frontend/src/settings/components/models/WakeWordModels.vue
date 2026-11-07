@@ -61,6 +61,8 @@ const activeWakeLabel = computed(() => {
 });
 const activeWakeSourceLabel = computed(() => optionLabel(optionsFor(wakeFields.value.wake_word).find((option) => optionValue(option) === wakeSource.value)) || "Built-in Hey Tater");
 const activeOwwSourceLabel = computed(() => owwSourceOptionLabel(optionsFor(wakeFields.value.oww_wake_word).find((option) => optionValue(option) === owwSource.value)) || "Built-in Hey Tater");
+const loadedBundleName = computed(() => String(wakeFields.value.wake_bundle_models?.value || wakeFields.value.oww_profile_name?.value || "Loaded wake bundle"));
+const bundleModels = computed<JsonRow[]>(() => Array.isArray(wakeFields.value.wake_bundle_models?.models) ? wakeFields.value.wake_bundle_models.models as JsonRow[] : []);
 const pairingCode = computed(() => String(pairing.value?.display_code || pairing.value?.pairing_code || pairing.value?.code || "").trim());
 const pairingState = computed(() => String(pairing.value?.state || pairing.value?.status || "waiting").trim().toLowerCase());
 const pairingRemaining = computed(() => Math.max(0, Math.floor(Number(pairing.value?.expires_in_s || 0))));
@@ -363,8 +365,15 @@ defineExpose({ apply, refresh });
           <label v-if="owwSource === 'catalog'" class="tm-field tm-field-wide"><span class="tm-field-label">Wake Bundle Catalog</span><select v-model="wakeValues.oww_wake_word_catalog_url" :disabled="Boolean(busy) || !optionsFor(wakeFields.oww_wake_word_catalog_url).length" @change="update(wakeValues, 'oww_wake_word_catalog_url', wakeValues.oww_wake_word_catalog_url)"><option v-if="!optionsFor(wakeFields.oww_wake_word_catalog_url).length" value="" disabled>Awaiting the first verified wake bundle</option><option v-for="option in optionsFor(wakeFields.oww_wake_word_catalog_url)" :key="optionValue(option)" :value="optionValue(option)">{{ optionLabel(option) }}</option></select><small>{{ wakeFields.oww_wake_word_catalog_url?.description }}</small></label>
           <label v-if="owwSource === 'custom_url'" class="tm-field tm-field-wide"><span class="tm-field-label">{{ wakeFields.oww_wake_word_url?.label }}</span><input v-model="wakeValues.oww_wake_word_url" type="url" :placeholder="String(wakeFields.oww_wake_word_url?.placeholder || 'https://example.local/hey_tater.wake-bundle.json')" :disabled="Boolean(busy)" @input="update(wakeValues, 'oww_wake_word_url', wakeValues.oww_wake_word_url)" /><small>{{ wakeFields.oww_wake_word_url?.description }}</small></label>
           <div v-if="nwwEnabled" class="tm-wake-mode-row"><span>NanoWakeWord architecture</span><div class="tm-choice-grid tm-wake-source-grid-two" role="group" aria-label="NanoWakeWord architecture"><button v-for="option in optionsFor(wakeFields.nww_architecture)" :key="optionValue(option)" type="button" :class="{ active: nwwArchitecture === optionValue(option) }" :disabled="Boolean(busy) || optionDisabled(option)" @click="update(wakeValues, 'nww_architecture', optionValue(option))"><i>{{ optionValue(option).toUpperCase() }}</i><span><strong>{{ optionLabel(option) }}</strong><small>{{ optionDisabled(option) ? 'Not included in this bundle' : 'Available in this bundle' }}</small></span><b>✓</b></button></div></div>
-          <div v-if="owwSource === 'hey_tater' && !nwwEnabled" class="tm-wake-model-note">The built-in selection keeps the Hey Tater MWW and OWW models matched.</div>
-          <div v-if="owwSource === 'hey_tater' && nwwEnabled" class="tm-wake-model-note">The built-in Hey Tater bundle includes matched MWW, NWW CNN, and NWW GRU models.</div>
+          <section v-if="bundleModels.length" class="tm-wake-bundle-info" aria-label="Included bundle models">
+            <header><div><span>Included models</span><strong>{{ loadedBundleName }}</strong></div><b>Read only</b></header>
+            <div class="tm-wake-bundle-models">
+              <div v-for="model in bundleModels" :key="String(model.key)" class="tm-wake-bundle-model" :class="{ missing: !model.included }">
+                <i>{{ model.mark }}</i><span><strong>{{ model.label }}</strong><small>{{ model.description }}</small></span><b>{{ model.included ? "Included" : "Not included" }}</b>
+              </div>
+            </div>
+            <small>These are the validated models inside the bundle currently loaded by Tater.</small>
+          </section>
         </div>
       </section>
 

@@ -16105,11 +16105,9 @@ var Hc = ["checked", "disabled"], Uc = { key: 0 }, Wc = {
 	"aria-label": "NanoWakeWord architecture"
 }, VN = ["disabled", "onClick"], HN = {
 	key: 3,
-	class: "tm-wake-model-note"
-}, UN = {
-	key: 4,
-	class: "tm-wake-model-note"
-}, WN = {
+	class: "tm-wake-bundle-info",
+	"aria-label": "Included bundle models"
+}, UN = { class: "tm-wake-bundle-models" }, WN = {
 	key: 1,
 	class: "tm-wake-engine-note"
 }, GN = {
@@ -16175,11 +16173,11 @@ var Hc = ["checked", "disabled"], Uc = { key: 0 }, Wc = {
 	},
 	emits: ["notify", "dirty"],
 	setup(e, { expose: t, emit: n }) {
-		let r = e, i = n, a = /* @__PURE__ */ U(!1), o = /* @__PURE__ */ U(""), s = /* @__PURE__ */ U(""), c = /* @__PURE__ */ U({}), l = /* @__PURE__ */ U(null), u = /* @__PURE__ */ U(null), d = /* @__PURE__ */ U(null), f = /* @__PURE__ */ U(null), p = /* @__PURE__ */ Et({}), m = /* @__PURE__ */ Et({}), h = /* @__PURE__ */ Et({}), g = /* @__PURE__ */ U(null), _ = /* @__PURE__ */ U(!1), v = null, y = null, b = Q(() => Array.isArray(c.value.header_stats) ? c.value.header_stats : []), x = Q(() => ve(l.value)), S = Q(() => ve(u.value)), C = Q(() => ve(d.value)), w = Q(() => String(p.wake_engine || "micro_wake_word")), T = Q(() => String(p.wake_word || "hey_tater")), E = Q(() => String(p.wake_detector_mode || "mww_oww")), D = Q(() => [
+		let r = e, i = n, a = /* @__PURE__ */ U(!1), o = /* @__PURE__ */ U(""), s = /* @__PURE__ */ U(""), c = /* @__PURE__ */ U({}), l = /* @__PURE__ */ U(null), u = /* @__PURE__ */ U(null), d = /* @__PURE__ */ U(null), f = /* @__PURE__ */ U(null), p = /* @__PURE__ */ Et({}), m = /* @__PURE__ */ Et({}), h = /* @__PURE__ */ Et({}), g = /* @__PURE__ */ U(null), _ = /* @__PURE__ */ U(!1), v = null, y = null, b = Q(() => Array.isArray(c.value.header_stats) ? c.value.header_stats : []), x = Q(() => be(l.value)), S = Q(() => be(u.value)), C = Q(() => be(d.value)), w = Q(() => String(p.wake_engine || "micro_wake_word")), T = Q(() => String(p.wake_word || "hey_tater")), E = Q(() => String(p.wake_detector_mode || "mww_oww")), D = Q(() => [
 			"mww",
 			"mww_oww",
 			"mww_nww"
-		].includes(E.value)), O = Q(() => ["oww", "mww_oww"].includes(E.value)), k = Q(() => E.value === "nww" || E.value === "mww_nww"), A = Q(() => O.value || k.value), j = Q(() => String(p.nww_architecture || "cnn")), M = Q(() => E.value === "mww_oww" ? x.value.oww_threshold_override?.confirmation_default : x.value.oww_threshold_override?.standalone_default), N = Q(() => E.value === "mww_oww" ? x.value.oww_patience_override?.confirmation_default : x.value.oww_patience_override?.standalone_default), P = Q(() => j.value === "gru" ? x.value.nww_threshold_override?.gru_default : x.value.nww_threshold_override?.cnn_default), F = Q(() => j.value === "gru" ? x.value.nww_patience_override?.gru_default : x.value.nww_patience_override?.cnn_default), ee = Q(() => ye(x.value.wake_detector_mode).filter((e) => String(e.group || "") === "single")), te = Q(() => ye(x.value.wake_detector_mode).filter((e) => String(e.group || "") === "dual")), ne = Q(() => String(p.oww_wake_word || "hey_tater")), re = Q(() => Object.values(C.value).find((e) => String(e.type || "") === "select") || {}), I = Q(() => String(re.value.key || "wake_verifier_mode")), L = Q(() => String(h[I.value] || "off")), R = Q(() => Object.values(C.value).find((e) => String(e.type || "") === "table") || {}), ie = Q(() => String(Object.values(C.value).find((e) => String(e.key || "").includes("summary"))?.value || "No checks recorded yet")), ae = Q(() => String(Object.values(C.value).find((e) => String(e.key || "").includes("stt_engine"))?.value || we("STT Backend") || "Unavailable")), oe = Q(() => we("Connected") || "0"), se = Q(() => w.value === "micro_wake_word" ? xe(ye(x.value.wake_detector_mode).find((e) => be(e) === E.value)) || "MWW" : xe(ye(x.value.wake_engine).find((e) => be(e) === w.value)) || "Wake disabled"), ce = Q(() => xe(ye(x.value.wake_word).find((e) => be(e) === T.value)) || "Built-in Hey Tater"), le = Q(() => V(ye(x.value.oww_wake_word).find((e) => be(e) === ne.value)) || "Built-in Hey Tater"), ue = Q(() => String(g.value?.display_code || g.value?.pairing_code || g.value?.code || "").trim()), de = Q(() => String(g.value?.state || g.value?.status || "waiting").trim().toLowerCase()), fe = Q(() => Math.max(0, Math.floor(Number(g.value?.expires_in_s || 0)))), pe = {
+		].includes(E.value)), O = Q(() => ["oww", "mww_oww"].includes(E.value)), k = Q(() => E.value === "nww" || E.value === "mww_nww"), A = Q(() => O.value || k.value), j = Q(() => String(p.nww_architecture || "cnn")), M = Q(() => E.value === "mww_oww" ? x.value.oww_threshold_override?.confirmation_default : x.value.oww_threshold_override?.standalone_default), N = Q(() => E.value === "mww_oww" ? x.value.oww_patience_override?.confirmation_default : x.value.oww_patience_override?.standalone_default), P = Q(() => j.value === "gru" ? x.value.nww_threshold_override?.gru_default : x.value.nww_threshold_override?.cnn_default), F = Q(() => j.value === "gru" ? x.value.nww_patience_override?.gru_default : x.value.nww_patience_override?.cnn_default), ee = Q(() => xe(x.value.wake_detector_mode).filter((e) => String(e.group || "") === "single")), te = Q(() => xe(x.value.wake_detector_mode).filter((e) => String(e.group || "") === "dual")), ne = Q(() => String(p.oww_wake_word || "hey_tater")), re = Q(() => Object.values(C.value).find((e) => String(e.type || "") === "select") || {}), I = Q(() => String(re.value.key || "wake_verifier_mode")), L = Q(() => String(h[I.value] || "off")), R = Q(() => Object.values(C.value).find((e) => String(e.type || "") === "table") || {}), ie = Q(() => String(Object.values(C.value).find((e) => String(e.key || "").includes("summary"))?.value || "No checks recorded yet")), ae = Q(() => String(Object.values(C.value).find((e) => String(e.key || "").includes("stt_engine"))?.value || Ee("STT Backend") || "Unavailable")), oe = Q(() => Ee("Connected") || "0"), se = Q(() => w.value === "micro_wake_word" ? H(xe(x.value.wake_detector_mode).find((e) => V(e) === E.value)) || "MWW" : H(xe(x.value.wake_engine).find((e) => V(e) === w.value)) || "Wake disabled"), ce = Q(() => H(xe(x.value.wake_word).find((e) => V(e) === T.value)) || "Built-in Hey Tater"), le = Q(() => Se(xe(x.value.oww_wake_word).find((e) => V(e) === ne.value)) || "Built-in Hey Tater"), ue = Q(() => String(x.value.wake_bundle_models?.value || x.value.oww_profile_name?.value || "Loaded wake bundle")), de = Q(() => Array.isArray(x.value.wake_bundle_models?.models) ? x.value.wake_bundle_models.models : []), fe = Q(() => String(g.value?.display_code || g.value?.pairing_code || g.value?.code || "").trim()), pe = Q(() => String(g.value?.state || g.value?.status || "waiting").trim().toLowerCase()), me = Q(() => Math.max(0, Math.floor(Number(g.value?.expires_in_s || 0)))), he = {
 			micro_wake_word: {
 				mark: "MW",
 				short: "Private, fast wake detection directly on each satellite."
@@ -16196,7 +16194,7 @@ var Hc = ["checked", "disabled"], Uc = { key: 0 }, Wc = {
 				mark: "OFF",
 				short: "Disable automatic wake detection on every satellite."
 			}
-		}, me = {
+		}, ge = {
 			hey_tater: {
 				mark: "T",
 				short: "Tater's bundled, ready-to-use wake model."
@@ -16209,7 +16207,7 @@ var Hc = ["checked", "disabled"], Uc = { key: 0 }, Wc = {
 				mark: "URL",
 				short: "Load a trainer wake bundle or compatible microWakeWord JSON by URL."
 			}
-		}, he = {
+		}, _e = {
 			mww: {
 				mark: "MW",
 				short: "Use the same microWakeWord model on every satellite."
@@ -16230,7 +16228,7 @@ var Hc = ["checked", "disabled"], Uc = { key: 0 }, Wc = {
 				mark: "M+N",
 				short: "Require matching microWakeWord and NanoWakeWord detection on capable satellites."
 			}
-		}, ge = {
+		}, ve = {
 			off: {
 				label: "Disabled",
 				mark: "OFF",
@@ -16247,55 +16245,55 @@ var Hc = ["checked", "disabled"], Uc = { key: 0 }, Wc = {
 				short: "Reject clear transcript mismatches; fail open on errors."
 			}
 		};
-		function _e(e) {
+		function ye(e) {
 			return (e && Array.isArray(e.sections) ? e.sections : []).flatMap((e) => Array.isArray(e.fields) ? e.fields : []);
 		}
-		function ve(e) {
-			return Object.fromEntries(_e(e).map((e) => [String(e.key || ""), e]).filter(([e]) => e));
-		}
-		function ye(e) {
-			return e && Array.isArray(e.options) ? e.options : [];
-		}
 		function be(e) {
-			return String(e && typeof e == "object" ? e.value ?? e.id ?? "" : e ?? "");
+			return Object.fromEntries(ye(e).map((e) => [String(e.key || ""), e]).filter(([e]) => e));
 		}
 		function xe(e) {
-			return String(e && typeof e == "object" ? e.label ?? e.name ?? be(e) : e ?? "");
+			return e && Array.isArray(e.options) ? e.options : [];
 		}
 		function V(e) {
-			let t = be(e);
-			return t === "catalog" ? "Wake Bundle Catalog" : t === "custom_url" ? "Custom Wake Bundle" : xe(e);
+			return String(e && typeof e == "object" ? e.value ?? e.id ?? "" : e ?? "");
 		}
 		function H(e) {
-			let t = be(e);
-			return t === "hey_tater" ? "Use the built-in Hey Tater models where available." : t === "catalog" ? "Choose a verified model bundle from the official catalog." : "Load the selected models from one trainer-produced wake bundle.";
+			return String(e && typeof e == "object" ? e.label ?? e.name ?? V(e) : e ?? "");
 		}
 		function Se(e) {
-			return !!(e && typeof e == "object" && e.disabled);
+			let t = V(e);
+			return t === "catalog" ? "Wake Bundle Catalog" : t === "custom_url" ? "Custom Wake Bundle" : H(e);
 		}
 		function Ce(e) {
+			let t = V(e);
+			return t === "hey_tater" ? "Use the built-in Hey Tater models where available." : t === "catalog" ? "Choose a verified model bundle from the official catalog." : "Load the selected models from one trainer-produced wake bundle.";
+		}
+		function we(e) {
+			return !!(e && typeof e == "object" && e.disabled);
+		}
+		function Te(e) {
 			let t = Math.max(0, Math.floor(Number(e) || 0));
 			return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, "0")}`;
 		}
-		function we(e) {
+		function Ee(e) {
 			return String(b.value.find((t) => String(t.label || "").toLowerCase() === e.toLowerCase())?.value ?? "");
 		}
-		function Te(e) {
-			Ne(p, "wake_engine", e);
-		}
-		function Ee(e) {
-			Ne(p, "wake_word", e);
-		}
 		function De(e) {
-			Ne(p, "oww_wake_word", e);
+			Fe(p, "wake_engine", e);
 		}
 		function Oe(e) {
-			Ne(p, "wake_detector_mode", e);
+			Fe(p, "wake_word", e);
 		}
 		function ke(e) {
-			Ne(h, I.value, e);
+			Fe(p, "oww_wake_word", e);
 		}
-		function Ae(e, t) {
+		function Ae(e) {
+			Fe(p, "wake_detector_mode", e);
+		}
+		function je(e) {
+			Fe(h, I.value, e);
+		}
+		function Me(e, t) {
 			Object.keys(t).forEach((e) => delete t[e]), (e && Array.isArray(e.sections) ? e.sections : []).forEach((e) => {
 				(Array.isArray(e.fields) ? e.fields : []).forEach((e) => {
 					let n = String(e.key || "").trim(), r = String(e.type || "").trim().toLowerCase();
@@ -16308,32 +16306,32 @@ var Hc = ["checked", "disabled"], Uc = { key: 0 }, Wc = {
 				});
 			});
 		}
-		function je(e, t = !1) {
+		function Ne(e, t = !1) {
 			let n = e.payload && typeof e.payload == "object" ? e.payload : e;
 			c.value = n;
 			let r = n.ui && typeof n.ui == "object" ? n.ui : {}, i = Array.isArray(r.item_forms) ? r.item_forms : [];
-			l.value = i.find((e) => String(e.group || "") === "wake_model_settings") || null, u.value = i.find((e) => String(e.group || "") === "global_wake_trainer_settings") || null, d.value = i.find((e) => String(e.group || "") === "wake_verifier") || null, f.value = i.find((e) => String(e.group || "") === "wake_trainer_link") || null, t || (Ae(l.value, p), Ae(u.value, m), Ae(d.value, h));
+			l.value = i.find((e) => String(e.group || "") === "wake_model_settings") || null, u.value = i.find((e) => String(e.group || "") === "global_wake_trainer_settings") || null, d.value = i.find((e) => String(e.group || "") === "wake_verifier") || null, f.value = i.find((e) => String(e.group || "") === "wake_trainer_link") || null, t || (Me(l.value, p), Me(u.value, m), Me(d.value, h));
 		}
-		async function Me(e = !1) {
+		async function Pe(e = !1) {
 			e || (a.value = !0), s.value = "";
 			try {
-				je(await As(`${r.runtimeEndpoint}?panel=satellites`), e && _.value);
+				Ne(await As(`${r.runtimeEndpoint}?panel=satellites`), e && _.value);
 			} catch (e) {
 				s.value = e instanceof Error ? e.message : "Wake Word settings could not be loaded.";
 			} finally {
 				a.value = !1;
 			}
 		}
-		function Ne(e, t, n) {
+		function Fe(e, t, n) {
 			e[t] = n, _.value = !0, s.value = "", i("dirty");
 		}
-		async function Pe(e, t = {}) {
+		async function Ie(e, t = {}) {
 			return js(r.actionEndpoint, {
 				action: e,
 				payload: t
 			});
 		}
-		async function Fe() {
+		async function Le() {
 			if (o.value) return {
 				ok: !1,
 				error: "Wake Word settings are busy."
@@ -16344,19 +16342,19 @@ var Hc = ["checked", "disabled"], Uc = { key: 0 }, Wc = {
 			};
 			o.value = "apply", s.value = "";
 			try {
-				let e = String(l.value.save_action || "voice_global_satellite_settings_save"), t = String(u.value.save_action || "voice_global_satellite_settings_save"), n = String(d.value.save_action || "voice_wake_verifier_save"), r = await Pe(e, {
+				let e = String(l.value.save_action || "voice_global_satellite_settings_save"), t = String(u.value.save_action || "voice_global_satellite_settings_save"), n = String(d.value.save_action || "voice_wake_verifier_save"), r = await Ie(e, {
 					id: l.value.id,
 					profile: l.value.profile || "shared",
 					defer_push: !0,
 					values: { ...p }
-				}), a = await Pe(t, {
+				}), a = await Ie(t, {
 					id: u.value.id,
 					values: { ...m }
-				}), o = await Pe(n, {
+				}), o = await Ie(n, {
 					id: d.value.id,
 					values: { ...h }
 				});
-				_.value = !1, await Me(!0);
+				_.value = !1, await Pe(!0);
 				let s = String(o.message || a.message || r.message || "Wake Word settings applied to all connected satellites.");
 				return i("notify", s, "success"), {
 					ok: !0,
@@ -16371,12 +16369,12 @@ var Hc = ["checked", "disabled"], Uc = { key: 0 }, Wc = {
 				o.value = "";
 			}
 		}
-		async function Ie() {
+		async function Re() {
 			if (window.confirm(String(d.value?.reset_confirm || "Reset wake-verification statistics?"))) {
 				o.value = "reset";
 				try {
-					let e = await Pe(String(d.value?.reset_action || "voice_wake_verifier_stats_reset"));
-					i("notify", String(e.message || "Wake-verification statistics reset."), "success"), await Me(!0);
+					let e = await Ie(String(d.value?.reset_action || "voice_wake_verifier_stats_reset"));
+					i("notify", String(e.message || "Wake-verification statistics reset."), "success"), await Pe(!0);
 				} catch (e) {
 					s.value = e instanceof Error ? e.message : "Statistics could not be reset.";
 				} finally {
@@ -16384,16 +16382,16 @@ var Hc = ["checked", "disabled"], Uc = { key: 0 }, Wc = {
 				}
 			}
 		}
-		async function Le() {
+		async function ze() {
 			if (f.value) {
-				o.value = "pair", s.value = "", Be();
+				o.value = "pair", s.value = "", He();
 				try {
-					let e = await Pe(String(f.value.start_action || "voice_wake_trainer_link_pairing_start")), t = String(e.pairing_id || "").trim(), n = String(e.display_code || e.pairing_code || e.code || "").trim();
+					let e = await Ie(String(f.value.start_action || "voice_wake_trainer_link_pairing_start")), t = String(e.pairing_id || "").trim(), n = String(e.display_code || e.pairing_code || e.code || "").trim();
 					if (!t || !n) throw Error("Tater did not create a pairing code.");
 					g.value = {
 						...e,
 						display_code: n
-					}, ze();
+					}, Ve();
 				} catch (e) {
 					s.value = e instanceof Error ? e.message : "Trainer pairing could not start.";
 				} finally {
@@ -16401,32 +16399,32 @@ var Hc = ["checked", "disabled"], Uc = { key: 0 }, Wc = {
 				}
 			}
 		}
-		async function Re() {
+		async function Be() {
 			let e = String(g.value?.pairing_id || "");
 			if (!(!e || !f.value)) try {
-				let t = await Pe(String(f.value.status_action || "voice_wake_trainer_link_pairing_status"), { values: { pairing_id: e } }), n = g.value || {};
+				let t = await Ie(String(f.value.status_action || "voice_wake_trainer_link_pairing_status"), { values: { pairing_id: e } }), n = g.value || {};
 				g.value = {
 					...n,
 					...t,
 					display_code: String(t.display_code || n.display_code || n.pairing_code || n.code || "").trim()
 				}, t.wake_trainer_link && typeof t.wake_trainer_link == "object" && (f.value = t.wake_trainer_link);
 				let r = String(t.state || t.status || "").trim().toLowerCase();
-				t.linked || t.wake_trainer_link?.linked || r === "linked" ? (Be(), i("notify", "Wake Word Trainer linked.", "success"), await Me(!0)) : r === "expired" || t.expired ? Be() : ze();
+				t.linked || t.wake_trainer_link?.linked || r === "linked" ? (He(), i("notify", "Wake Word Trainer linked.", "success"), await Pe(!0)) : r === "expired" || t.expired ? He() : Ve();
 			} catch (e) {
-				Be(), s.value = e instanceof Error ? e.message : "Trainer pairing status could not be checked.";
+				He(), s.value = e instanceof Error ? e.message : "Trainer pairing status could not be checked.";
 			}
 		}
-		function ze() {
-			Be(), y = window.setTimeout(Re, 2e3);
+		function Ve() {
+			He(), y = window.setTimeout(Be, 2e3);
 		}
-		function Be() {
+		function He() {
 			y !== null && window.clearTimeout(y), y = null;
 		}
-		async function Ve() {
+		async function Ue() {
 			if (!(!f.value || !window.confirm("Unlink this Wake Word Trainer?"))) {
 				o.value = "unlink";
 				try {
-					let e = await Pe(String(f.value.unlink_action || "voice_wake_trainer_link_unlink"));
+					let e = await Ie(String(f.value.unlink_action || "voice_wake_trainer_link_unlink"));
 					f.value = e.wake_trainer_link && typeof e.wake_trainer_link == "object" ? e.wake_trainer_link : f.value, g.value = null, i("notify", "Wake Word Trainer unlinked.", "success");
 				} catch (e) {
 					s.value = e instanceof Error ? e.message : "Trainer could not be unlinked.";
@@ -16436,14 +16434,14 @@ var Hc = ["checked", "disabled"], Uc = { key: 0 }, Wc = {
 			}
 		}
 		return Er(() => {
-			Me(), v = window.setInterval(() => {
-				!o.value && document.visibilityState === "visible" && Me(!0);
+			Pe(), v = window.setInterval(() => {
+				!o.value && document.visibilityState === "visible" && Pe(!0);
 			}, 12e3);
 		}), kr(() => {
-			v !== null && window.clearInterval(v), Be();
+			v !== null && window.clearInterval(v), He();
 		}), t({
-			apply: Fe,
-			refresh: Me
+			apply: Le,
+			refresh: Pe
 		}), (e, t) => (q(), J("section", tN, [
 			a.value ? (q(), J("div", nN, "Loading live Wake Word settings…")) : Z("", !0),
 			s.value ? (q(), J("div", rN, B(s.value), 1)) : Z("", !0),
@@ -16454,7 +16452,7 @@ var Hc = ["checked", "disabled"], Uc = { key: 0 }, Wc = {
 			], -1), Y("div", aN, [
 				Y("span", null, [t[32] ||= Y("i", { class: "ready" }, null, -1), X(B(oe.value) + " connected", 1)]),
 				Y("span", null, B(se.value), 1),
-				Y("span", null, B(ge[L.value]?.label || "Disabled") + " verification", 1)
+				Y("span", null, B(ve[L.value]?.label || "Disabled") + " verification", 1)
 			])]),
 			l.value ? (q(), J("article", oN, [
 				Y("header", null, [t[34] ||= Y("div", null, [
@@ -16462,52 +16460,52 @@ var Hc = ["checked", "disabled"], Uc = { key: 0 }, Wc = {
 					Y("h3", null, "How should satellites wake?"),
 					Y("p", null, "Every satellite uses the same wake phrase. Capable devices follow this policy; MWW-only satellites keep the bundle's MWW fallback.")
 				], -1), Y("span", sN, B(se.value), 1)]),
-				Y("div", cN, [(q(!0), J(K, null, G(ye(x.value.wake_engine), (e) => (q(), J("button", {
-					key: be(e),
+				Y("div", cN, [(q(!0), J(K, null, G(xe(x.value.wake_engine), (e) => (q(), J("button", {
+					key: V(e),
 					type: "button",
-					class: z({ active: w.value === be(e) }),
+					class: z({ active: w.value === V(e) }),
 					disabled: !!o.value,
-					onClick: (t) => Te(be(e))
+					onClick: (t) => De(V(e))
 				}, [
-					Y("i", null, B(pe[be(e)]?.mark || "WAKE"), 1),
-					Y("span", null, [Y("strong", null, B(xe(e)), 1), Y("small", null, B(pe[be(e)]?.short), 1)]),
+					Y("i", null, B(he[V(e)]?.mark || "WAKE"), 1),
+					Y("span", null, [Y("strong", null, B(H(e)), 1), Y("small", null, B(he[V(e)]?.short), 1)]),
 					t[35] ||= Y("b", null, "✓", -1)
 				], 10, lN))), 128))]),
 				w.value === "micro_wake_word" ? (q(), J("section", uN, [
 					Y("div", dN, [t[36] ||= Y("div", null, [Y("h3", null, "Wake detection mode"), Y("p", null, "Choose the detector policy once; each satellite receives the best supported projection.")], -1), Y("span", null, B(se.value), 1)]),
 					Y("div", fN, [t[38] ||= Y("span", null, "Single wake engine", -1), Y("div", pN, [(q(!0), J(K, null, G(ee.value, (e) => (q(), J("button", {
-						key: be(e),
+						key: V(e),
 						type: "button",
-						class: z({ active: E.value === be(e) }),
+						class: z({ active: E.value === V(e) }),
 						disabled: !!o.value,
-						onClick: (t) => Oe(be(e))
+						onClick: (t) => Ae(V(e))
 					}, [
-						Y("i", null, B(he[be(e)]?.mark || "WAKE"), 1),
-						Y("span", null, [Y("strong", null, B(xe(e)), 1), Y("small", null, B(he[be(e)]?.short), 1)]),
+						Y("i", null, B(_e[V(e)]?.mark || "WAKE"), 1),
+						Y("span", null, [Y("strong", null, B(H(e)), 1), Y("small", null, B(_e[V(e)]?.short), 1)]),
 						t[37] ||= Y("b", null, "✓", -1)
 					], 10, mN))), 128))])]),
 					Y("div", hN, [t[40] ||= Y("span", null, "Dual wake engines", -1), Y("div", gN, [(q(!0), J(K, null, G(te.value, (e) => (q(), J("button", {
-						key: be(e),
+						key: V(e),
 						type: "button",
-						class: z({ active: E.value === be(e) }),
+						class: z({ active: E.value === V(e) }),
 						disabled: !!o.value,
-						onClick: (t) => Oe(be(e))
+						onClick: (t) => Ae(V(e))
 					}, [
-						Y("i", null, B(he[be(e)]?.mark || "WAKE"), 1),
-						Y("span", null, [Y("strong", null, B(xe(e)), 1), Y("small", null, B(he[be(e)]?.short), 1)]),
+						Y("i", null, B(_e[V(e)]?.mark || "WAKE"), 1),
+						Y("span", null, [Y("strong", null, B(H(e)), 1), Y("small", null, B(_e[V(e)]?.short), 1)]),
 						t[39] ||= Y("b", null, "✓", -1)
 					], 10, _N))), 128))])]),
 					A.value ? Z("", !0) : (q(), J("div", vN, [
 						Y("div", yN, [t[41] ||= Y("div", null, [Y("h3", null, "microWakeWord model"), Y("p", null, "Choose Tater's model, a catalog release, or your own package.")], -1), Y("span", null, B(ce.value), 1)]),
-						Y("div", bN, [(q(!0), J(K, null, G(ye(x.value.wake_word), (e) => (q(), J("button", {
-							key: be(e),
+						Y("div", bN, [(q(!0), J(K, null, G(xe(x.value.wake_word), (e) => (q(), J("button", {
+							key: V(e),
 							type: "button",
-							class: z({ active: T.value === be(e) }),
+							class: z({ active: T.value === V(e) }),
 							disabled: !!o.value,
-							onClick: (t) => Ee(be(e))
+							onClick: (t) => Oe(V(e))
 						}, [
-							Y("i", null, B(me[be(e)]?.mark || "SRC"), 1),
-							Y("span", null, [Y("strong", null, B(xe(e)), 1), Y("small", null, B(me[be(e)]?.short), 1)]),
+							Y("i", null, B(ge[V(e)]?.mark || "SRC"), 1),
+							Y("span", null, [Y("strong", null, B(H(e)), 1), Y("small", null, B(ge[V(e)]?.short), 1)]),
 							t[42] ||= Y("b", null, "✓", -1)
 						], 10, xN))), 128))]),
 						T.value === "catalog" ? (q(), J("label", SN, [
@@ -16515,11 +16513,11 @@ var Hc = ["checked", "disabled"], Uc = { key: 0 }, Wc = {
 							W(Y("select", {
 								"onUpdate:modelValue": t[0] ||= (e) => p.wake_word_catalog_url = e,
 								disabled: !!o.value,
-								onChange: t[1] ||= (e) => Ne(p, "wake_word_catalog_url", p.wake_word_catalog_url)
-							}, [(q(!0), J(K, null, G(ye(x.value.wake_word_catalog_url), (e) => (q(), J("option", {
-								key: be(e),
-								value: be(e)
-							}, B(xe(e)), 9, wN))), 128))], 40, CN), [[ds, p.wake_word_catalog_url]]),
+								onChange: t[1] ||= (e) => Fe(p, "wake_word_catalog_url", p.wake_word_catalog_url)
+							}, [(q(!0), J(K, null, G(xe(x.value.wake_word_catalog_url), (e) => (q(), J("option", {
+								key: V(e),
+								value: V(e)
+							}, B(H(e)), 9, wN))), 128))], 40, CN), [[ds, p.wake_word_catalog_url]]),
 							Y("small", null, B(x.value.wake_word_catalog_url?.description), 1)
 						])) : Z("", !0),
 						T.value === "custom_url" ? (q(), J("label", TN, [
@@ -16529,34 +16527,34 @@ var Hc = ["checked", "disabled"], Uc = { key: 0 }, Wc = {
 								type: "url",
 								placeholder: String(x.value.wake_word_url?.placeholder || "https://example.local/wake_word.wake-bundle.json"),
 								disabled: !!o.value,
-								onInput: t[3] ||= (e) => Ne(p, "wake_word_url", p.wake_word_url)
+								onInput: t[3] ||= (e) => Fe(p, "wake_word_url", p.wake_word_url)
 							}, null, 40, DN), [[$, p.wake_word_url]]),
 							Y("small", null, B(x.value.wake_word_url?.description), 1)
 						])) : Z("", !0)
 					])),
 					A.value ? (q(), J("div", ON, [
 						Y("div", kN, [Y("div", null, [t[44] ||= Y("h3", null, "Wake word bundle", -1), Y("p", null, "One bundle keeps the phrase consistent. MWW-only satellites load its microWakeWord model; capable satellites load " + B(E.value === "mww_oww" ? "MWW + OWW" : E.value === "mww_nww" ? `MWW + NWW ${j.value.toUpperCase()}` : E.value === "nww" ? `NWW ${j.value.toUpperCase()}` : "OWW") + ".", 1)]), Y("span", null, B(le.value), 1)]),
-						Y("div", AN, [(q(!0), J(K, null, G(ye(x.value.oww_wake_word), (e) => (q(), J("button", {
-							key: be(e),
+						Y("div", AN, [(q(!0), J(K, null, G(xe(x.value.oww_wake_word), (e) => (q(), J("button", {
+							key: V(e),
 							type: "button",
-							class: z({ active: ne.value === be(e) }),
-							disabled: !!o.value || be(e) === "catalog" && !ye(x.value.oww_wake_word_catalog_url).length,
-							onClick: (t) => De(be(e))
+							class: z({ active: ne.value === V(e) }),
+							disabled: !!o.value || V(e) === "catalog" && !xe(x.value.oww_wake_word_catalog_url).length,
+							onClick: (t) => ke(V(e))
 						}, [
-							Y("i", null, B(be(e) === "hey_tater" ? "T" : be(e) === "catalog" ? "CAT" : "URL"), 1),
-							Y("span", null, [Y("strong", null, B(V(e)), 1), Y("small", null, B(H(e)), 1)]),
+							Y("i", null, B(V(e) === "hey_tater" ? "T" : V(e) === "catalog" ? "CAT" : "URL"), 1),
+							Y("span", null, [Y("strong", null, B(Se(e)), 1), Y("small", null, B(Ce(e)), 1)]),
 							t[45] ||= Y("b", null, "✓", -1)
 						], 10, jN))), 128))]),
 						ne.value === "catalog" ? (q(), J("label", MN, [
 							t[46] ||= Y("span", { class: "tm-field-label" }, "Wake Bundle Catalog", -1),
 							W(Y("select", {
 								"onUpdate:modelValue": t[4] ||= (e) => p.oww_wake_word_catalog_url = e,
-								disabled: !!o.value || !ye(x.value.oww_wake_word_catalog_url).length,
-								onChange: t[5] ||= (e) => Ne(p, "oww_wake_word_catalog_url", p.oww_wake_word_catalog_url)
-							}, [ye(x.value.oww_wake_word_catalog_url).length ? Z("", !0) : (q(), J("option", PN, "Awaiting the first verified wake bundle")), (q(!0), J(K, null, G(ye(x.value.oww_wake_word_catalog_url), (e) => (q(), J("option", {
-								key: be(e),
-								value: be(e)
-							}, B(xe(e)), 9, FN))), 128))], 40, NN), [[ds, p.oww_wake_word_catalog_url]]),
+								disabled: !!o.value || !xe(x.value.oww_wake_word_catalog_url).length,
+								onChange: t[5] ||= (e) => Fe(p, "oww_wake_word_catalog_url", p.oww_wake_word_catalog_url)
+							}, [xe(x.value.oww_wake_word_catalog_url).length ? Z("", !0) : (q(), J("option", PN, "Awaiting the first verified wake bundle")), (q(!0), J(K, null, G(xe(x.value.oww_wake_word_catalog_url), (e) => (q(), J("option", {
+								key: V(e),
+								value: V(e)
+							}, B(H(e)), 9, FN))), 128))], 40, NN), [[ds, p.oww_wake_word_catalog_url]]),
 							Y("small", null, B(x.value.oww_wake_word_catalog_url?.description), 1)
 						])) : Z("", !0),
 						ne.value === "custom_url" ? (q(), J("label", IN, [
@@ -16566,81 +16564,91 @@ var Hc = ["checked", "disabled"], Uc = { key: 0 }, Wc = {
 								type: "url",
 								placeholder: String(x.value.oww_wake_word_url?.placeholder || "https://example.local/hey_tater.wake-bundle.json"),
 								disabled: !!o.value,
-								onInput: t[7] ||= (e) => Ne(p, "oww_wake_word_url", p.oww_wake_word_url)
+								onInput: t[7] ||= (e) => Fe(p, "oww_wake_word_url", p.oww_wake_word_url)
 							}, null, 40, RN), [[$, p.oww_wake_word_url]]),
 							Y("small", null, B(x.value.oww_wake_word_url?.description), 1)
 						])) : Z("", !0),
-						k.value ? (q(), J("div", zN, [t[48] ||= Y("span", null, "NanoWakeWord architecture", -1), Y("div", BN, [(q(!0), J(K, null, G(ye(x.value.nww_architecture), (e) => (q(), J("button", {
-							key: be(e),
+						k.value ? (q(), J("div", zN, [t[48] ||= Y("span", null, "NanoWakeWord architecture", -1), Y("div", BN, [(q(!0), J(K, null, G(xe(x.value.nww_architecture), (e) => (q(), J("button", {
+							key: V(e),
 							type: "button",
-							class: z({ active: j.value === be(e) }),
-							disabled: !!o.value || Se(e),
-							onClick: (t) => Ne(p, "nww_architecture", be(e))
+							class: z({ active: j.value === V(e) }),
+							disabled: !!o.value || we(e),
+							onClick: (t) => Fe(p, "nww_architecture", V(e))
 						}, [
-							Y("i", null, B(be(e).toUpperCase()), 1),
-							Y("span", null, [Y("strong", null, B(xe(e)), 1), Y("small", null, B(Se(e) ? "Not included in this bundle" : "Available in this bundle"), 1)]),
+							Y("i", null, B(V(e).toUpperCase()), 1),
+							Y("span", null, [Y("strong", null, B(H(e)), 1), Y("small", null, B(we(e) ? "Not included in this bundle" : "Available in this bundle"), 1)]),
 							t[47] ||= Y("b", null, "✓", -1)
 						], 10, VN))), 128))])])) : Z("", !0),
-						ne.value === "hey_tater" && !k.value ? (q(), J("div", HN, "The built-in selection keeps the Hey Tater MWW and OWW models matched.")) : Z("", !0),
-						ne.value === "hey_tater" && k.value ? (q(), J("div", UN, "The built-in Hey Tater bundle includes matched MWW, NWW CNN, and NWW GRU models.")) : Z("", !0)
+						de.value.length ? (q(), J("section", HN, [
+							Y("header", null, [Y("div", null, [t[49] ||= Y("span", null, "Included models", -1), Y("strong", null, B(ue.value), 1)]), t[50] ||= Y("b", null, "Read only", -1)]),
+							Y("div", UN, [(q(!0), J(K, null, G(de.value, (e) => (q(), J("div", {
+								key: String(e.key),
+								class: z(["tm-wake-bundle-model", { missing: !e.included }])
+							}, [
+								Y("i", null, B(e.mark), 1),
+								Y("span", null, [Y("strong", null, B(e.label), 1), Y("small", null, B(e.description), 1)]),
+								Y("b", null, B(e.included ? "Included" : "Not included"), 1)
+							], 2))), 128))]),
+							t[51] ||= Y("small", null, "These are the validated models inside the bundle currently loaded by Tater.", -1)
+						])) : Z("", !0)
 					])) : Z("", !0)
-				])) : (q(), J("div", WN, [Y("strong", null, B(se.value) + " selected", 1), Y("span", null, B(pe[w.value]?.short) + " Wake-model selection is not needed for this mode.", 1)]))
+				])) : (q(), J("div", WN, [Y("strong", null, B(se.value) + " selected", 1), Y("span", null, B(he[w.value]?.short) + " Wake-model selection is not needed for this mode.", 1)]))
 			])) : Z("", !0),
 			u.value ? (q(), J("article", GN, [
-				Y("header", null, [t[50] ||= Y("div", null, [
+				Y("header", null, [t[53] ||= Y("div", null, [
 					Y("span", { class: "tv-eyebrow" }, "Step 2 · Improve"),
 					Y("h3", null, "Wake Word Trainer"),
 					Y("p", null, "Optionally send useful wake clips to your securely linked trainer.")
 				], -1), f.value ? (q(), J("span", {
 					key: 0,
 					class: z(["tv-live-pill", { warning: !f.value.linked }])
-				}, [t[49] ||= Y("i", null, null, -1), X(B(f.value.status_label), 1)], 2)) : Z("", !0)]),
-				Y("div", KN, [Y("label", qN, [t[51] ||= Y("span", null, [Y("strong", null, "Good wakes"), Y("small", null, "Send confirmed wakes to improve recognition.")], -1), W(Y("input", {
+				}, [t[52] ||= Y("i", null, null, -1), X(B(f.value.status_label), 1)], 2)) : Z("", !0)]),
+				Y("div", KN, [Y("label", qN, [t[54] ||= Y("span", null, [Y("strong", null, "Good wakes"), Y("small", null, "Send confirmed wakes to improve recognition.")], -1), W(Y("input", {
 					"onUpdate:modelValue": t[8] ||= (e) => m.capture_wake_audio = e,
 					type: "checkbox",
 					disabled: !!o.value,
-					onChange: t[9] ||= (e) => Ne(m, "capture_wake_audio", m.capture_wake_audio)
-				}, null, 40, JN), [[cs, m.capture_wake_audio]])]), Y("label", YN, [t[52] ||= Y("span", null, [Y("strong", null, "Close misses"), Y("small", null, "Send near-wakes that can improve model tuning.")], -1), W(Y("input", {
+					onChange: t[9] ||= (e) => Fe(m, "capture_wake_audio", m.capture_wake_audio)
+				}, null, 40, JN), [[cs, m.capture_wake_audio]])]), Y("label", YN, [t[55] ||= Y("span", null, [Y("strong", null, "Close misses"), Y("small", null, "Send near-wakes that can improve model tuning.")], -1), W(Y("input", {
 					"onUpdate:modelValue": t[10] ||= (e) => m.capture_close_misses = e,
 					type: "checkbox",
 					disabled: !!o.value,
-					onChange: t[11] ||= (e) => Ne(m, "capture_close_misses", m.capture_close_misses)
+					onChange: t[11] ||= (e) => Fe(m, "capture_close_misses", m.capture_close_misses)
 				}, null, 40, XN), [[cs, m.capture_close_misses]])])]),
 				Y("label", ZN, [
-					t[53] ||= Y("span", { class: "tm-field-label" }, "Trainer App URL", -1),
+					t[56] ||= Y("span", { class: "tm-field-label" }, "Trainer App URL", -1),
 					W(Y("input", {
 						"onUpdate:modelValue": t[12] ||= (e) => m.trainer_app_url = e,
 						type: "url",
 						placeholder: String(S.value.trainer_app_url?.placeholder || "http://trainer.local:8789"),
 						disabled: !!o.value,
-						onInput: t[13] ||= (e) => Ne(m, "trainer_app_url", m.trainer_app_url)
+						onInput: t[13] ||= (e) => Fe(m, "trainer_app_url", m.trainer_app_url)
 					}, null, 40, QN), [[$, m.trainer_app_url]]),
-					t[54] ||= Y("small", null, "The destination used by satellites when wake-clip sharing is enabled.", -1)
+					t[57] ||= Y("small", null, "The destination used by satellites when wake-clip sharing is enabled.", -1)
 				]),
-				f.value?.linked ? (q(), J("div", $N, [Y("div", null, [t[55] ||= Y("i", null, "✓", -1), Y("span", null, [Y("strong", null, B(f.value.trainer_name), 1), Y("small", null, "Last model: " + B(f.value.last_wake_word || "No model published yet") + " · " + B(f.value.last_publish_at || "Waiting for first publish"), 1)])]), Y("button", {
+				f.value?.linked ? (q(), J("div", $N, [Y("div", null, [t[58] ||= Y("i", null, "✓", -1), Y("span", null, [Y("strong", null, B(f.value.trainer_name), 1), Y("small", null, "Last model: " + B(f.value.last_wake_word || "No model published yet") + " · " + B(f.value.last_publish_at || "Waiting for first publish"), 1)])]), Y("button", {
 					class: "tv-button danger",
 					type: "button",
 					disabled: !!o.value,
-					onClick: Ve
-				}, "Unlink", 8, eP)])) : (q(), J("div", tP, [t[56] ||= Y("div", null, [Y("i", null, "↗"), Y("span", null, [Y("strong", null, "Link the trainer securely"), Y("small", null, "A short pairing code ensures only your trainer can publish wake models.")])], -1), Y("div", nP, [Y("button", {
+					onClick: Ue
+				}, "Unlink", 8, eP)])) : (q(), J("div", tP, [t[59] ||= Y("div", null, [Y("i", null, "↗"), Y("span", null, [Y("strong", null, "Link the trainer securely"), Y("small", null, "A short pairing code ensures only your trainer can publish wake models.")])], -1), Y("div", nP, [Y("button", {
 					class: "tv-button",
 					type: "button",
 					disabled: !!o.value,
-					onClick: Le
-				}, B(g.value ? "Restart pairing" : "Link trainer"), 9, rP), g.value && de.value === "waiting" ? (q(), J("button", {
+					onClick: ze
+				}, B(g.value ? "Restart pairing" : "Link trainer"), 9, rP), g.value && pe.value === "waiting" ? (q(), J("button", {
 					key: 0,
 					class: "tv-button",
 					type: "button",
 					disabled: !!o.value,
-					onClick: Re
+					onClick: Be
 				}, "Check link", 8, iP)) : Z("", !0)])])),
 				g.value && !f.value?.linked ? (q(), J("div", {
 					key: 2,
-					class: z(["tm-pairing-box", { expired: de.value === "expired" }])
+					class: z(["tm-pairing-box", { expired: pe.value === "expired" }])
 				}, [
-					t[57] ||= Y("span", null, "Pairing code", -1),
-					Y("strong", null, B(de.value === "expired" ? "Expired" : ue.value || "Creating…"), 1),
-					de.value === "waiting" ? (q(), J("small", aP, "Expires in " + B(Ce(fe.value)), 1)) : de.value === "expired" ? (q(), J("small", oP, "Restart pairing to create a new code.")) : Z("", !0),
+					t[60] ||= Y("span", null, "Pairing code", -1),
+					Y("strong", null, B(pe.value === "expired" ? "Expired" : fe.value || "Creating…"), 1),
+					pe.value === "waiting" ? (q(), J("small", aP, "Expires in " + B(Te(me.value)), 1)) : pe.value === "expired" ? (q(), J("small", oP, "Restart pairing to create a new code.")) : Z("", !0),
 					g.value.pairing_url || g.value.url ? (q(), J("a", {
 						key: 2,
 						href: String(g.value.pairing_url || g.value.url),
@@ -16650,7 +16658,7 @@ var Hc = ["checked", "disabled"], Uc = { key: 0 }, Wc = {
 				], 2)) : Z("", !0)
 			])) : Z("", !0),
 			l.value && w.value === "micro_wake_word" ? (q(), J("article", cP, [
-				Y("header", null, [t[58] ||= Y("div", null, [
+				Y("header", null, [t[61] ||= Y("div", null, [
 					Y("span", { class: "tv-eyebrow" }, "Step 3 · Tune"),
 					Y("h3", null, "Wake model overrides"),
 					Y("p", null, "Each active engine starts with the values validated by its selected bundle. Enable an override only when you want to trade sensitivity, false wakes, or response time.")
@@ -16660,15 +16668,15 @@ var Hc = ["checked", "disabled"], Uc = { key: 0 }, Wc = {
 						key: 0,
 						class: z(["tm-wake-tuning-model", { active: !!p.mww_tuning_override_enabled }])
 					}, [
-						Y("header", null, [t[60] ||= Y("i", null, "MW", -1), Y("div", null, [t[59] ||= Y("strong", null, "microWakeWord", -1), Y("small", null, "Bundle: threshold " + B(x.value.mww_threshold_override?.default) + " · window " + B(x.value.mww_sliding_window_override?.default), 1)])]),
-						Y("label", dP, [t[61] ||= Y("span", null, [Y("strong", null, "Override bundle values"), Y("small", null, "Applies to the MWW half of built-in, catalog, and custom bundles.")], -1), W(Y("input", {
+						Y("header", null, [t[63] ||= Y("i", null, "MW", -1), Y("div", null, [t[62] ||= Y("strong", null, "microWakeWord", -1), Y("small", null, "Bundle: threshold " + B(x.value.mww_threshold_override?.default) + " · window " + B(x.value.mww_sliding_window_override?.default), 1)])]),
+						Y("label", dP, [t[64] ||= Y("span", null, [Y("strong", null, "Override bundle values"), Y("small", null, "Applies to the MWW half of built-in, catalog, and custom bundles.")], -1), W(Y("input", {
 							"onUpdate:modelValue": t[14] ||= (e) => p.mww_tuning_override_enabled = e,
 							type: "checkbox",
 							disabled: !!o.value,
-							onChange: t[15] ||= (e) => Ne(p, "mww_tuning_override_enabled", p.mww_tuning_override_enabled)
+							onChange: t[15] ||= (e) => Fe(p, "mww_tuning_override_enabled", p.mww_tuning_override_enabled)
 						}, null, 40, fP), [[cs, p.mww_tuning_override_enabled]])]),
 						p.mww_tuning_override_enabled ? (q(), J("div", pP, [Y("label", null, [
-							t[62] ||= Y("span", null, "Threshold", -1),
+							t[65] ||= Y("span", null, "Threshold", -1),
 							W(Y("input", {
 								"onUpdate:modelValue": t[16] ||= (e) => p.mww_threshold_override = e,
 								type: "number",
@@ -16676,16 +16684,16 @@ var Hc = ["checked", "disabled"], Uc = { key: 0 }, Wc = {
 								max: x.value.mww_threshold_override?.max ?? .99,
 								step: x.value.mww_threshold_override?.step ?? .01,
 								disabled: !!o.value,
-								onInput: t[17] ||= (e) => Ne(p, "mww_threshold_override", p.mww_threshold_override)
+								onInput: t[17] ||= (e) => Fe(p, "mww_threshold_override", p.mww_threshold_override)
 							}, null, 40, mP), [[
 								$,
 								p.mww_threshold_override,
 								void 0,
 								{ number: !0 }
 							]]),
-							t[63] ||= Y("small", null, "Higher reduces false wakes.", -1)
+							t[66] ||= Y("small", null, "Higher reduces false wakes.", -1)
 						]), Y("label", null, [
-							t[64] ||= Y("span", null, "Sliding window", -1),
+							t[67] ||= Y("span", null, "Sliding window", -1),
 							W(Y("input", {
 								"onUpdate:modelValue": t[18] ||= (e) => p.mww_sliding_window_override = e,
 								type: "number",
@@ -16693,29 +16701,29 @@ var Hc = ["checked", "disabled"], Uc = { key: 0 }, Wc = {
 								max: x.value.mww_sliding_window_override?.max ?? 10,
 								step: 1,
 								disabled: !!o.value,
-								onInput: t[19] ||= (e) => Ne(p, "mww_sliding_window_override", p.mww_sliding_window_override)
+								onInput: t[19] ||= (e) => Fe(p, "mww_sliding_window_override", p.mww_sliding_window_override)
 							}, null, 40, hP), [[
 								$,
 								p.mww_sliding_window_override,
 								void 0,
 								{ number: !0 }
 							]]),
-							t[65] ||= Y("small", null, "Larger is more conservative.", -1)
+							t[68] ||= Y("small", null, "Larger is more conservative.", -1)
 						])])) : Z("", !0)
 					], 2)) : Z("", !0),
 					O.value ? (q(), J("section", {
 						key: 1,
 						class: z(["tm-wake-tuning-model", { active: !!p.oww_tuning_override_enabled }])
 					}, [
-						Y("header", null, [t[66] ||= Y("i", null, "OW", -1), Y("div", null, [Y("strong", null, "openWakeWord" + B(E.value === "mww_oww" ? " confirmation" : ""), 1), Y("small", null, "Bundle: threshold " + B(M.value) + " · patience " + B(N.value), 1)])]),
-						Y("label", gP, [t[67] ||= Y("span", null, [Y("strong", null, "Override bundle values"), Y("small", null, "Applies to the OWW model from any supported wake-bundle source.")], -1), W(Y("input", {
+						Y("header", null, [t[69] ||= Y("i", null, "OW", -1), Y("div", null, [Y("strong", null, "openWakeWord" + B(E.value === "mww_oww" ? " confirmation" : ""), 1), Y("small", null, "Bundle: threshold " + B(M.value) + " · patience " + B(N.value), 1)])]),
+						Y("label", gP, [t[70] ||= Y("span", null, [Y("strong", null, "Override bundle values"), Y("small", null, "Applies to the OWW model from any supported wake-bundle source.")], -1), W(Y("input", {
 							"onUpdate:modelValue": t[20] ||= (e) => p.oww_tuning_override_enabled = e,
 							type: "checkbox",
 							disabled: !!o.value,
-							onChange: t[21] ||= (e) => Ne(p, "oww_tuning_override_enabled", p.oww_tuning_override_enabled)
+							onChange: t[21] ||= (e) => Fe(p, "oww_tuning_override_enabled", p.oww_tuning_override_enabled)
 						}, null, 40, _P), [[cs, p.oww_tuning_override_enabled]])]),
 						p.oww_tuning_override_enabled ? (q(), J("div", vP, [Y("label", null, [
-							t[68] ||= Y("span", null, "Threshold", -1),
+							t[71] ||= Y("span", null, "Threshold", -1),
 							W(Y("input", {
 								"onUpdate:modelValue": t[22] ||= (e) => p.oww_threshold_override = e,
 								type: "number",
@@ -16723,16 +16731,16 @@ var Hc = ["checked", "disabled"], Uc = { key: 0 }, Wc = {
 								max: x.value.oww_threshold_override?.max ?? 1,
 								step: x.value.oww_threshold_override?.step ?? .01,
 								disabled: !!o.value,
-								onInput: t[23] ||= (e) => Ne(p, "oww_threshold_override", p.oww_threshold_override)
+								onInput: t[23] ||= (e) => Fe(p, "oww_threshold_override", p.oww_threshold_override)
 							}, null, 40, yP), [[
 								$,
 								p.oww_threshold_override,
 								void 0,
 								{ number: !0 }
 							]]),
-							t[69] ||= Y("small", null, "Higher reduces false wakes.", -1)
+							t[72] ||= Y("small", null, "Higher reduces false wakes.", -1)
 						]), Y("label", null, [
-							t[70] ||= Y("span", null, "Patience", -1),
+							t[73] ||= Y("span", null, "Patience", -1),
 							W(Y("input", {
 								"onUpdate:modelValue": t[24] ||= (e) => p.oww_patience_override = e,
 								type: "number",
@@ -16740,29 +16748,29 @@ var Hc = ["checked", "disabled"], Uc = { key: 0 }, Wc = {
 								max: x.value.oww_patience_override?.max ?? 20,
 								step: 1,
 								disabled: !!o.value,
-								onInput: t[25] ||= (e) => Ne(p, "oww_patience_override", p.oww_patience_override)
+								onInput: t[25] ||= (e) => Fe(p, "oww_patience_override", p.oww_patience_override)
 							}, null, 40, bP), [[
 								$,
 								p.oww_patience_override,
 								void 0,
 								{ number: !0 }
 							]]),
-							t[71] ||= Y("small", null, "Consecutive 80 ms scores.", -1)
+							t[74] ||= Y("small", null, "Consecutive 80 ms scores.", -1)
 						])])) : Z("", !0)
 					], 2)) : Z("", !0),
 					k.value ? (q(), J("section", {
 						key: 2,
 						class: z(["tm-wake-tuning-model", { active: !!p.nww_tuning_override_enabled }])
 					}, [
-						Y("header", null, [t[72] ||= Y("i", null, "NW", -1), Y("div", null, [Y("strong", null, "NanoWakeWord " + B(j.value.toUpperCase()), 1), Y("small", null, "Bundle: threshold " + B(P.value) + " · patience " + B(F.value), 1)])]),
-						Y("label", xP, [t[73] ||= Y("span", null, [Y("strong", null, "Override bundle values"), Y("small", null, "Applies to the selected CNN or GRU model from any supported bundle source.")], -1), W(Y("input", {
+						Y("header", null, [t[75] ||= Y("i", null, "NW", -1), Y("div", null, [Y("strong", null, "NanoWakeWord " + B(j.value.toUpperCase()), 1), Y("small", null, "Bundle: threshold " + B(P.value) + " · patience " + B(F.value), 1)])]),
+						Y("label", xP, [t[76] ||= Y("span", null, [Y("strong", null, "Override bundle values"), Y("small", null, "Applies to the selected CNN or GRU model from any supported bundle source.")], -1), W(Y("input", {
 							"onUpdate:modelValue": t[26] ||= (e) => p.nww_tuning_override_enabled = e,
 							type: "checkbox",
 							disabled: !!o.value,
-							onChange: t[27] ||= (e) => Ne(p, "nww_tuning_override_enabled", p.nww_tuning_override_enabled)
+							onChange: t[27] ||= (e) => Fe(p, "nww_tuning_override_enabled", p.nww_tuning_override_enabled)
 						}, null, 40, SP), [[cs, p.nww_tuning_override_enabled]])]),
 						p.nww_tuning_override_enabled ? (q(), J("div", CP, [Y("label", null, [
-							t[74] ||= Y("span", null, "Threshold", -1),
+							t[77] ||= Y("span", null, "Threshold", -1),
 							W(Y("input", {
 								"onUpdate:modelValue": t[28] ||= (e) => p.nww_threshold_override = e,
 								type: "number",
@@ -16770,16 +16778,16 @@ var Hc = ["checked", "disabled"], Uc = { key: 0 }, Wc = {
 								max: x.value.nww_threshold_override?.max ?? 1,
 								step: x.value.nww_threshold_override?.step ?? .01,
 								disabled: !!o.value,
-								onInput: t[29] ||= (e) => Ne(p, "nww_threshold_override", p.nww_threshold_override)
+								onInput: t[29] ||= (e) => Fe(p, "nww_threshold_override", p.nww_threshold_override)
 							}, null, 40, wP), [[
 								$,
 								p.nww_threshold_override,
 								void 0,
 								{ number: !0 }
 							]]),
-							t[75] ||= Y("small", null, "Higher reduces false wakes.", -1)
+							t[78] ||= Y("small", null, "Higher reduces false wakes.", -1)
 						]), Y("label", null, [
-							t[76] ||= Y("span", null, "Patience", -1),
+							t[79] ||= Y("span", null, "Patience", -1),
 							W(Y("input", {
 								"onUpdate:modelValue": t[30] ||= (e) => p.nww_patience_override = e,
 								type: "number",
@@ -16787,47 +16795,47 @@ var Hc = ["checked", "disabled"], Uc = { key: 0 }, Wc = {
 								max: x.value.nww_patience_override?.max ?? 20,
 								step: 1,
 								disabled: !!o.value,
-								onInput: t[31] ||= (e) => Ne(p, "nww_patience_override", p.nww_patience_override)
+								onInput: t[31] ||= (e) => Fe(p, "nww_patience_override", p.nww_patience_override)
 							}, null, 40, TP), [[
 								$,
 								p.nww_patience_override,
 								void 0,
 								{ number: !0 }
 							]]),
-							t[77] ||= Y("small", null, "Lower responds sooner but may false wake.", -1)
+							t[80] ||= Y("small", null, "Lower responds sooner but may false wake.", -1)
 						])])) : Z("", !0)
 					], 2)) : Z("", !0)
 				]),
-				t[78] ||= Y("div", { class: "tm-wake-model-note" }, "Overrides follow the selected model source, so they work with the built-in word, Wake Bundle Catalog, and custom bundle URLs. Turning an override off immediately restores the bundle’s validated values.", -1)
+				t[81] ||= Y("div", { class: "tm-wake-model-note" }, "Overrides follow the selected model source, so they work with the built-in word, Wake Bundle Catalog, and custom bundle URLs. Turning an override off immediately restores the bundle’s validated values.", -1)
 			])) : Z("", !0),
 			d.value ? (q(), J("article", EP, [
-				Y("header", null, [t[79] ||= Y("div", null, [
+				Y("header", null, [t[82] ||= Y("div", null, [
 					Y("span", { class: "tv-eyebrow" }, "Step 4 · Verify"),
 					Y("h3", null, "STT wake verification"),
 					Y("p", null, "Use the selected Speech STT engine for a fast second opinion after an on-device wake.")
 				], -1), Y("span", DP, B(ae.value), 1)]),
-				Y("div", OP, [(q(!0), J(K, null, G(ye(re.value), (e) => (q(), J("button", {
-					key: be(e),
+				Y("div", OP, [(q(!0), J(K, null, G(xe(re.value), (e) => (q(), J("button", {
+					key: V(e),
 					type: "button",
-					class: z({ active: L.value === be(e) }),
+					class: z({ active: L.value === V(e) }),
 					disabled: !!o.value,
-					onClick: (t) => ke(be(e))
+					onClick: (t) => je(V(e))
 				}, [
-					Y("i", null, B(ge[be(e)]?.mark), 1),
-					Y("span", null, [Y("strong", null, B(ge[be(e)]?.label || xe(e)), 1), Y("small", null, B(ge[be(e)]?.short), 1)]),
-					t[80] ||= Y("b", null, "✓", -1)
+					Y("i", null, B(ve[V(e)]?.mark), 1),
+					Y("span", null, [Y("strong", null, B(ve[V(e)]?.label || H(e)), 1), Y("small", null, B(ve[V(e)]?.short), 1)]),
+					t[83] ||= Y("b", null, "✓", -1)
 				], 10, kP))), 128))]),
-				Y("div", AP, [Y("div", null, [t[81] ||= Y("span", null, "Current results", -1), Y("strong", null, B(ie.value), 1)]), Y("div", null, [t[82] ||= Y("span", null, "Configured STT", -1), Y("strong", null, B(ae.value), 1)])]),
+				Y("div", AP, [Y("div", null, [t[84] ||= Y("span", null, "Current results", -1), Y("strong", null, B(ie.value), 1)]), Y("div", null, [t[85] ||= Y("span", null, "Configured STT", -1), Y("strong", null, B(ae.value), 1)])]),
 				Array.isArray(R.value.rows) ? (q(), J("details", {
 					key: 0,
 					class: "tm-wake-results",
 					open: !!R.value.rows.length
-				}, [Y("summary", null, [Y("span", null, [t[83] ||= Y("strong", null, "Results by satellite", -1), Y("small", null, B(R.value.rows.length) + " satellite" + B(R.value.rows.length === 1 ? "" : "s") + " with verification data", 1)]), t[84] ||= Y("b", null, "⌄", -1)]), Y("div", MP, [Y("table", null, [Y("thead", null, [Y("tr", null, [(q(!0), J(K, null, G(R.value.columns || [], (e) => (q(), J("th", { key: String(e.key) }, B(e.label || e.key), 1))), 128))])]), Y("tbody", null, [(q(!0), J(K, null, G(R.value.rows, (e, t) => (q(), J("tr", { key: t }, [(q(!0), J(K, null, G(R.value.columns || [], (t) => (q(), J("td", { key: String(t.key) }, B(e[String(t.key)] ?? "—"), 1))), 128))]))), 128)), R.value.rows.length ? Z("", !0) : (q(), J("tr", NP, [Y("td", { colspan: Math.max(1, (R.value.columns || []).length) }, "No verifier results yet. Observe mode is a good way to collect data safely.", 8, PP)]))])])])], 8, jP)) : Z("", !0),
+				}, [Y("summary", null, [Y("span", null, [t[86] ||= Y("strong", null, "Results by satellite", -1), Y("small", null, B(R.value.rows.length) + " satellite" + B(R.value.rows.length === 1 ? "" : "s") + " with verification data", 1)]), t[87] ||= Y("b", null, "⌄", -1)]), Y("div", MP, [Y("table", null, [Y("thead", null, [Y("tr", null, [(q(!0), J(K, null, G(R.value.columns || [], (e) => (q(), J("th", { key: String(e.key) }, B(e.label || e.key), 1))), 128))])]), Y("tbody", null, [(q(!0), J(K, null, G(R.value.rows, (e, t) => (q(), J("tr", { key: t }, [(q(!0), J(K, null, G(R.value.columns || [], (t) => (q(), J("td", { key: String(t.key) }, B(e[String(t.key)] ?? "—"), 1))), 128))]))), 128)), R.value.rows.length ? Z("", !0) : (q(), J("tr", NP, [Y("td", { colspan: Math.max(1, (R.value.columns || []).length) }, "No verifier results yet. Observe mode is a good way to collect data safely.", 8, PP)]))])])])], 8, jP)) : Z("", !0),
 				Y("div", FP, [Y("button", {
 					class: "tv-button danger",
 					type: "button",
 					disabled: !!o.value,
-					onClick: Ie
+					onClick: Re
 				}, "Reset Verification Stats", 8, IP)])
 			])) : Z("", !0)
 		]));

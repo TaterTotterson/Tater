@@ -333,6 +333,9 @@ class WakeFamilySettingsTests(unittest.TestCase):
         self.assertIn('Single wake engine', source)
         self.assertIn('Dual wake engines', source)
         self.assertIn('NanoWakeWord architecture', source)
+        self.assertIn('Included bundle models', source)
+        self.assertIn('tm-wake-bundle-info', source)
+        self.assertNotIn('v-model="wakeValues.wake_bundle_models"', source)
         self.assertIn('Step 1 · All satellites', source)
         self.assertIn('=== "wake_model_settings"', source)
         self.assertNotIn('=== "mww_satellite_model_settings"', source)
@@ -536,6 +539,41 @@ class WakeFamilySettingsTests(unittest.TestCase):
         self.assertEqual(fields["oww_wake_word_catalog_url"]["label"], "Wake Bundle Catalog")
         self.assertEqual(fields["oww_wake_word_url"]["label"], "Wake Bundle URL")
         self.assertIn("sends microWakeWord to MWW-only satellites", fields["oww_wake_word_url"]["description"])
+
+    def test_builtin_bundle_exposes_read_only_model_contents(self) -> None:
+        redis = MemoryRedis(
+            {
+                native_live_settings.SETTINGS_HASH_KEY: {
+                    native_live_settings.GLOBAL_SATELLITE_SETTINGS_MIGRATION_KEY: "true",
+                    native_live_settings.WAKE_FAMILY_SETTINGS_MIGRATION_KEY: "true",
+                },
+                native_live_settings.wake_family_hash_key("echo"): {
+                    "wake_detector_mode": "mww_nww",
+                    "oww_wake_word": "hey_tater",
+                },
+            }
+        )
+        with mock.patch.object(native_live_settings, "redis_client", redis):
+            fields = {
+                field["key"]: field
+                for field in native_live_settings.settings_fields(wake_family="echo")
+            }
+            section_keys = {
+                field["key"]
+                for section in native_live_settings.shared_wake_model_settings_sections()
+                for field in section["fields"]
+            }
+
+        model_field = fields["wake_bundle_models"]
+        models = {model["key"]: model for model in model_field["models"]}
+        self.assertEqual(model_field["type"], "readonly")
+        self.assertEqual(model_field["value"], "Hey Tater")
+        self.assertIn("wake_bundle_models", section_keys)
+        self.assertTrue(models["mww"]["included"])
+        self.assertTrue(models["oww"]["included"])
+        self.assertTrue(models["nww_cnn"]["included"])
+        self.assertTrue(models["nww_gru"]["included"])
+        self.assertTrue(models["boundary"]["included"])
 
     def test_nww_mode_projects_to_capable_firmware_and_falls_back_to_mww(self) -> None:
         bundle_url = "https://trainer.example/hey_tater.wake-bundle.json"

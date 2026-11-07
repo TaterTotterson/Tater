@@ -723,6 +723,20 @@ async def native_satellite_nww_model(package_id: str, architecture: str) -> Resp
     return Response(content=body, media_type="application/octet-stream", headers={"Cache-Control": "no-store"})
 
 
+@router.get("/api/tater/satellite/v1/wake-package/{package_id}/boundary-model.tflite")
+async def wake_package_boundary_model(package_id: str) -> Response:
+    vp = _vp()
+    from .. import wake_package_proxy
+
+    try:
+        body = await vp.run_background(wake_package_proxy.boundary_model_bytes, package_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (ValueError, wake_package_proxy.WakePackageProxyError) as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return Response(content=body, media_type="application/octet-stream", headers={"Cache-Control": "no-store"})
+
+
 @router.get("/api/tater/satellite/v1/settings")
 async def native_satellite_settings(selector: str = "", x_tater_token: Optional[str] = Header(None)) -> Dict[str, Any]:
     vp = _vp()
