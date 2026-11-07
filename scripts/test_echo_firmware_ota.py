@@ -29,6 +29,9 @@ def _echo_manifest() -> dict[str, object]:
                 "factory_install": True,
                 "ota": True,
                 "status": "hardware-tested",
+                "system_ota": {
+                    "minimum_system_version": "v0.3.0",
+                },
                 "artifacts": {
                     "factory": {
                         "name": "tater-echo-biscuit-v0.4.0-factory.tar.gz",
@@ -214,6 +217,7 @@ class EchoFirmwareOtaTests(unittest.TestCase):
         system = device["artifacts"]["system"]
         factory = device["artifacts"]["factory"]
         self.assertEqual("v0.4.0", device["firmware_version"])
+        self.assertEqual("v0.3.0", device["minimum_system_version"])
         self.assertEqual("tater_native_ota", ota["flash_transport"])
         self.assertEqual(2048, ota["size_bytes"])
         self.assertEqual("b" * 64, ota["sha256"])
@@ -225,6 +229,32 @@ class EchoFirmwareOtaTests(unittest.TestCase):
         self.assertEqual("tater_native_system_ota", system["flash_transport"])
         self.assertEqual(16384, system["size_bytes"])
         self.assertTrue(system["path"].endswith("-system-ota.tar.gz"))
+
+    def test_echo_manifest_legacy_system_policy_falls_back_to_release_version(self) -> None:
+        payload = _echo_manifest()
+        del payload["targets"]["biscuit"]["system_ota"]
+        with mock.patch.object(firmware, "_remote_json", return_value=payload):
+            manifest = firmware._load_native_firmware_manifest(template_key="biscuit")
+
+        self.assertEqual(
+            "v0.4.0",
+            manifest["devices_by_key"]["biscuit"]["minimum_system_version"],
+        )
+
+    def test_echo_manifest_rejects_invalid_minimum_system_version(self) -> None:
+        payload = _echo_manifest()
+        payload["targets"]["biscuit"]["system_ota"]["minimum_system_version"] = "current"
+        with (
+            mock.patch.object(firmware, "_remote_json", return_value=payload),
+            self.assertRaisesRegex(RuntimeError, "minimum system version is invalid"),
+        ):
+            firmware._load_native_firmware_manifest(template_key="biscuit")
+
+    def test_system_update_uses_required_baseline_not_latest_app(self) -> None:
+        self.assertFalse(firmware._system_update_required("4.2.0", "v4.0.0"))
+        self.assertFalse(firmware._system_update_required("4.3.0", "v4.3.0"))
+        self.assertTrue(firmware._system_update_required("4.2.1", "v4.3.0"))
+        self.assertTrue(firmware._system_update_required("", "v4.3.0"))
 
     def test_echo_manifest_rejects_unverified_artifact_metadata(self) -> None:
         payload = _echo_manifest()

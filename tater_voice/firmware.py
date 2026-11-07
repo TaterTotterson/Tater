@@ -1253,6 +1253,16 @@ def _firmware_version_snapshot(
     }
 
 
+def _system_update_required(installed_version: Any, minimum_version: Any) -> bool:
+    minimum = _known_firmware_version(minimum_version)
+    if not minimum:
+        return False
+    installed = _known_firmware_version(installed_version)
+    if not installed:
+        return True
+    return _semver_tuple(installed) < _semver_tuple(minimum)
+
+
 def _remote_json(url: str, *, force_refresh: bool = False) -> Any:
     target = _text(url)
     if not target:
@@ -1424,6 +1434,19 @@ def _load_echo_firmware_manifest(
         target = _lower(raw_target)
         if not re.fullmatch(r"[a-z0-9][a-z0-9._-]*", target) or not isinstance(raw_device, dict):
             continue
+        raw_system_policy = raw_device.get("system_ota")
+        if raw_system_policy is not None and not isinstance(raw_system_policy, dict):
+            raise RuntimeError(f"Tater Echo {target} System OTA policy is invalid.")
+        minimum_system_version = _text(
+            raw_system_policy.get("minimum_system_version")
+            if isinstance(raw_system_policy, dict)
+            else ""
+        ) or version
+        if not re.fullmatch(
+            r"v[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?",
+            minimum_system_version,
+        ):
+            raise RuntimeError(f"Tater Echo {target} minimum system version is invalid.")
         raw_artifacts = raw_device.get("artifacts") if isinstance(raw_device.get("artifacts"), dict) else {}
         artifacts: Dict[str, Dict[str, Any]] = {}
         for kind in ("factory", "ota", "ota_bridge", "system"):
@@ -1513,6 +1536,7 @@ def _load_echo_firmware_manifest(
                 "firmware_target": target,
                 "firmware_version": version,
                 "display_version": display_version,
+                "minimum_system_version": minimum_system_version,
                 "project": "tater.echo",
                 "flash_transport": "tater_native_ota",
                 "artifacts": artifacts,
@@ -3004,10 +3028,13 @@ def _build_device_context(
     )
     system_ota_supported = _capability_version(capabilities, "system_ota_version") >= 1
     installed_system_version = _text(capabilities.get("system_version"))
+    minimum_system_version = (
+        _text(prebuilt_device.get("minimum_system_version"))
+        or latest_firmware_version
+    )
     system_update_available = bool(
         system_ota_available
-        and latest_firmware_version
-        and installed_system_version != latest_firmware_version
+        and _system_update_required(installed_system_version, minimum_system_version)
     )
     firmware_project = _text(prebuilt_device.get("project")) or "tater.native_satellite"
     matched_template_key = _matched_template_key(selector_token, client_row)
@@ -3073,6 +3100,7 @@ def _build_device_context(
         "installed_firmware_version": installed_firmware_version,
         "installed_firmware_version_source": _text(version_snapshot.get("source")),
         "installed_system_version": installed_system_version,
+        "minimum_system_version": minimum_system_version,
         "system_ota_available": system_ota_available,
         "system_ota_supported": system_ota_supported,
         "system_update_available": system_update_available,
@@ -3081,7 +3109,8 @@ def _build_device_context(
         "firmware_update_status": (
             (
                 f"App {installed_firmware_version or 'unknown'} • "
-                f"Tater Linux {installed_system_version or 'unknown'} • latest {latest_firmware_version}"
+                f"Tater Linux {installed_system_version or 'unknown'} • "
+                f"minimum {minimum_system_version or 'unknown'} • latest app {latest_firmware_version}"
             )
             if system_ota_available
             else f"Installed {installed_firmware_version} • latest {latest_firmware_version}"
@@ -3146,6 +3175,7 @@ def _build_device_context(
         "capabilities": copy.deepcopy(capabilities),
         "ota_migration": copy.deepcopy(ota_migration),
         "installed_system_version": installed_system_version,
+        "minimum_system_version": minimum_system_version,
         "system_ota_available": system_ota_available,
         "system_ota_supported": system_ota_supported,
         "system_update_available": system_update_available,
@@ -3463,6 +3493,7 @@ def firmware_panel_payload(status: Dict[str, Any]) -> Dict[str, Any]:
                 "template_label": _text(item.get("template_label")),
                 "installed": _text(item.get("installed_firmware_version")) or "unknown",
                 "installed_system": _text(item.get("installed_system_version")) or "unknown",
+                "minimum_system": _text(item.get("minimum_system_version")) or "unknown",
                 "latest": _text(item.get("firmware_version")),
                 "system_update_available": bool(item.get("system_update_available")),
                 "prebuilt_firmware_available": bool(item.get("prebuilt_firmware_available")),
