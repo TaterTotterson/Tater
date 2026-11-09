@@ -79,6 +79,61 @@ class WakePackageProxyTests(unittest.TestCase):
         package_id = urlsplit(output["wake_word_url"]).path.split("/")[-2]
         self.assertEqual(wake_package_proxy._PACKAGES[package_id]["bundle_url"], source_url)
 
+    def test_boundary_capable_native_satellite_gets_the_complete_v4_bundle(self) -> None:
+        selector = "native:voicepe-test"
+        source_url = "https://trainer.example/hey-tater.wake-bundle.json"
+        native_satellite._clients[selector] = {"client_host": "10.4.20.239"}
+        settings = {"wake_word": "custom_url", "wake_word_url": "https://models.example/hey-tater.json"}
+        shared = {
+            "wake_detector_mode": "mww",
+            "oww_wake_word": "custom_url",
+            "oww_wake_word_url": source_url,
+            "wake_boundary_available": True,
+        }
+        vp = mock.Mock()
+        vp._service_base_url_for_peer.return_value = "http://10.4.20.210:8501"
+        with (
+            mock.patch.object(native_live_settings, "firmware_settings_snapshot", return_value=dict(settings)),
+            mock.patch.object(native_live_settings, "shared_wake_settings_snapshot", return_value=shared),
+            mock.patch.object(native_satellite, "_vp", return_value=vp),
+        ):
+            output = native_satellite._firmware_settings_payload(
+                selector,
+                board="voice-pe",
+                capabilities={"wake_boundary": True, "wake_boundary_version": 1},
+            )
+
+        parsed = urlsplit(output["wake_word_url"])
+        self.assertTrue(parsed.path.endswith("/bundle.wake-bundle.json"))
+        package_id = parsed.path.split("/")[-2]
+        self.assertEqual(wake_package_proxy._PACKAGES[package_id]["bundle_url"], source_url)
+
+    def test_boundary_capable_native_satellite_keeps_legacy_bundle_projection(self) -> None:
+        selector = "native:voicepe-test"
+        source_url = "https://trainer.example/legacy.wake-bundle.json"
+        native_satellite._clients[selector] = {"client_host": "10.4.20.239"}
+        settings = {"wake_word": "custom_url", "wake_word_url": "https://models.example/legacy.json"}
+        shared = {
+            "wake_detector_mode": "mww_oww",
+            "oww_wake_word": "custom_url",
+            "oww_wake_word_url": source_url,
+            "wake_boundary_available": False,
+        }
+        vp = mock.Mock()
+        vp._service_base_url_for_peer.return_value = "http://10.4.20.210:8501"
+        with (
+            mock.patch.object(native_live_settings, "firmware_settings_snapshot", return_value=dict(settings)),
+            mock.patch.object(native_live_settings, "shared_wake_settings_snapshot", return_value=shared),
+            mock.patch.object(native_satellite, "_vp", return_value=vp),
+        ):
+            output = native_satellite._firmware_settings_payload(
+                selector,
+                board="voice-pe",
+                capabilities={"wake_boundary": True, "wake_boundary_version": 1},
+            )
+
+        self.assertTrue(urlsplit(output["wake_word_url"]).path.endswith("/manifest.json"))
+
     def test_echo_custom_oww_bundle_uses_tater_lan_proxy(self) -> None:
         selector = "native:echo-test"
         source_url = "https://models.example/jojo.wake-bundle.json"

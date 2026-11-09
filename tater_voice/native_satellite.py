@@ -1395,24 +1395,39 @@ def _firmware_settings_payload(
         # satellites. Resolve its manifest through Tater's package proxy, but
         # never send any OWW setting to firmware that cannot consume it.
         shared = native_live_settings.shared_wake_settings_snapshot()
+        boundary_capable = _as_bool((capabilities or {}).get("wake_boundary"), False)
+        try:
+            boundary_version = int((capabilities or {}).get("wake_boundary_version") or 0)
+        except (TypeError, ValueError):
+            boundary_version = 0
+        boundary_bundle = (
+            (boundary_capable or boundary_version >= 1)
+            and _as_bool(shared.get("wake_boundary_available"), False)
+            and _lower(shared.get("oww_wake_word")) == "custom_url"
+            and bool(_text(shared.get("oww_wake_word_url")))
+        )
         paired_custom_bundle = (
             _lower(shared.get("wake_detector_mode")) in {"oww", "nww", "mww_oww", "mww_nww", "dual"}
             and _lower(shared.get("oww_wake_word")) == "custom_url"
             and bool(_text(shared.get("oww_wake_word_url")))
         )
-        if paired_custom_bundle:
+        if paired_custom_bundle or boundary_bundle:
             row = _clients.get(_canonical_selector(selector))
             peer_host = _text(row.get("client_host")) if isinstance(row, dict) else ""
             try:
                 from . import wake_package_proxy
 
                 service_url = _vp()._service_base_url_for_peer(peer_host)
-                manifest_url, _bundle_url = wake_package_proxy.register_dual_bundle(
+                manifest_url, bundle_url = wake_package_proxy.register_dual_bundle(
                     service_url,
                     _text(shared.get("oww_wake_word_url")),
                 )
                 settings["wake_word"] = "custom_url"
-                settings["wake_word_url"] = manifest_url
+                settings["wake_word_url"] = (
+                    bundle_url
+                    if boundary_bundle
+                    else manifest_url
+                )
             except (ValueError, RuntimeError) as exc:
                 _vp().logger.warning(
                     "[native-satellite] could not prepare MWW half of shared wake bundle selector=%s: %s",
@@ -1478,7 +1493,18 @@ def _firmware_settings_payload(
                 settings["oww_wake_word"] = "paired_bundle"
                 settings["oww_wake_word_url"] = bundle_url
         elif mww_source_url:
-            settings["wake_word_url"] = wake_package_proxy.register_manifest(service_url, mww_source_url)
+            boundary_capable = _as_bool((capabilities or {}).get("wake_boundary"), False)
+            try:
+                boundary_version = int((capabilities or {}).get("wake_boundary_version") or 0)
+            except (TypeError, ValueError):
+                boundary_version = 0
+            if (
+                (boundary_capable or boundary_version >= 1)
+                and mww_source_url.lower().split("?", 1)[0].endswith(".wake-bundle.json")
+            ):
+                settings["wake_word_url"] = wake_package_proxy.register_bundle(service_url, mww_source_url)
+            else:
+                settings["wake_word_url"] = wake_package_proxy.register_manifest(service_url, mww_source_url)
         if oww_source_url and not paired_custom_bundle:
             settings["oww_wake_word_url"] = wake_package_proxy.register_bundle(service_url, oww_source_url)
         if nww_source_url and not paired_custom_bundle:
