@@ -13,15 +13,6 @@
 
 ---
 
-## New in Tater 3
-
-A redesigned charcoal workspace, focused model/satellite settings, richer Core
-editors, an interactive Spudex terminal, smoother popup effects and improved
-Sat Chat/firmware handling. See the [release notes](macos/Tater/RELEASE_NOTES.md).
-
-Echo 5 requires its own one-time full USB installation; upgrading Tater alone
-does not migrate satellite kernels or hardware runtimes.
-
 ## Little Spud Companion App
 
 Little Spud connects to your Tater Spud Hub for chat, TTS, STT, and notifications from your iOS or Android device.
@@ -40,53 +31,37 @@ Little Spud connects to your Tater Spud Hub for chat, TTS, STT, and notification
 
 ---
 
-## Tater Bench
+## Tater Voice Satellites
 
-Tater Bench compares local models using repeatable Tater-style accuracy and performance tests across engines, speculative decoding modes, and hardware.
+Bring Tater into every room with a dedicated voice satellite. Wake-word
+detection, microphone capture and speaker playback run on the satellite;
+Tater handles speech recognition, conversation, tools and spoken replies.
+Pair and manage your devices from Tater's Voice settings, with wake words,
+volume, device preferences and firmware updates where supported.
 
-<p>
-  <a href="https://tatertotterson.github.io/TaterBench/">
-    <img alt="View Tater Bench model results" src="https://img.shields.io/badge/Tater%20Bench-View%20Model%20Results-FF7A18?style=for-the-badge&logo=githubpages&logoColor=white" />
-  </a>
-</p>
+Choose the firmware or runtime for your hardware:
 
----
+- **[Tater Native Firmware](https://github.com/TaterTotterson/Tater-Native-Firmware)**
+  — ESP32-S3 satellites: Voice PE, Satellite1, ReSpeaker XVF3800 and
+  ESP32-S3-BOX-3.
+- **[Tater Echo Firmware](https://github.com/TaterTotterson/Tater-Echo-Firmware)**
+  — Supported, unlocked Amazon Echo, Dot, Show and Spot models. Check the
+  repository for exact generations and installation requirements.
+- **[Tater Linux Satellite](https://github.com/TaterTotterson/Tater-Linux-Satellite)**
+  — Turn a Linux computer, Raspberry Pi or custom device with a microphone and
+  speaker into a Tater satellite.
+- **[Tater ThirdReality Voice Firmware](https://github.com/TaterTotterson/Tater-ThirdReality-Voice-Firmware)**
+  — Native Tater voice and music on the ThirdReality Voice & Music Assistant
+  (S420).
 
-## 🧩 Tater Architecture
+Depending on the device, satellites also support local timers, announcements,
+continued conversation, synchronized music, Sat Chat audio/video calls, and
+on-screen weather, notifications and media controls.
 
-Tater is built around a modular system:
-
-- **Cores** → core systems that extend Tater's capabilities
-- **Portals** → integrations with platforms like Discord, Home Assistant, and more
-- **Verbas** → AI-driven tools and actions Tater can perform
-- **Integrations** → modular provider packages for devices, services, search providers, and external APIs
-
-### Tater Shop
-
-Tater Shop manages the catalogs, versions, metadata, and updates for Tater Cores, Portals, and Verbas.
-
-Core-owned Redis keys must use the Core's canonical namespace: `<core_id>:` or
-`<module_key>:`. Standard `<module_key>_settings` and running-state keys are
-handled separately. The **Delete data** uninstall option removes those
-namespaces automatically. Shared platform namespaces such as `tater:` are not
-inferred from a downloaded Core;
-historical official exceptions are explicitly audited in `tateros/core_store.py`.
-
-<p>
-  <a href="https://github.com/TaterTotterson/Tater_Shop">
-    <img alt="Browse Tater Shop" src="https://img.shields.io/badge/Tater%20Shop-Browse%20Extensions-FF7A18?style=for-the-badge&logo=github&logoColor=white" />
-  </a>
-</p>
-
-### Tater Integrations
-
-Tater Integrations provides modular packages for devices, services, search providers, and external APIs.
-
-<p>
-  <a href="https://github.com/TaterTotterson/Tater_Integrations">
-    <img alt="Browse Tater Integrations" src="https://img.shields.io/badge/Tater%20Integrations-Browse%20Packages-FF7A18?style=for-the-badge&logo=github&logoColor=white" />
-  </a>
-</p>
+Prefer Home Assistant Assist? The
+**[Tater Home Assistant Satellites bridge](https://github.com/TaterTotterson/Tater-Home-Assistant-Satellites)**
+connects compatible satellites directly to Home Assistant without requiring
+the Tater app.
 
 ---
 
