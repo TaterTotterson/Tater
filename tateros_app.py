@@ -424,8 +424,9 @@ SPUD_LINK_SERVER_MODE_CHOICES = {
 SPUD_LINK_PAIRING_TTL_SECONDS = 10 * 60
 SPUD_LINK_ACTIVE_RUN_TTL_SECONDS = 24 * 60 * 60
 WEBUI_POPUP_EFFECT_STYLE_KEY = "tater:webui:popup_effect_style"
-DEFAULT_WEBUI_POPUP_EFFECT_STYLE = "flame"
-WEBUI_POPUP_EFFECT_STYLE_CHOICES = {"disabled", "flame", "dust", "glitch", "portal", "melt"}
+DEFAULT_WEBUI_POPUP_EFFECT_STYLE = "scale"
+WEBUI_POPUP_EFFECT_STYLE_CHOICES = {"disabled", "fade", "scale", "slide", "tilt", "fold"}
+WEBUI_POPUP_EFFECT_STYLE_ALIASES = {"flame": "scale", "dust": "fade", "glitch": "tilt", "portal": "fold", "melt": "slide"}
 WEBUI_THEME_KEY = "tater:webui:theme"
 DEFAULT_WEBUI_THEME = "tater"
 WEBUI_THEME_CHOICES = {"tater", "tater-light", "blueberry", "mint", "grape", "strawberry"}
@@ -1138,9 +1139,11 @@ def _as_bool_flag(value: Any, default: bool = True) -> bool:
 
 def _normalize_popup_effect_style(value: Any, default: str = DEFAULT_WEBUI_POPUP_EFFECT_STYLE) -> str:
     token = str(value or "").strip().lower()
+    token = WEBUI_POPUP_EFFECT_STYLE_ALIASES.get(token, token)
     if token in WEBUI_POPUP_EFFECT_STYLE_CHOICES:
         return token
     fallback = str(default or DEFAULT_WEBUI_POPUP_EFFECT_STYLE).strip().lower()
+    fallback = WEBUI_POPUP_EFFECT_STYLE_ALIASES.get(fallback, fallback)
     return fallback if fallback in WEBUI_POPUP_EFFECT_STYLE_CHOICES else DEFAULT_WEBUI_POPUP_EFFECT_STYLE
 
 
@@ -5037,6 +5040,7 @@ def _discover_runtime_webui_tabs(
                 "order": order,
                 "requires_running": requires_running,
                 "running": bool(runtime.is_running(key)),
+                "workspace": core_registry_module._load_workspace_metadata(tab_cfg.get("workspace")),
             }
         )
         seen_labels.add(label)
@@ -5050,7 +5054,7 @@ def _discover_core_webui_tabs(core_entries: List[Dict[str, Any]]) -> List[Dict[s
         core_entries,
         runtime=core_runtime,
         kind="core",
-        require_desired_running=True,
+        require_desired_running=False,
     )
 
 
@@ -5113,9 +5117,11 @@ def _load_surface_htmlui_tab_payload(tab_spec: Dict[str, Any]) -> Dict[str, Any]
             }
         )
 
-    ui = raw.get("ui")
-    if not isinstance(ui, dict):
-        ui = {}
+    ui = dict(raw.get("ui")) if isinstance(raw.get("ui"), dict) else {}
+    workspace = core_registry_module._load_workspace_metadata(tab_spec.get("workspace"))
+    workspace.update(core_registry_module._load_workspace_metadata(ui.get("workspace")))
+    if workspace:
+        ui["workspace"] = workspace
 
     return {
         "summary": str(raw.get("summary") or "").strip(),
@@ -10459,6 +10465,7 @@ class SpudexSettingsRequest(BaseModel):
 
 
 class SpudexRunRequest(BaseModel):
+    project_id: Optional[str] = None
     command: Optional[str] = None
     argv: List[str] = Field(default_factory=list)
     cwd: Optional[str] = None
@@ -10467,12 +10474,35 @@ class SpudexRunRequest(BaseModel):
 
 
 class SpudexChatRequest(BaseModel):
-    message: str = Field(min_length=1)
+    message: str = ""
     session_id: Optional[str] = None
+    project_id: Optional[str] = None
+    mode: Optional[str] = None
+    resume: bool = False
 
 
 class SpudexChatSessionRequest(BaseModel):
     label: Optional[str] = None
+    project_id: Optional[str] = None
+    mode: str = "build"
+
+
+class SpudexProjectRequest(BaseModel):
+    path: str = Field(min_length=1)
+    name: str = ""
+
+
+class SpudexTerminalRequest(BaseModel):
+    project_id: str = ""
+    cols: int = Field(default=100, ge=20, le=500)
+    rows: int = Field(default=26, ge=5, le=200)
+
+
+class SpudexTerminalInputRequest(BaseModel):
+    data: str = Field(default="", max_length=16384)
+    cols: int = Field(default=0, ge=0, le=500)
+    rows: int = Field(default=0, ge=0, le=200)
+
 
 
 class SpudexFileChangeRequest(BaseModel):
@@ -15688,10 +15718,13 @@ def _spudex_platform_options(settings: Any) -> List[Dict[str, Any]]:
 
 
 @app.get("/api/spudex")
-def get_spudex_state() -> Dict[str, Any]:
+def get_spudex_state(project_id: str = "") -> Dict[str, Any]:
     from spudex.runner import spudex_payload
 
-    payload = spudex_payload(redis_client)
+    try:
+        payload = spudex_payload(redis_client, project_id=project_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     payload["platform_options"] = _spudex_platform_options(payload.get("settings") if isinstance(payload, dict) else {})
     return payload
 
@@ -15708,16 +15741,28 @@ def update_spudex_settings(payload: SpudexSettingsRequest) -> Dict[str, Any]:
 async def run_spudex_command(payload: SpudexRunRequest) -> Dict[str, Any]:
     from spudex.runner import start_spudex_command
 
-    return await start_spudex_command(
+    from spudex.workspace import get_project
+    from spudex.settings import get_spudex_settings
+    from spudex.runner import update_spudex_session
+    project = None
+    if payload.project_id:
+        try:
+            project = get_project(payload.project_id, get_spudex_settings(redis_client).get("default_cwd") or "agent_lab")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+    result = await start_spudex_command(
         command=payload.command,
         argv=payload.argv,
-        cwd=payload.cwd or "",
+        cwd=payload.cwd or (project["path"] if project else ""),
         label=payload.label or "Terminal command",
         source="ui",
         platform="webui",
         redis_client=redis_client,
         background=payload.background,
     )
+    if project and isinstance(result.get("session"), dict):
+        result["session"] = update_spudex_session(result["session"]["id"], project=project)
+    return result
 
 
 @app.post("/api/spudex/chat/session")
@@ -15727,8 +15772,13 @@ def create_spudex_chat_session(payload: SpudexChatSessionRequest) -> Dict[str, A
     from spudex.settings import get_spudex_settings
 
     settings = get_spudex_settings(redis_client)
-    cwd_value = settings.get("default_cwd") or "agent_lab"
-    cwd = resolve_spudex_cwd(cwd_value)
+    from spudex.workspace import get_project, normalize_mode
+    try:
+        project = get_project(payload.project_id or "", settings.get("default_cwd") or "agent_lab")
+        mode = normalize_mode(payload.mode)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    cwd = resolve_spudex_cwd(project["path"])
     label = str(payload.label or "").strip() or "New Terminal chat"
     session = create_spudex_session(
         label=label,
@@ -15737,7 +15787,7 @@ def create_spudex_chat_session(payload: SpudexChatSessionRequest) -> Dict[str, A
         source="spudex_chat",
         platform="webui",
     )
-    session = update_spudex_session(str(session.get("id") or ""), status="draft", cwd=str(cwd), cwd_display=display_agent_path(cwd))
+    session = update_spudex_session(str(session.get("id") or ""), status="draft", cwd=str(cwd), cwd_display=display_agent_path(cwd), project=project, mode=mode)
     append_session_log(
         str(session.get("id") or ""),
         stream="system",
@@ -15754,34 +15804,14 @@ async def run_spudex_chat(payload: SpudexChatRequest) -> Dict[str, Any]:
     from spudex.runner import append_session_log, create_spudex_session, finish_spudex_plan, get_spudex_session, register_spudex_task, update_spudex_session
     from spudex.settings import spudex_llm_overrides, get_spudex_settings
 
-    message = str(payload.message or "").strip()
-    if not message:
-        raise HTTPException(status_code=400, detail="Terminal chat message is required.")
+    from spudex.workspace import prepare_task
     settings = get_spudex_settings(redis_client)
-    cwd_value = settings.get("default_cwd") or "agent_lab"
-    cwd = resolve_spudex_cwd(cwd_value)
-    wanted_session_id = str(payload.session_id or "").strip()
-    session = get_spudex_session(wanted_session_id) if wanted_session_id else {}
-    if session and str(session.get("source") or "").strip().lower() != "spudex_chat":
-        session = {}
-    if session and str(session.get("status") or "").strip().lower() == "running":
-        raise HTTPException(status_code=409, detail="Terminal chat session is already running. Wait for it to finish or stop it first.")
-    if not session:
-        session = create_spudex_session(
-            label=f"Terminal chat: {message[:80]}",
-            cwd=str(cwd),
-            goal=message,
-            source="spudex_chat",
-            platform="webui",
-        )
-    else:
-        session = update_spudex_session(
-            str(session.get("id") or ""),
-            label=f"Terminal chat: {message[:80]}",
-            cwd=str(cwd),
-            cwd_display=display_agent_path(cwd),
-            goal=message,
-        )
+    try:
+        session, message = prepare_task(message=str(payload.message or "").strip(), session_id=payload.session_id or "", project_id=payload.project_id or "", mode=payload.mode, resume=payload.resume, default_cwd=settings.get("default_cwd") or "agent_lab")
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
     async def _run() -> None:
         try:
@@ -15800,6 +15830,8 @@ async def run_spudex_chat(payload: SpudexChatRequest) -> Dict[str, Any]:
                     platform="webui",
                     llm_client=llm_client,
                     redis_client=redis_client,
+                    mode=session["mode"],
+                    resume=payload.resume,
                 )
             if not bool(result.get("ok")):
                 err = result.get("error") if isinstance(result.get("error"), dict) else {}
@@ -15846,10 +15878,63 @@ async def run_spudex_chat(payload: SpudexChatRequest) -> Dict[str, Any]:
 
 
 @app.get("/api/spudex/sessions/{session_id}/logs")
-def get_spudex_session_logs(session_id: str, after_seq: int = 0, limit: int = 200) -> Dict[str, Any]:
+def get_spudex_session_logs(session_id: str, after_seq: int = 0, limit: int = 200, tail: bool = False, before_seq: int = 0) -> Dict[str, Any]:
     from spudex.runner import read_spudex_logs
 
-    return read_spudex_logs(session_id, after_seq=after_seq, limit=limit)
+    return read_spudex_logs(session_id, after_seq=after_seq, limit=limit, tail=tail, before_seq=before_seq)
+
+
+@app.post("/api/spudex/projects")
+def add_spudex_project(payload: SpudexProjectRequest) -> Dict[str, Any]:
+    from spudex.workspace import add_project
+    from spudex.settings import get_spudex_settings
+    try:
+        project = add_project(payload.path, payload.name, get_spudex_settings(redis_client).get("default_cwd") or "agent_lab")
+    except (ValueError, OSError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"ok": True, "project": project}
+
+
+@app.get("/api/spudex/projects/{project_id}/changes")
+def get_spudex_project_changes(project_id: str) -> Dict[str, Any]:
+    from spudex.workspace import get_project, project_changes
+    from spudex.settings import get_spudex_settings
+    try:
+        project = get_project(project_id, get_spudex_settings(redis_client).get("default_cwd") or "agent_lab")
+        return project_changes(project)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/api/spudex/sessions/{session_id}/events")
+async def stream_spudex_session(request: Request, session_id: str, after_seq: int = 0) -> StreamingResponse:
+    from spudex.events import session_events
+    from spudex.runner import get_spudex_session
+    if not get_spudex_session(session_id):
+        raise HTTPException(status_code=404, detail="Terminal session was not found.")
+    return StreamingResponse(session_events(request, session_id, after_seq), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@app.post("/api/spudex/terminal")
+async def open_spudex_terminal(payload: SpudexTerminalRequest) -> Dict[str, Any]:
+    from spudex.terminal import start_terminal
+    try:
+        return await start_terminal(project_id=payload.project_id, cols=payload.cols, rows=payload.rows, redis_client=redis_client)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except (ValueError, OSError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/spudex/terminal/{session_id}/input")
+async def input_spudex_terminal(session_id: str, payload: SpudexTerminalInputRequest) -> Dict[str, Any]:
+    from spudex.terminal import write_terminal
+    try:
+        return await write_terminal(session_id, payload.data, cols=payload.cols, rows=payload.rows, redis_client=redis_client)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except (ValueError, OSError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 @app.post("/api/spudex/sessions/{session_id}/file-changes/approve")
@@ -23577,7 +23662,7 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
 
     if "popup_effect_style" in updates:
         raw_style = str(updates.get("popup_effect_style") or "").strip().lower()
-        if raw_style and raw_style not in WEBUI_POPUP_EFFECT_STYLE_CHOICES:
+        if raw_style and raw_style not in WEBUI_POPUP_EFFECT_STYLE_CHOICES and raw_style not in WEBUI_POPUP_EFFECT_STYLE_ALIASES:
             allowed = ", ".join(sorted(WEBUI_POPUP_EFFECT_STYLE_CHOICES))
             raise HTTPException(status_code=400, detail=f"popup_effect_style must be one of: {allowed}")
         normalized_style = _normalize_popup_effect_style(raw_style, default=DEFAULT_WEBUI_POPUP_EFFECT_STYLE)

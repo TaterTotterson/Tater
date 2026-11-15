@@ -1,375 +1,214 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from "vue";
-import ChatMessage from "../chat/components/ChatMessage.vue";
-import type { ChatMessage as ChatMessageType } from "../chat/types";
-import { getJson, postJson, responseJson } from "../shared/api";
-import PopupTransition from "../shared/PopupTransition.vue";
-import type { JsonRow, SpudexMountOptions, SpudexPayload } from "./types";
+import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, reactive, ref, watch } from 'vue';
+import ChatMessage from '../chat/components/ChatMessage.vue';
+import UiIcon from '../shared/UiIcon.vue';
+import PopupTransition from '../shared/PopupTransition.vue';
+import { getJson, postJson, responseJson } from '../shared/api';
+import InteractiveTerminal from './InteractiveTerminal.vue';
+import TaskNavigation from './TaskNavigation.vue';
+import { isActive, mergeLogRows, sessionProjectId, statusLabel, taskFeed, taskMode } from './workspace';
+import type { TaskMode } from './workspace';
+import type { JsonRow, SpudexMountOptions, SpudexPayload } from './types';
 
-const props = defineProps<{ state: { payload: SpudexPayload }; options: SpudexMountOptions }>();
-const tabs = [
-  { id: "workbench", label: "Workbench" },
-  { id: "manual", label: "Manual Session" },
-  { id: "settings", label: "Settings" },
-];
-
-const activeTab = ref(normalizeTab(props.options.initialTab));
-const selectedSessionId = ref(text(props.options.initialSessionId));
-const manualSessionId = ref(text(props.options.initialManualSessionId));
-const logs = ref<JsonRow[]>([]);
-const logCursor = ref(0);
-const manualLogs = ref<JsonRow[]>([]);
-const manualLogCursor = ref(0);
-const chatMessage = ref("");
-const command = ref("");
-const manualCwd = ref("agent_lab");
-const manualCwdDisplay = ref("~");
-const background = ref(false);
-const busy = ref("");
-const error = ref("");
-const notice = ref("");
-const detailsOpen = ref(false);
-const settingsDirty = ref(false);
-const settingsDraft = reactive<JsonRow>({});
-let pollTimer = 0;
-let pollInFlight = false;
-
-const payload = computed(() => props.state.payload || {});
-const sessions = computed(() => Array.isArray(payload.value.sessions) ? payload.value.sessions : []);
-const manualSessions = computed(() => sessions.value.filter((session: JsonRow) => canonical(session.source) === "ui"));
-const modelProcesses = computed(() => Array.isArray(payload.value.model_processes) ? payload.value.model_processes : []);
-const selectedSession = computed(() => sessions.value.find((session: JsonRow) => text(session.id) === selectedSessionId.value) || null);
-const selectedManualSession = computed(() => manualSessions.value.find((session: JsonRow) => text(session.id) === manualSessionId.value) || null);
-const detailSession = computed(() => activeTab.value === "manual" ? selectedManualSession.value : selectedSession.value);
-const activeCount = computed(() => Number(payload.value.active_count || sessions.value.filter(isActive).length));
-const modelProcessCount = computed(() => Number(payload.value.model_process_count || modelProcesses.value.length));
-const selectedActive = computed(() => isActive(selectedSession.value));
-const manualActive = computed(() => isActive(selectedManualSession.value));
-const currentChatSession = computed(() => canonical(selectedSession.value?.source) === "spudex_chat" ? selectedSession.value : null);
-const chatBusy = computed(() => Boolean(busy.value === "chat" || isActive(currentChatSession.value)));
-const platformOptions = computed(() => normalizePlatforms(payload.value.platform_options, settingsDraft.allowed_platforms));
-const chatMessages = computed<ChatMessageType[]>(() => {
-  const rows = logs.value.map((entry: JsonRow) => {
-    const stream = canonical(entry.stream);
-    const body = text(entry.text);
-    if (!body) return null;
-    if (stream === "user") return { role: "user", username: props.options.profile?.username, content: body };
-    if (stream === "assistant") return { role: "assistant", content: body };
-    return null;
-  }).filter(Boolean) as ChatMessageType[];
-  return chatBusy.value ? [...rows.slice(-20), { role: "assistant", content: { marker: "typing" } }] : rows.slice(-20);
+const props=defineProps<{state:{payload:SpudexPayload};options:SpudexMountOptions}>();
+const payload=computed(()=>props.state.payload||{});
+const sessions=computed<JsonRow[]>(()=>Array.isArray(payload.value.sessions)?payload.value.sessions:[]);
+const projects=computed<JsonRow[]>(()=>Array.isArray(payload.value.projects)?payload.value.projects:[]);
+const initialSession=sessions.value.find(row=>String(row.id)===props.options.initialSessionId);
+const selectedProjectId=ref(String(initialSession?sessionProjectId(initialSession,projects.value):props.options.initialProjectId||payload.value.project?.id||projects.value[0]?.id||''));
+const selectedSessionId=ref(props.options.initialSessionId||'');
+const manualSessionId=ref(props.options.initialManualSessionId||'');
+const activeTab=ref(normalizeTab(props.options.initialTab));
+const shellTab=ref<'output'|'commands'|'interactive'>('commands');
+const mode=ref<TaskMode>(taskMode(initialSession?.mode));
+const project=computed<JsonRow>(()=>projects.value.find(row=>row.id===selectedProjectId.value)||payload.value.project||{});
+const selectedSession=computed(()=>sessions.value.find(row=>String(row.id)===selectedSessionId.value)||null);
+const selectedManualSession=computed(()=>sessions.value.find(row=>String(row.id)===manualSessionId.value)||null);
+const detailSession=computed(()=>activeTab.value==='manual'?selectedManualSession.value:selectedSession.value);
+const allTasks=ref(false);
+const codingSessions=computed(()=>sessions.value.filter(row=>!['ui','interactive'].includes(row.source)));
+const visibleTasks=computed(()=>allTasks.value?sessions.value:codingSessions.value.filter(row=>sessionProjectId(row,projects.value)===selectedProjectId.value));
+const manualSessions=computed(()=>sessions.value.filter(row=>['ui','interactive'].includes(row.source)&&(row.id===manualSessionId.value||sessionProjectId(row,projects.value)===selectedProjectId.value)));
+const modelProcesses=computed<JsonRow[]>(()=>Array.isArray(payload.value.model_processes)?payload.value.model_processes:[]);
+const selectedActive=computed(()=>isActive(selectedSession.value));
+const manualActive=computed(()=>isActive(selectedManualSession.value));
+const visibleSession=computed(()=>activeTab.value==='manual'&&shellTab.value!=='output'?selectedManualSession.value:selectedSession.value);
+const visibleActive=computed(()=>isActive(visibleSession.value));
+const canContinue=computed(()=>selectedSession.value?.source==='spudex_chat'&&!selectedActive.value&&['incomplete','stopped','failed','blocked','queued','running'].includes(String(selectedSession.value?.status)));
+const drafts=reactive<Record<string,string>>({});
+const projectTasks=reactive<Record<string,string>>({});
+const draftKey=computed(()=>selectedSession.value?.source==='spudex_chat'?selectedSessionId.value:`new:${selectedProjectId.value}`);
+const chatMessage=computed({get:()=>drafts[draftKey.value]||'',set:value=>{drafts[draftKey.value]=value;}});
+const busy=ref('');const error=ref('');const notice=ref('');
+const logs=ref<JsonRow[]>([]);const logCursor=ref(0);const hasOlder=ref(false);
+const manualLogs=ref<JsonRow[]>([]);const manualLogCursor=ref(0);const hasOlderManual=ref(false);
+const feed=computed(()=>taskFeed(logs.value));
+const nonChatLogs=computed(()=>logs.value.filter(row=>!['user','assistant'].includes(String(row.stream))));
+const command=ref('');const background=ref(false);
+const manualCwd=ref(text(project.value.path)||'agent_lab');const manualCwdDisplay=ref(manualCwd.value);
+const settingsDraft=reactive<JsonRow>({});const settingsDirty=ref(false);
+const platformOptions=computed(()=>normalizePlatforms(payload.value.platform_options,settingsDraft.allowed_platforms));
+const liveStatus=computed(()=>selectedSession.value?.progress?.text||statusLabel(selectedSession.value?.status));
+const currentChatSession=computed(()=>selectedSession.value?.source==='spudex_chat'?selectedSession.value:null);
+const chatBusy=computed(()=>busy.value==='chat'||selectedActive.value);
+const projectsOpen=ref(false);const taskDrawer=ref(false);const detailsOpen=ref(false);
+const pendingClose=ref<JsonRow|null>(null);
+const projectPath=ref('');const projectName=ref('');const projectError=ref('');
+const sidebarTarget=ref<HTMLElement|null>(null);
+const changes=ref<JsonRow>({files:[]});const changesError=ref('');const selectedFile=ref('');
+const reviewFiles=computed<JsonRow[]>(()=>{
+  const rows:JsonRow[]=(changes.value.files||[]).map((row:JsonRow)=>({...row,source:'git'}));
+  const latest=new Map<string,JsonRow>();
+  for(const row of selectedSession.value?.file_changes||[])latest.set(String(row.path),row);
+  for(const row of latest.values())if(row.pending||(!changes.value.ok&&!row.rejected_ts))rows.push({...row,name:row.path_display||row.path,source:'task',id:`task:${row.id}`});
+  return rows;
 });
-const nonChatLogs = computed(() => logs.value.filter((entry: JsonRow) => !["user", "assistant"].includes(canonical(entry.stream))));
-const liveStatus = computed(() => {
-  const session = currentChatSession.value || selectedSession.value;
-  if (busy.value === "chat") return "Starting Terminal chat…";
-  if (!session) return activeCount.value ? `${activeCount.value} active Terminal process${activeCount.value === 1 ? "" : "es"}` : "Ready for a Terminal task.";
-  const plan = Array.isArray(session.plan) ? session.plan : [];
-  const current = plan.find((row: JsonRow) => canonical(row.status) === "in_progress");
-  if (current?.step) return `Working: ${current.step}`;
-  return `${statusLabel(session.status)}${text(session.label || session.command || session.goal) ? `: ${text(session.label || session.command || session.goal)}` : ""}`;
-});
+const displayedFile=computed(()=>reviewFiles.value.find(row=>row.id===selectedFile.value)||reviewFiles.value[0]||null);
+const diffLines=computed(()=>String(displayedFile.value?.diff||'No text diff is available.').split('\n'));
+const taskPlan=computed<JsonRow[]>(()=>Array.isArray(selectedSession.value?.plan)?selectedSession.value!.plan:[]);
+const verification=computed(()=>selectedSession.value?.verification||null);
+const taskLive=ref(false);const manualLive=ref(false);
+let taskStream:EventSource|null=null;let manualStream:EventSource|null=null;
+let taskEpoch=0;let manualEpoch=0;let projectEpoch=0;
+let pollTimer=0;let changesTimer=0;let polling=false;let suspended=false;let disposed=false;let initialized=false;
+let changesRequest:AbortController|null=null;let rootRequest:AbortController|null=null;
+const projectsEndpoint=computed(()=>props.options.endpoints.projects||`${props.options.endpoints.root}/projects`);
+const terminalEndpoint=computed(()=>props.options.endpoints.terminal||`${props.options.endpoints.root}/terminal`);
 
-function text(value: unknown): string { return String(value ?? "").trim(); }
-function canonical(value: unknown): string { return text(value).toLowerCase(); }
-function encode(value: unknown): string { return encodeURIComponent(text(value)); }
-function normalizeTab(value: unknown): string { const token = canonical(value); return token === "manual" || token === "settings" || token === "policy" ? (token === "policy" ? "settings" : token) : "workbench"; }
-function isActive(session: JsonRow | null | undefined): boolean { const status = canonical(session?.status); return Boolean(session?.active) || status === "running" || status === "queued"; }
-function statusLabel(value: unknown): string {
-  const token = canonical(value) || "queued";
-  const labels: Record<string, string> = { succeeded: "Done", completed: "Complete", failed: "Failed", running: "Running", blocked: "Blocked", timeout: "Timeout", stopped: "Stopped", incomplete: "Incomplete", queued: "Queued", draft: "Draft" };
-  return labels[token] || token.replaceAll("_", " ").replace(/^./, (letter) => letter.toUpperCase());
+function text(value:unknown){return String(value??'').trim();}
+function canonical(value:unknown){return text(value).toLowerCase();}
+function normalizeTab(value:unknown){return value==='manual'||value==='shell'?'manual':value==='settings'||value==='policy'?'settings':value==='changes'?'changes':'workbench';}
+function sessionEndpoint(id:string,suffix=''){return `${props.options.endpoints.sessions}/${encodeURIComponent(id)}${suffix}`;}
+function notify(message:string,tone='success'){notice.value=tone==='error'?'':message;error.value=tone==='error'?message:'';props.options.onToast?.(message,tone);}
+function relativeTime(value:unknown){const seconds=Math.max(0,Math.floor(Date.now()/1000-Number(value||0)));return seconds<60?`${seconds}s ago`:seconds<3600?`${Math.floor(seconds/60)}m ago`:`${Math.floor(seconds/3600)}h ago`;}
+function normalizePlatforms(raw:unknown,allowedRaw:unknown):JsonRow[]{
+  const allowed=new Set((Array.isArray(allowedRaw)?allowedRaw:['webui']).map(canonical).filter(Boolean));
+  const rows=new Map<string,JsonRow>();
+  for(const row of Array.isArray(raw)?raw:[])if(row.value)rows.set(canonical(row.value),row);
+  for(const value of allowed)if(!rows.has(value))rows.set(value,{value,label:value==='all'?'All platforms':value,description:'Saved platform, currently stopped',running:value==='all'});
+  return [...rows.values()];
 }
-function relativeTime(value: unknown): string {
-  const raw = Number(value || 0);
-  if (!raw) return "";
-  const seconds = Math.max(0, Math.floor(Date.now() / 1000 - raw));
-  if (seconds < 60) return `${seconds}s ago`;
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
-  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
-  return `${Math.floor(seconds / 86400)}d ago`;
+function syncSettings(force=false){if(settingsDirty.value&&!force)return;const source=payload.value.settings||{};Object.assign(settingsDraft,{enabled:Boolean(source.enabled),full_access:Boolean(source.full_access),allowed_platforms:Array.isArray(source.allowed_platforms)?[...source.allowed_platforms]:['webui'],default_cwd:text(source.default_cwd||'agent_lab'),max_task_steps:Number(source.max_task_steps||6),command_timeout_sec:Number(source.command_timeout_sec||45)});settingsDirty.value=false;}
+function setTab(tab:string){activeTab.value=normalizeTab(tab);detailsOpen.value=false;props.options.onTabChange?.(activeTab.value);}
+function mergeSession(session:JsonRow){if(!session?.id)return;const rows=sessions.value;props.state.payload={...payload.value,sessions:rows.some(row=>row.id===session.id)?rows.map(row=>row.id===session.id?session:row):[session,...rows]};}
+function ensureSelections(){
+  if(!projects.value.some(row=>row.id===selectedProjectId.value))selectedProjectId.value=String(payload.value.project?.id||projects.value[0]?.id||'');
+  if(!initialized&&(!selectedSessionId.value||!sessions.value.some(row=>row.id===selectedSessionId.value)))selectedSessionId.value=String(codingSessions.value.find(row=>sessionProjectId(row,projects.value)===selectedProjectId.value)?.id||'');
+  if(manualSessionId.value&&!manualSessions.value.some(row=>row.id===manualSessionId.value))manualSessionId.value='';
+  if(!manualSessionId.value)manualSessionId.value=String(manualSessions.value.find(row=>row.source==='interactive'&&isActive(row))?.id||manualSessions.value[0]?.id||'');
+  if(initialized&&selectedSessionId.value&&!sessions.value.some(row=>row.id===selectedSessionId.value))selectedSessionId.value='';
+  initialized=true;
 }
-function mergeLogRows(current: JsonRow[], incoming: JsonRow[], reset: boolean): JsonRow[] {
-  const rows = reset ? [] : [...current];
-  const keyFor = (entry: JsonRow) => `${entry._session_id ?? ""}\u0000${text(entry.seq) || `${entry.ts ?? ""}\u0000${entry.stream ?? ""}\u0000${entry.text ?? ""}`}`;
-  const seen = new Set(rows.map(keyFor));
-  incoming.forEach((entry) => {
-    const key = keyFor(entry);
-    if (seen.has(key)) return;
-    seen.add(key);
-    rows.push(entry);
-  });
-  return rows.slice(-1000);
+function selectSession(id:string,load=true){selectedSessionId.value=id;props.options.onSessionChange?.(id);taskDrawer.value=false;const session=sessions.value.find(row=>row.id===id);mode.value=taskMode(session?.mode);if(session&&!['ui','interactive'].includes(session.source))projectTasks[sessionProjectId(session,projects.value)]=id;const idProject=session?sessionProjectId(session,projects.value):'';if(idProject&&idProject!==selectedProjectId.value){selectedProjectId.value=idProject;projectEpoch++;props.options.onProjectChange?.(idProject);void refreshState(true);void refreshChanges();}if(!load)return;if(session&&['ui','interactive'].includes(session.source)){selectManualSession(id);setTab('manual');}else setTab('workbench');}
+function selectManualSession(id:string){manualSessionId.value=id;props.options.onManualSessionChange?.(id);const row=manualSessions.value.find(item=>item.id===id);if(row){manualCwd.value=text(row.cwd)||project.value.path||'agent_lab';manualCwdDisplay.value=text(row.cwd_display)||manualCwd.value;shellTab.value=row.source==='interactive'?'interactive':'commands';}}
+function selectShellTab(value:string){shellTab.value=value as typeof shellTab.value;if(value==='output')return;const source=value==='interactive'?'interactive':'ui';if(selectedManualSession.value?.source!==source){const session=manualSessions.value.find(row=>row.source===source);manualSessionId.value=String(session?.id||'');props.options.onManualSessionChange?.(manualSessionId.value);manualCwd.value=text(session?.cwd)||project.value.path||'agent_lab';manualCwdDisplay.value=text(session?.cwd_display)||manualCwd.value;}}
+async function chooseProject(id:string){if(id===selectedProjectId.value){projectsOpen.value=false;return;}projectTasks[selectedProjectId.value]=selectedSessionId.value;projectEpoch++;selectedProjectId.value=id;props.options.onProjectChange?.(id);projectsOpen.value=false;changes.value={files:[]};selectedFile.value='';manualSessionId.value='';manualCwd.value=project.value.path||'agent_lab';manualCwdDisplay.value=manualCwd.value;selectSession(String(codingSessions.value.find(row=>row.id===projectTasks[id]&&sessionProjectId(row,projects.value)===id)?.id||codingSessions.value.find(row=>sessionProjectId(row,projects.value)===id)?.id||''));await Promise.all([refreshState(true),refreshChanges()]);}
+async function addProject(){busy.value='project';projectError.value='';try{const result=await postJson<JsonRow>(projectsEndpoint.value,{path:projectPath.value,name:projectName.value});props.state.payload={...payload.value,projects:[...projects.value.filter(row=>row.id!==result.project.id),result.project]};await chooseProject(result.project.id);projectPath.value='';projectName.value='';}catch(err){projectError.value=err instanceof Error?err.message:'Project could not be opened.';}finally{busy.value='';}}
+async function refreshState(quiet=false){
+  if(!quiet)busy.value='refresh';const epoch=projectEpoch;rootRequest?.abort();const controller=new AbortController();rootRequest=controller;
+  try{const result=await getJson<SpudexPayload>(`${props.options.endpoints.root}?project_id=${encodeURIComponent(selectedProjectId.value)}`,{signal:controller.signal});if(disposed||epoch!==projectEpoch)return;const recent=new Map(sessions.value.map(row=>[row.id,row]));result.sessions=(result.sessions||[]).map(row=>Number(recent.get(row.id)?.updated_ts)>Number(row.updated_ts)?recent.get(row.id)!:row);props.state.payload=result;ensureSelections();syncSettings();}
+  catch(err){if(!controller.signal.aborted&&!quiet)notify(err instanceof Error?err.message:'Terminal refresh failed.','error');}
+  finally{if(!quiet&&busy.value==='refresh')busy.value='';}
 }
-function normalizePlatforms(raw: unknown, allowedRaw: unknown): JsonRow[] {
-  const allowed = new Set((Array.isArray(allowedRaw) ? allowedRaw : ["webui"]).map(canonical).filter(Boolean));
-  const map = new Map<string, JsonRow>();
-  (Array.isArray(raw) ? raw : []).forEach((row: JsonRow) => { const value = canonical(row.value); if (value && !map.has(value)) map.set(value, { ...row, value }); });
-  allowed.forEach((value) => { if (!map.has(value)) map.set(value, { value, label: value === "all" ? "All platforms" : value.replaceAll("_", " "), description: "Saved platform, currently stopped", running: value === "all" }); });
-  if (!map.size) map.set("webui", { value: "webui", label: "Web UI", description: "Tater browser UI", running: true });
-  return [...map.values()];
+async function refreshChanges(){
+  if(!selectedProjectId.value)return;changesRequest?.abort();const controller=new AbortController();changesRequest=controller;const epoch=projectEpoch;
+  try{const result=await getJson<JsonRow>(`${projectsEndpoint.value}/${encodeURIComponent(selectedProjectId.value)}/changes`,{signal:controller.signal});if(disposed||epoch!==projectEpoch)return;changes.value=result;changesError.value='';}
+  catch(err){if(!controller.signal.aborted&&epoch===projectEpoch)changesError.value=err instanceof Error?err.message:'Changes could not be loaded.';}
 }
-function notify(message: string, tone = "success") { notice.value = message; error.value = tone === "error" ? message : ""; props.options.onToast?.(message, tone); }
-function sessionEndpoint(sessionId: string, suffix = ""): string { return `${props.options.endpoints.sessions}/${encode(sessionId)}${suffix}`; }
-async function requestDelete(endpoint: string): Promise<JsonRow> { return responseJson<JsonRow>(await fetch(endpoint, { method: "DELETE", credentials: "same-origin", headers: { Accept: "application/json" } })); }
-
-function syncSettings(force = false) {
-  if (settingsDirty.value && !force) return;
-  const source = payload.value.settings || {};
-  Object.assign(settingsDraft, {
-    enabled: Boolean(source.enabled),
-    full_access: Boolean(source.full_access),
-    allowed_platforms: Array.isArray(source.allowed_platforms) ? [...source.allowed_platforms] : ["webui"],
-    default_cwd: text(source.default_cwd || "agent_lab"),
-    max_task_steps: Number(source.max_task_steps || 6),
-    command_timeout_sec: Number(source.command_timeout_sec || 45),
-  });
-  settingsDirty.value = false;
+function scheduleChanges(){window.clearTimeout(changesTimer);changesTimer=window.setTimeout(()=>void refreshChanges(),350);}
+async function refreshLogs(reset=false){const id=selectedSessionId.value;if(!id){logs.value=[];logCursor.value=0;hasOlder.value=false;return;}const epoch=taskEpoch;const result=await getJson<JsonRow>(`${sessionEndpoint(id,'/logs')}?${reset?'tail=true':`after_seq=${logCursor.value}`}&limit=250`);if(disposed||id!==selectedSessionId.value||epoch!==taskEpoch)return;logs.value=mergeLogRows(logs.value,result.entries||[],reset);logCursor.value=Math.max(reset?0:logCursor.value,Number(result.last_seq)||0);if(reset)hasOlder.value=Boolean(result.has_more);await scrollFeed(reset);}
+async function refreshManualLogs(reset=false){const id=manualSessionId.value;if(!id){manualLogs.value=[];manualLogCursor.value=0;hasOlderManual.value=false;return;}const epoch=manualEpoch;const result=await getJson<JsonRow>(`${sessionEndpoint(id,'/logs')}?${reset?'tail=true':`after_seq=${manualLogCursor.value}`}&limit=500`);if(disposed||id!==manualSessionId.value||epoch!==manualEpoch)return;manualLogs.value=mergeLogRows(manualLogs.value,result.entries||[],reset);manualLogCursor.value=Math.max(reset?0:manualLogCursor.value,Number(result.last_seq)||0);if(reset)hasOlderManual.value=Boolean(result.has_more);await nextTick();const panel=document.querySelector('.txw-command-output');if(panel instanceof HTMLElement&&(reset||panel.scrollHeight-panel.scrollTop-panel.clientHeight<120))panel.scrollTop=panel.scrollHeight;}
+async function olderLogs(manual=false){const rows=manual?manualLogs.value:logs.value;const id=manual?manualSessionId.value:selectedSessionId.value;if(!id||!rows.length)return;const result=await getJson<JsonRow>(`${sessionEndpoint(id,'/logs')}?tail=true&before_seq=${rows[0].seq}&limit=250`);if(id!==(manual?manualSessionId.value:selectedSessionId.value))return;if(manual){manualLogs.value=mergeLogRows(manualLogs.value,result.entries||[]);hasOlderManual.value=Boolean(result.has_more);}else{const panel=document.querySelector('.txw-feed');const height=panel?.scrollHeight||0;logs.value=mergeLogRows(logs.value,result.entries||[]);hasOlder.value=Boolean(result.has_more);await nextTick();if(panel instanceof HTMLElement)panel.scrollTop+=panel.scrollHeight-height;}}
+async function scrollFeed(reset=false){const panel=document.querySelector('.txw-feed');const near=panel instanceof HTMLElement&&panel.scrollHeight-panel.scrollTop-panel.clientHeight<140;await nextTick();if(panel instanceof HTMLElement&&(reset||near))panel.scrollTop=panel.scrollHeight;}
+function closeStreams(){taskStream?.close();manualStream?.close();taskStream=null;manualStream=null;taskLive.value=false;manualLive.value=false;}
+function connectStream(id:string,manual=false){if(!id||suspended||disposed||typeof EventSource==='undefined')return;const epoch=manual?manualEpoch:taskEpoch;const cursor=manual?manualLogCursor.value:logCursor.value;if(manual)manualStream?.close();else taskStream?.close();const source=new EventSource(`${sessionEndpoint(id,'/events')}?after_seq=${cursor}`);if(manual)manualStream=source;else taskStream=source;
+  const valid=()=>!disposed&&!suspended&&(manual?manualSessionId.value===id&&manualEpoch===epoch:selectedSessionId.value===id&&taskEpoch===epoch);
+  source.onopen=()=>{if(valid())(manual?manualLive:taskLive).value=true;};source.onerror=()=>{if(valid())(manual?manualLive:taskLive).value=false;};source.addEventListener('gone',()=>{source.close();if(valid())void refreshState(true);});
+  source.onmessage=event=>{if(!valid())return;try{const update=JSON.parse(event.data);mergeSession(update.session);if(manual){manualLogs.value=mergeLogRows(manualLogs.value,update.entries||[]);manualLogCursor.value=Math.max(manualLogCursor.value,Number(update.last_seq)||0);const panel=document.querySelector('.txw-command-output');const near=panel instanceof HTMLElement&&panel.scrollHeight-panel.scrollTop-panel.clientHeight<120;void nextTick(()=>{if(panel instanceof HTMLElement&&near)panel.scrollTop=panel.scrollHeight;});}else{logs.value=mergeLogRows(logs.value,update.entries||[]);logCursor.value=Math.max(logCursor.value,Number(update.last_seq)||0);void scrollFeed();if((update.entries||[]).some((row:JsonRow)=>['file','command'].includes(row.stream))||['spudex_step_result','spudex_completed'].includes(update.session?.progress?.phase))scheduleChanges();}}catch{/* Keep the current view during a reconnect. */}};
 }
-function ensureSelections() {
-  if (!sessions.value.some((session: JsonRow) => text(session.id) === selectedSessionId.value)) selectSession(text(sessions.value[0]?.id), false);
-  if (!manualSessions.value.some((session: JsonRow) => text(session.id) === manualSessionId.value)) selectManualSession(text(manualSessions.value[0]?.id), false);
-}
-function setTab(tab: string) { activeTab.value = normalizeTab(tab); detailsOpen.value = false; props.options.onTabChange?.(activeTab.value); }
-function selectSession(id: string, load = true) {
-  const next = text(id);
-  if (next === selectedSessionId.value) return;
-  selectedSessionId.value = next; logs.value = []; logCursor.value = 0; props.options.onSessionChange?.(next);
-  if (load) void refreshLogs(true);
-}
-function selectManualSession(id: string, load = true, preserveLogs = false) {
-  const next = text(id);
-  if (next === manualSessionId.value) return;
-  manualSessionId.value = next; if (!preserveLogs) manualLogs.value = []; manualLogCursor.value = 0; props.options.onManualSessionChange?.(next);
-  if (next) { selectedSessionId.value = next; props.options.onSessionChange?.(next); }
-  if (load) void refreshManualLogs(!preserveLogs);
-}
-
-async function refreshState(quiet = false) {
-  if (!quiet) busy.value = "refresh";
-  try {
-    props.state.payload = await getJson<SpudexPayload>(props.options.endpoints.root);
-    ensureSelections();
-    syncSettings();
-  } catch (requestError) { if (!quiet) notify(requestError instanceof Error ? requestError.message : "Terminal refresh failed.", "error"); }
-  finally { if (!quiet && busy.value === "refresh") busy.value = ""; }
-}
-async function fetchLogs(sessionId: string, after: number): Promise<JsonRow> {
-  return getJson<JsonRow>(`${sessionEndpoint(sessionId, "/logs")}?after_seq=${encode(after)}&limit=500`);
-}
-async function refreshLogs(reset = false) {
-  const id = selectedSessionId.value;
-  if (!id) { logs.value = []; logCursor.value = 0; return; }
-  const result = await fetchLogs(id, reset ? 0 : logCursor.value);
-  const rows = Array.isArray(result.entries) ? result.entries : [];
-  logs.value = mergeLogRows(logs.value, rows, reset);
-  logCursor.value = Number(result.last_seq || (reset ? 0 : logCursor.value));
-  await nextTick();
-  document.querySelectorAll(".tsx-chat-scroll, .tsx-terminal-body").forEach((panel) => {
-    if (panel instanceof HTMLElement && (reset || panel.scrollHeight - panel.scrollTop - panel.clientHeight < 120)) panel.scrollTop = panel.scrollHeight;
-  });
-}
-async function refreshManualLogs(reset = false) {
-  const id = manualSessionId.value;
-  if (!id) { manualLogs.value = []; manualLogCursor.value = 0; return; }
-  const result = await fetchLogs(id, reset ? 0 : manualLogCursor.value);
-  const rows = (Array.isArray(result.entries) ? result.entries : []).map((entry: JsonRow) => ({ ...entry, _session_id: id }));
-  manualLogs.value = mergeLogRows(manualLogs.value, rows, reset);
-  manualLogCursor.value = Number(result.last_seq || (reset ? 0 : manualLogCursor.value));
-  await nextTick();
-  const panel = document.querySelector(".tsx-manual-console-body");
-  if (panel instanceof HTMLElement && (reset || panel.scrollHeight - panel.scrollTop - panel.clientHeight < 100)) panel.scrollTop = panel.scrollHeight;
-}
-async function refreshAll(quiet = false) {
-  await refreshState(quiet);
-  await Promise.all([refreshLogs(false), refreshManualLogs(false)]);
-}
-function schedulePoll() {
-  if (pollTimer) window.clearTimeout(pollTimer);
-  pollTimer = window.setTimeout(async () => {
-    if (!pollInFlight) {
-      pollInFlight = true;
-      try { await refreshAll(true); } catch { /* Keep current live state. */ }
-      finally { pollInFlight = false; }
-    }
-    schedulePoll();
-  }, 2000);
-}
-
-async function sendChat() {
-  const message = chatMessage.value.trim();
-  if (!message) { notify("Enter a Terminal chat message first.", "error"); return; }
-  if (chatBusy.value) { notify("Terminal is still working in this chat.", "error"); return; }
-  busy.value = "chat";
-  try {
-    const sessionId = canonical(selectedSession.value?.source) === "spudex_chat" ? selectedSessionId.value : "";
-    const result = await postJson<JsonRow>(props.options.endpoints.chat, { message, session_id: sessionId || null });
-    const nextId = text(result.session?.id);
-    if (nextId) selectSession(nextId, false);
-    chatMessage.value = "";
-    notify("Terminal task started.");
-    await refreshState(true); await refreshLogs(true);
-  } catch (requestError) { notify(requestError instanceof Error ? requestError.message : "Terminal chat failed.", "error"); }
-  finally { busy.value = ""; }
-}
-async function newChat() {
-  busy.value = "new-chat";
-  try {
-    const result = await postJson<JsonRow>(props.options.endpoints.chatSession, { label: "New Terminal chat" });
-    selectSession(text(result.session?.id), false); chatMessage.value = ""; notify("New Terminal chat created.");
-    await refreshState(true); await refreshLogs(true);
-  } catch (requestError) { notify(requestError instanceof Error ? requestError.message : "New Terminal chat failed.", "error"); }
-  finally { busy.value = ""; }
-}
-async function runCommand() {
-  const value = command.value.trim();
-  if (!value) { notify("Enter a command first.", "error"); return; }
-  busy.value = "run";
-  try {
-    const result = await postJson<JsonRow>(props.options.endpoints.run, { command: value, cwd: manualCwd.value, label: value.slice(0, 80), background: background.value });
-    const id = text(result.session?.id);
-    manualCwd.value = text(result.session?.cwd) || manualCwd.value;
-    manualCwdDisplay.value = text(result.session?.cwd_display) || manualCwdDisplay.value;
-    selectSession(id, false); selectManualSession(id, false, true); command.value = "";
-    notify(result.builtin === "cd" ? `Working directory: ${manualCwdDisplay.value}` : result.builtin ? "Command completed." : "Terminal session started.");
-    await refreshState(true); await Promise.all([refreshLogs(true), refreshManualLogs(false)]);
-  } catch (requestError) { notify(requestError instanceof Error ? requestError.message : "Command failed.", "error"); }
-  finally { busy.value = ""; }
-}
-async function stopSession(id: string, label = "Terminal session") {
-  if (!id) return;
-  busy.value = `stop-${id}`;
-  try { await postJson<JsonRow>(sessionEndpoint(id, "/stop")); notify(`${label} stop requested.`); await refreshState(true); }
-  catch (requestError) { notify(requestError instanceof Error ? requestError.message : "Stop failed.", "error"); }
-  finally { busy.value = ""; }
-}
-async function closeSession(session: JsonRow) {
-  const id = text(session.id); if (!id) return;
-  if (isActive(session) && !window.confirm("Close this running Terminal session? Its active command will be stopped.")) return;
-  busy.value = `close-${id}`;
-  try {
-    await requestDelete(sessionEndpoint(id));
-    if (id === selectedSessionId.value) selectSession("", false);
-    if (id === manualSessionId.value) selectManualSession("", false);
-    notify("Terminal session closed."); await refreshState(true);
-  } catch (requestError) { notify(requestError instanceof Error ? requestError.message : "Close failed.", "error"); }
-  finally { busy.value = ""; }
-}
-async function fileChange(sessionId: string, changeId: string, action: "approve" | "reject") {
-  busy.value = `${action}-${changeId}`;
-  try { await postJson<JsonRow>(sessionEndpoint(sessionId, `/file-changes/${action}`), { change_id: changeId }); notify(`File change ${action === "approve" ? "approved" : "rejected"}.`); await refreshState(true); }
-  catch (requestError) { notify(requestError instanceof Error ? requestError.message : "File change update failed.", "error"); }
-  finally { busy.value = ""; }
-}
-async function saveSettings() {
-  busy.value = "settings";
-  try {
-    await postJson<JsonRow>(props.options.endpoints.settings, { values: { ...settingsDraft, allowed_platforms: settingsDraft.allowed_platforms?.length ? settingsDraft.allowed_platforms : ["webui"] } });
-    settingsDirty.value = false; notify("Terminal settings saved."); await refreshState(true); syncSettings(true);
-  } catch (requestError) { notify(requestError instanceof Error ? requestError.message : "Terminal settings failed.", "error"); }
-  finally { busy.value = ""; }
-}
-function togglePlatform(value: string, checked: boolean) {
-  const next = new Set((Array.isArray(settingsDraft.allowed_platforms) ? settingsDraft.allowed_platforms : []).map(canonical));
-  if (checked) { if (value === "all") next.clear(); next.add(value); }
-  else next.delete(value);
-  if (value !== "all" && checked) next.delete("all");
-  settingsDraft.allowed_platforms = [...next]; settingsDirty.value = true;
-}
-function chatKeydown(event: KeyboardEvent) { if (event.key === "Enter" && !event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey && !event.isComposing) { event.preventDefault(); void sendChat(); } }
-function selectSessionFromEvent(event: Event) { selectSession((event.target as HTMLSelectElement).value); }
-function clearTerminal() { logs.value = logs.value.filter((entry: JsonRow) => ["user", "assistant"].includes(canonical(entry.stream))); }
-function closeSelectedSession() { if (selectedSession.value) void closeSession(selectedSession.value); }
-function handleEscape(event: KeyboardEvent) { if (event.key === "Escape") detailsOpen.value = false; }
-
-watch(() => props.state.payload, () => { ensureSelections(); syncSettings(); }, { deep: false });
-syncSettings(true); ensureSelections();
-window.addEventListener("keydown", handleEscape);
-void Promise.all([refreshLogs(true), refreshManualLogs(true)]).catch(() => {});
-schedulePoll();
-onBeforeUnmount(() => { if (pollTimer) window.clearTimeout(pollTimer); window.removeEventListener("keydown", handleEscape); });
-defineExpose({ refresh: () => refreshAll(false) });
+async function refreshAll(quiet=false){await refreshState(quiet);await Promise.all([refreshChanges(),refreshLogs(false),refreshManualLogs(false)]);}
+function schedulePoll(){window.clearTimeout(pollTimer);if(disposed||suspended)return;pollTimer=window.setTimeout(async()=>{if(!polling){polling=true;try{await refreshState(true);if(!taskLive.value)await refreshLogs(false);if(!manualLive.value)await refreshManualLogs(false);}catch{/* Retry without replacing drafts. */}finally{polling=false;}}schedulePoll();},taskLive.value||manualLive.value?10000:2000);}
+async function sendChat(){const value=chatMessage.value.trim();if(!value||chatBusy.value)return;const key=draftKey.value;busy.value='chat';try{const result=await postJson<JsonRow>(props.options.endpoints.chat,{message:value,session_id:currentChatSession.value?.id||null,project_id:selectedProjectId.value||null,mode:mode.value});mergeSession(result.session);drafts[key]='';selectSession(String(result.session.id));await refreshState(true);}catch(err){notify(err instanceof Error?err.message:'Task could not be started.','error');}finally{busy.value='';}}
+async function newChat(){busy.value='new-chat';try{const result=await postJson<JsonRow>(props.options.endpoints.chatSession,{label:'New task',project_id:selectedProjectId.value||null,mode:'build'});mergeSession(result.session);mode.value='build';selectSession(String(result.session.id));}catch(err){notify(err instanceof Error?err.message:'New task could not be created.','error');}finally{busy.value='';}}
+async function continueTask(){if(!canContinue.value)return;busy.value='chat';try{const result=await postJson<JsonRow>(props.options.endpoints.chat,{session_id:selectedSessionId.value,project_id:selectedProjectId.value,mode:mode.value,resume:true});mergeSession(result.session);await refreshState(true);}catch(err){notify(err instanceof Error?err.message:'Task could not be continued.','error');}finally{busy.value='';}}
+async function runCommand(){const value=command.value.trim();if(!value)return;busy.value='run';try{const result=await postJson<JsonRow>(props.options.endpoints.run,{command:value,cwd:manualCwd.value,project_id:selectedProjectId.value||null,label:value.slice(0,80),background:background.value});mergeSession(result.session);manualCwd.value=text(result.session?.cwd)||manualCwd.value;manualCwdDisplay.value=text(result.session?.cwd_display)||manualCwd.value;selectManualSession(String(result.session.id));command.value='';notify(result.builtin==='cd'?`Working directory: ${manualCwdDisplay.value}`:result.builtin?'Command completed.':'Command started.');await refreshState(true);scheduleChanges();}catch(err){notify(err instanceof Error?err.message:'Command failed.','error');}finally{busy.value='';}}
+async function startInteractive(){busy.value='terminal';try{const result=await postJson<JsonRow>(terminalEndpoint.value,{project_id:selectedProjectId.value,cols:100,rows:26});mergeSession(result.session);selectManualSession(String(result.session.id));shellTab.value='interactive';await refreshState(true);}catch(err){notify(err instanceof Error?err.message:'Interactive terminal could not be opened.','error');}finally{busy.value='';}}
+async function stopSession(id:string,label='Terminal session'){if(!id)return;busy.value=`stop-${id}`;try{await postJson(sessionEndpoint(id,'/stop'));notify(`${label} stopped.`);await refreshState(true);scheduleChanges();}catch(err){notify(err instanceof Error?err.message:'Stop failed.','error');}finally{busy.value='';}}
+function requestClose(session:JsonRow){if(isActive(session))pendingClose.value=session;else void closeSession(session);}
+async function closeSession(session:JsonRow){busy.value=`close-${session.id}`;try{await responseJson(await fetch(sessionEndpoint(String(session.id)),{method:'DELETE',credentials:'same-origin',headers:{Accept:'application/json'}}));pendingClose.value=null;if(session.id===selectedSessionId.value)selectedSessionId.value='';if(session.id===manualSessionId.value)manualSessionId.value='';await refreshState(true);notify('Terminal session closed.');}catch(err){notify(err instanceof Error?err.message:'Session could not be closed.','error');}finally{busy.value='';}}
+async function fileChange(sessionId:string,changeId:string,action:'approve'|'reject'){busy.value=`${action}-${changeId}`;try{await postJson(sessionEndpoint(sessionId,`/file-changes/${action}`),{change_id:changeId});notify(`File change ${action==='approve'?'approved':'rejected'}.`);await refreshState(true);await refreshChanges();}catch(err){notify(err instanceof Error?err.message:'File change update failed.','error');}finally{busy.value='';}}
+async function saveSettings(){busy.value='settings';try{await postJson(props.options.endpoints.settings,{values:{...settingsDraft,allowed_platforms:settingsDraft.allowed_platforms?.length?settingsDraft.allowed_platforms:['webui']}});settingsDirty.value=false;notify('Terminal settings saved.');await refreshState(true);syncSettings(true);}catch(err){notify(err instanceof Error?err.message:'Terminal settings failed.','error');}finally{busy.value='';}}
+function togglePlatform(value:string,checked:boolean){const next=new Set<string>(settingsDraft.allowed_platforms||[]);if(checked){if(value==='all')next.clear();next.add(value);}else next.delete(value);if(value!=='all'&&checked)next.delete('all');settingsDraft.allowed_platforms=[...next];settingsDirty.value=true;}
+function chatKeydown(event:KeyboardEvent){if(event.key==='Enter'&&!event.shiftKey&&!event.ctrlKey&&!event.altKey&&!event.metaKey&&!event.isComposing){event.preventDefault();void sendChat();}}
+function handleEscape(event:KeyboardEvent){if(event.key==='Escape'){detailsOpen.value=false;projectsOpen.value=false;taskDrawer.value=false;pendingClose.value=null;}}
+watch(selectedSessionId,async()=>{taskEpoch++;taskStream?.close();taskStream=null;taskLive.value=false;logs.value=[];logCursor.value=0;const id=selectedSessionId.value;try{await refreshLogs(true);if(id===selectedSessionId.value)connectStream(id);}catch(err){if(id===selectedSessionId.value)error.value=err instanceof Error?err.message:'Task history could not be loaded.';}},{immediate:true});
+watch(manualSessionId,async()=>{manualEpoch++;manualStream?.close();manualStream=null;manualLive.value=false;manualLogs.value=[];manualLogCursor.value=0;const id=manualSessionId.value;const session=selectedManualSession.value;if(session){manualCwd.value=text(session.cwd)||project.value.path||'agent_lab';manualCwdDisplay.value=text(session.cwd_display)||manualCwd.value;}try{await refreshManualLogs(true);if(id===manualSessionId.value)connectStream(id,true);}catch{/* A temporary disconnect keeps the command draft. */}},{immediate:true});
+watch(()=>props.state.payload,()=>{ensureSelections();syncSettings();});
+syncSettings(true);ensureSelections();
+onMounted(()=>{sidebarTarget.value=document.getElementById('terminal-task-sidebar');window.addEventListener('keydown',handleEscape);void refreshChanges();schedulePoll();});
+onActivated(()=>{if(!suspended)return;suspended=false;void refreshAll(true).then(()=>{connectStream(selectedSessionId.value);connectStream(manualSessionId.value,true);}).catch(()=>{});schedulePoll();});
+onDeactivated(()=>{suspended=true;closeStreams();window.clearTimeout(pollTimer);changesRequest?.abort();rootRequest?.abort();});
+onBeforeUnmount(()=>{disposed=true;closeStreams();window.clearTimeout(pollTimer);window.clearTimeout(changesTimer);changesRequest?.abort();rootRequest?.abort();window.removeEventListener('keydown',handleEscape);});
+defineExpose({refresh:()=>refreshAll(false),hasUnsavedChanges:()=>settingsDirty.value});
 </script>
 
 <template>
-  <div class="tater-vue-surface tsx-spudex">
-    <header class="tsx-spudex-header">
-      <div class="tsx-brand"><span class="tsx-spud-mark" aria-hidden="true"><i /><i /><i /></span><div><span class="tv-eyebrow">Tater agent workspace</span><h1>Terminal</h1></div></div>
-      <nav class="tv-tabs tsx-tabs" aria-label="Terminal sections"><button v-for="tab in tabs" :key="tab.id" type="button" :class="{ active: activeTab === tab.id }" @click="setTab(tab.id)">{{ tab.label }}<span v-if="tab.id === 'workbench' && activeCount">{{ activeCount }}</span></button></nav>
-      <div class="tsx-header-actions"><span class="tv-live-pill" :class="{ busy: Boolean(busy) }"><i />{{ busy ? 'Working' : 'Live' }}</span><button class="tv-button tsx-icon-button" type="button" aria-label="Refresh Terminal" title="Refresh" @click="refreshAll(false)">↻</button></div>
-    </header>
-    <div v-if="notice || error" class="tv-notice" :class="{ error: Boolean(error) }">{{ error || notice }}</div>
-
-    <section v-if="activeTab === 'workbench'" class="tsx-workbench">
-      <div class="tsx-spud-bar">
-        <div class="tsx-session-switcher">
-          <span class="tsx-bar-label"><i :class="{ live: selectedActive }" />Session</span>
-          <select :value="selectedSessionId" aria-label="Selected Terminal session" @change="selectSessionFromEvent">
-            <option v-if="!sessions.length" value="">No sessions yet</option>
-            <option v-for="session in sessions" :key="session.id" :value="String(session.id)">{{ session.label || session.command || 'Terminal session' }} · {{ statusLabel(session.status) }}</option>
-          </select>
-          <button class="tv-button primary tsx-new-chat" type="button" :disabled="busy === 'new-chat'" @click="newChat"><span aria-hidden="true">＋</span> New chat</button>
-        </div>
-        <div class="tsx-runtime-strip">
-          <span class="tsx-bar-label"><i :class="{ live: modelProcesses.length }" />Runtime <b>{{ modelProcessCount }}</b></span>
-          <div class="tsx-process-strip">
-            <span v-if="!modelProcesses.length" class="tsx-runtime-quiet">No tracked processes</span>
-            <article v-for="process in modelProcesses" :key="process.session_id" :title="[process.command, process.cwd].filter(Boolean).join(' · ')"><span>{{ process.label || process.command || 'Terminal process' }}</span><small>{{ process.pid ? `PID ${process.pid}` : 'Starting' }}</small><button type="button" aria-label="Stop model process" title="Kill process" @click="stopSession(String(process.session_id), 'Model process')">×</button></article>
+  <div class="tater-vue-surface tsx-spudex txw-workspace" :class="{'txw-with-sidebar':!sidebarTarget}">
+    <Teleport v-if="sidebarTarget" :to="sidebarTarget"><TaskNavigation :sessions="visibleTasks" :selected-id="selectedSessionId" :all="allTasks" :project-name="project.name||'this project'" @select="selectSession" @toggle="allTasks=!allTasks" @close="requestClose" /></Teleport>
+    <aside v-else class="txw-inline-nav"><TaskNavigation :sessions="visibleTasks" :selected-id="selectedSessionId" :all="allTasks" :project-name="project.name||'this project'" @select="selectSession" @toggle="allTasks=!allTasks" @close="requestClose" /></aside>
+    <main class="txw-main">
+      <header class="txw-project-bar">
+        <button class="tv-button txw-project-button" type="button" @click="projectsOpen=true"><UiIcon name="folder" /><strong>{{ project.name||'Agent Lab' }}</strong><UiIcon name="chevron" /></button>
+        <span class="txw-branch"><UiIcon name="git" />{{ changes.branch||payload.git?.branch||'Folder workspace' }}</span>
+        <div class="txw-header-actions"><button class="tv-button txw-tasks-button" type="button" @click="taskDrawer=true">Tasks</button><button class="tv-button" type="button" :disabled="busy==='refresh'" aria-label="Refresh Terminal" @click="refreshAll(false)"><UiIcon name="refresh" /></button><button class="tv-button" type="button" aria-label="Terminal settings" @click="setTab('settings')"><UiIcon name="sliders" /></button><button class="tv-button primary" type="button" :disabled="busy==='new-chat'" @click="newChat"><UiIcon name="plus" />New task</button></div>
+      </header>
+      <nav class="txw-tabs" aria-label="Terminal sections"><button v-for="tab in [{id:'workbench',label:'Task'},{id:'changes',label:'Changes'},{id:'manual',label:'Shell'}]" :key="tab.id" type="button" :aria-current="activeTab===tab.id?'page':undefined" @click="setTab(tab.id)">{{ tab.label }}<span v-if="tab.id==='changes'&&reviewFiles.length">{{ reviewFiles.length }}</span></button><span class="txw-status"><i v-if="visibleActive" class="txw-live-dot" />{{ visibleSession?statusLabel(visibleSession.status):'Ready' }}<small v-if="visibleActive">{{ (activeTab==='manual'&&shellTab!=='output'?manualLive:taskLive)?'Live':'Reconnecting…' }}</small></span></nav>
+      <p v-if="error" class="tv-notice error" role="alert">{{ error }}<button class="tv-button" type="button" @click="error=''">Dismiss</button></p>
+      <section v-if="activeTab==='workbench'" class="txw-task-layout">
+        <div class="txw-conversation">
+          <header class="txw-task-heading"><h1>{{ selectedSession?.status==='draft'||!selectedSession?'What are we building?':selectedSession.label||selectedSession.goal||'Terminal task' }}</h1><p>{{ project.name||'Agent Lab' }}<template v-if="selectedSession?.mode"> · {{ selectedSession.mode }} mode</template></p><button v-if="selectedSession" class="txw-text-button" type="button" @click="detailsOpen=true">Task details</button></header>
+          <div class="txw-feed" role="log" aria-label="Task conversation">
+            <button v-if="hasOlder" class="tv-button txw-load-history" type="button" @click="olderLogs()">Load earlier messages</button>
+            <template v-for="entry in feed" :key="entry.seq">
+              <ChatMessage v-if="entry.kind==='message'" :message="{role:entry.role,content:entry.content,username:entry.role==='user'?options.profile?.username:undefined}" :profile="options.profile||{}" :files-endpoint="options.endpoints.chatFiles" />
+              <details v-else class="txw-activity"><summary><UiIcon name="terminal" /><span>{{ entry.entries.find((row:JsonRow)=>row.stream==='command')?.text||entry.entries.at(-1)?.text||'Task activity' }}</span><small>{{ entry.entries.length }} event{{ entry.entries.length===1?'':'s' }}</small></summary><div v-for="row in entry.entries" :key="row.seq" :class="{error:row.level==='error'}"><span>{{ row.stream }}</span><pre>{{ row.text }}</pre></div></details>
+            </template>
+            <p v-if="!feed.length" class="txw-welcome">Describe a change. Tater can inspect the project, make edits, and check the result.</p>
+            <p v-if="selectedActive" class="txw-progress" role="status"><UiIcon name="activity" />{{ liveStatus }}<span v-if="selectedSession?.progress?.max_steps"> · Step {{ selectedSession.progress.step }} / {{ selectedSession.progress.max_steps }}</span></p>
           </div>
+          <p v-if="canContinue" class="txw-resume-note">{{ selectedSession?.status==='incomplete'?'This run reached its step limit.':'This run is not active.' }} Its request, plan, and context are saved.<button class="tv-button" type="button" :disabled="busy==='chat'" @click="continueTask">Continue task</button></p>
+          <form class="txw-composer" @submit.prevent="sendChat"><textarea v-model="chatMessage" rows="2" aria-label="Task message" :placeholder="selectedActive?'Draft a follow-up while Tater works…':!selectedSession||selectedSession.status==='draft'?'Describe what you want to build or fix…':'Ask a follow-up or describe the next change…'" @keydown="chatKeydown" /><div class="txw-composer-bar"><div class="txw-modes" aria-label="Task mode"><button v-for="choice in ['ask','plan','build'] as const" :key="choice" type="button" :aria-pressed="mode===choice" :disabled="selectedActive" @click="mode=choice">{{ choice }}</button></div><button v-if="selectedActive" class="tv-button" type="button" @click="stopSession(selectedSessionId,'Task')"><UiIcon name="close" />Stop</button><button v-else class="tv-button primary" type="submit" :disabled="!chatMessage.trim()||busy==='chat'"><UiIcon name="arrow-up" />{{ selectedSession?.status==='draft'||!selectedSession?'Start task':'Send' }}</button></div><div class="txw-composer-meta"><span :title="project.path"><UiIcon name="folder" />{{ project.name||'Agent Lab' }}</span><span>{{ mode==='build'?(payload.settings?.full_access?'Full host access':'Restricted'):'Read only' }}</span><button type="button" class="txw-text-button" @click="options.onOpenModelSettings?options.onOpenModelSettings():setTab('settings')">Model settings<UiIcon name="chevron" /></button></div><p class="txw-mode-note">{{ mode==='ask'?'Ask inspects files and answers without changing the project.':mode==='plan'?'Plan investigates and proposes steps. Switch to Build to apply them.':'Build can edit files and run commands using your Terminal access settings.' }}</p></form>
+          <footer class="txw-output-link"><button class="txw-text-button" type="button" @click="setTab('manual');shellTab='output'"><UiIcon name="terminal" />Command output</button><span>{{ selectedSession?.verification?.command||'' }}</span></footer>
         </div>
-        <div class="tsx-session-tools">
-          <button class="tv-button" type="button" :disabled="!selectedSession" @click="detailsOpen = true">Details</button>
-          <button class="tv-button danger" type="button" :disabled="!selectedActive" @click="stopSession(selectedSessionId)">Stop</button>
-          <button class="tv-button tsx-icon-button" type="button" :disabled="!selectedSession" aria-label="Close selected session" title="Close session" @click="closeSelectedSession">×</button>
-        </div>
-      </div>
-
-      <div class="tsx-workbench-grid">
-        <section class="tv-panel tsx-chat-card">
-          <header class="tsx-pane-head"><div><span class="tsx-pane-icon chat" aria-hidden="true">✦</span><div><strong>Chat with Tater</strong><small>{{ selectedSession?.label || selectedSession?.command || 'A fresh Terminal chat' }}</small></div></div><span class="tv-state" :class="{ good: selectedActive }">{{ selectedSession ? statusLabel(selectedSession.status) : 'Ready' }}</span></header>
-          <div class="tsx-chat-scroll">
-            <div v-if="currentChatSession && chatMessages.length" class="tsx-chat-feed"><ChatMessage v-for="(message, index) in chatMessages" :key="`${index}-${message.role}`" :message="message" :profile="options.profile || {}" :files-endpoint="options.endpoints.chatFiles" /></div>
-            <div v-else-if="!chatBusy" class="tsx-chat-empty"><span class="tsx-spud-mark large" aria-hidden="true"><i /><i /><i /></span><h2>What are we building?</h2><p>Ask Tater to inspect, run, or fix something through Terminal.</p></div>
-          </div>
-          <form class="tsx-composer" @submit.prevent="sendChat"><textarea v-model="chatMessage" rows="1" placeholder="Message Tater through Terminal…" :disabled="chatBusy" @keydown="chatKeydown" /><button class="tv-button primary" type="submit" :disabled="chatBusy || !chatMessage.trim()">{{ chatBusy ? 'Working…' : 'Send' }}</button><small>{{ liveStatus }}</small></form>
-        </section>
-
-        <section class="tv-panel tsx-terminal-card">
-          <header class="tsx-console-head"><div><span class="tsx-window-dots" aria-hidden="true"><i /><i /><i /></span><div><strong>Activity terminal</strong><small>tater@terminal:{{ selectedSession?.cwd_display || '~' }}</small></div></div><div class="tsx-terminal-actions"><span>Read only</span><button class="tv-button" type="button" :disabled="!nonChatLogs.length" @click="clearTerminal">Clear</button></div></header>
-          <div class="tsx-terminal-body" role="log" aria-label="Terminal command output" aria-live="polite">
-            <div v-if="nonChatLogs.length" class="tsx-log-list"><article v-for="entry in nonChatLogs" :key="entry.seq || `${entry.ts}-${entry.text}`" :class="canonical(entry.stream)"><time>{{ relativeTime(entry.ts) }}</time><span>{{ entry.stream === 'command' ? '$' : entry.stream || 'log' }}</span><pre>{{ String(entry.text || '').replace(/^\$\s*/, '') }}</pre></article></div>
-            <div v-else class="tsx-terminal-empty"><span>&gt;_</span><strong>Waiting for activity</strong><small>Commands, tool output, and system messages will appear here.</small></div>
-          </div>
-          <footer class="tsx-terminal-status"><span><i :class="{ live: selectedActive }" />{{ selectedActive ? 'Session active' : 'Standing by' }}</span><span>{{ selectedSession ? `#${String(selectedSession.id).slice(0, 8)}` : 'No session' }}</span></footer>
-        </section>
-      </div>
-    </section>
-
-    <section v-else-if="activeTab === 'manual'" class="tsx-manual">
-      <section class="tsx-manual-terminal">
-        <header class="tsx-manual-head">
-          <div><span class="tsx-window-dots" aria-hidden="true"><i /><i /><i /></span><div><strong>Terminal</strong><small>tater@terminal:{{ manualCwdDisplay }}</small></div></div>
-          <div class="tsx-manual-actions"><span class="tsx-manual-state"><i :class="{ live: manualActive || busy === 'run' }" />{{ busy === 'run' || manualActive ? 'Running' : selectedManualSession ? statusLabel(selectedManualSession.status) : 'Ready' }}</span><button class="tv-button" type="button" :disabled="!selectedManualSession" @click="detailsOpen = true">Details</button><button class="tv-button" type="button" :disabled="!manualLogs.length" @click="manualLogs = []">Clear</button><button class="tv-button danger" type="button" :disabled="!manualActive" @click="stopSession(manualSessionId, 'Manual session')">Stop</button></div>
-        </header>
-        <div class="tsx-manual-console-body" role="log" aria-label="Manual terminal output" aria-live="polite">
-          <article v-for="entry in manualLogs" :key="`${entry._session_id || ''}-${entry.seq || entry.ts || ''}-${entry.text || ''}`" :class="canonical(entry.stream)"><span>{{ entry.stream === 'command' ? '$' : entry.stream || 'log' }}</span><pre>{{ String(entry.text || '').replace(/^\$\s*/, '') }}</pre></article>
-          <div v-if="!manualLogs.length" class="tsx-manual-welcome"><span class="tsx-terminal-glyph">&gt;_</span><strong>Manual terminal ready.</strong><small>Starts in Agent Lab. {{ settingsDraft.full_access ? 'Full access is on, so commands run through the host shell.' : 'Restricted mode is on.' }}</small></div>
-        </div>
-        <form class="tsx-manual-prompt" @submit.prevent="runCommand">
-          <label class="tsx-prompt-line"><span aria-hidden="true">$</span><input v-model="command" type="text" autocomplete="off" aria-label="Terminal command" placeholder="Type a command…" :disabled="busy === 'run'" /></label>
-          <label class="tsx-terminal-check"><input v-model="background" class="tv-checkbox" type="checkbox" /><span>Keep running</span></label>
-          <button class="tv-button primary tsx-terminal-run" type="submit" :disabled="busy === 'run' || !command.trim()"><span aria-hidden="true">↵</span>{{ busy === 'run' ? 'Running…' : 'Run' }}</button>
-        </form>
-        <footer class="tsx-manual-footer"><span>{{ settingsDraft.full_access ? 'Full host access' : 'Restricted mode' }}</span><span>Current directory {{ manualCwdDisplay }}</span></footer>
+        <aside class="txw-inspector">
+          <h2>{{ selectedSession?.mode==='plan'?'Proposed plan':'Task plan' }}</h2><ol v-if="taskPlan.length" class="txw-plan"><li v-for="(step,index) in taskPlan" :key="index" :class="step.status"><UiIcon :name="step.status==='completed'?'check':step.status==='in_progress'?'activity':'circle'" /><span>{{ step.step }}<small v-if="step.detail">{{ step.detail }}</small></span></li></ol><p v-else class="txw-muted">The task plan appears here when Tater provides one.</p>
+          <div class="txw-inspector-heading"><h2>Changes</h2><small>{{ reviewFiles.length }} file{{ reviewFiles.length===1?'':'s' }}</small></div><p v-if="changesError" class="txw-muted">{{ changesError }}</p><div class="txw-inspector-files"><button v-for="file in reviewFiles.slice(0,8)" :key="file.id" type="button" :title="file.name" @click="selectedFile=file.id;setTab('changes')"><UiIcon name="file" /><span>{{ file.name }}</span><small>{{ file.pending?'Pending':file.source==='git'?`+${file.added} −${file.removed}`:'Edited' }}</small></button></div><p v-if="!reviewFiles.length" class="txw-muted">No file changes to review.</p><button v-if="reviewFiles.length" class="tv-button" type="button" @click="setTab('changes')">Review changes<UiIcon name="chevron" /></button>
+          <section class="txw-verification"><h2>Verification</h2><strong :class="{passed:verification?.status==='passed',failed:verification?.status==='failed'}">{{ verification?verification.status==='passed'?'Checks passed':verification.status==='failed'?'Checks failed':'Checks recorded':'Not run this turn' }}</strong><code v-if="verification?.command">{{ verification.command }}</code><details v-if="verification?.summary"><summary>Test output</summary><pre>{{ verification.summary }}</pre></details></section>
+          <section v-if="selectedSession?.previews?.length" class="txw-previews"><h2>App previews</h2><a v-for="preview in selectedSession.previews" :key="preview.url" class="tv-button" :href="preview.url" target="_blank" rel="noreferrer">{{ preview.url }}<UiIcon name="external" /></a></section>
+          <section v-if="modelProcesses.length" class="txw-processes"><h2>Active tasks & processes</h2><div v-for="process in modelProcesses" :key="process.session_id"><span>{{ process.label||process.command }}<small>PID {{ process.pid||'starting' }}</small></span><button class="tv-button" type="button" :aria-label="`Stop ${process.label||'process'}`" @click="stopSession(String(process.session_id),'Process')">Stop</button></div></section>
+        </aside>
       </section>
-    </section>
-
+      <section v-else-if="activeTab==='changes'" class="txw-review">
+        <header><div><h1>Review changes</h1><p>Project working tree and pending task edits. Existing changes are included.</p></div><button class="tv-button" type="button" @click="refreshChanges">Refresh changes</button></header><p v-if="changesError" class="tv-notice error" role="alert">{{ changesError }}</p><p v-if="!changes.ok&&!changesError" class="txw-muted">{{ changes.message }}</p>
+        <p v-if="changes.truncated" class="txw-muted">Showing {{ changes.files.length }} of {{ changes.total_count }} changed project files. Review the remaining files in your editor.</p><div v-if="reviewFiles.length" class="txw-review-grid"><nav aria-label="Changed files"><button v-for="file in reviewFiles" :key="file.id" type="button" :aria-current="displayedFile?.id===file.id?'page':undefined" @click="selectedFile=file.id"><UiIcon name="file" /><span>{{ file.name }}<small>{{ file.pending?'Waiting for approval':file.source==='git'?'Project working tree':'Task edit' }}</small></span></button></nav><section class="txw-diff"><header><strong>{{ displayedFile?.name }}</strong><div v-if="displayedFile?.pending"><button class="tv-button primary" type="button" :disabled="Boolean(busy)" @click="fileChange(selectedSessionId,String(displayedFile.id).replace('task:',''),'approve')">Approve edit</button><button class="tv-button" type="button" :disabled="Boolean(busy)" @click="fileChange(selectedSessionId,String(displayedFile.id).replace('task:',''),'reject')">Reject edit</button></div></header><pre><span v-for="(line,index) in diffLines" :key="index" :class="{added:line.startsWith('+')&&!line.startsWith('+++'),removed:line.startsWith('-')&&!line.startsWith('---')}">{{ line || ' ' }}{{ '\n' }}</span></pre><p v-if="displayedFile?.truncated" class="txw-muted">This diff is truncated. Inspect the full file in your editor.</p></section></div><p v-else class="txw-empty">No file changes to review.</p>
+      </section>
+      <section v-else-if="activeTab==='manual'" class="txw-shell">
+        <header class="txw-shell-toolbar"><div class="txw-shell-tabs" aria-label="Shell views"><button v-for="choice in [{id:'output',label:'Task output'},{id:'commands',label:'Commands'},{id:'interactive',label:'Interactive'}]" :key="choice.id" type="button" :aria-pressed="shellTab===choice.id" @click="selectShellTab(choice.id)">{{ choice.label }}</button></div><div><button v-if="selectedManualSession" class="tv-button" type="button" @click="detailsOpen=true">Session details</button><button v-if="manualActive" class="tv-button" type="button" @click="stopSession(manualSessionId,'Shell')">Stop shell</button></div></header>
+        <template v-if="shellTab==='output'"><p class="txw-muted">Commands, tool output, and system messages for the selected task.</p><div class="txw-command-output" role="log" aria-label="Task command output"><article v-for="row in nonChatLogs" :key="row.seq"><small>{{ row.stream }}</small><pre>{{ row.text }}</pre></article><p v-if="!nonChatLogs.length" class="txw-muted">No task output yet.</p></div></template>
+        <template v-else><div v-if="manualSessions.length" class="txw-shell-sessions" aria-label="Shell sessions"><button v-for="session in manualSessions" :key="session.id" type="button" :aria-pressed="manualSessionId===session.id" @click="selectManualSession(String(session.id))">{{ session.label||session.command||'Command session' }}<small>{{ statusLabel(session.status) }}</small></button></div>
+          <template v-if="shellTab==='interactive'"><p class="txw-muted">Interactive shells use Full host access and support programs that need keyboard input.</p><button v-if="!selectedManualSession?.interactive||!manualActive" class="tv-button primary" type="button" :disabled="!payload.settings?.full_access||!payload.interactive_supported||busy==='terminal'" @click="startInteractive">Start interactive shell</button><p v-if="!payload.settings?.full_access" class="txw-muted">Full host access is off. Commands remain available with your existing restrictions.</p><p v-else-if="!payload.interactive_supported" class="txw-muted">Use Commands on this host. Interactive shells require macOS or Linux.</p><InteractiveTerminal v-if="selectedManualSession?.interactive" :key="manualSessionId" :session-id="manualSessionId" :input-endpoint="`${terminalEndpoint}/${encodeURIComponent(manualSessionId)}/input`" :entries="manualLogs" :active="manualActive" /></template>
+          <template v-else><header class="txw-command-heading"><strong>Project commands</strong><span>{{ manualCwdDisplay }}</span><button class="txw-text-button" type="button" @click="manualLogs=[]">Clear output</button></header><button v-if="hasOlderManual" class="tv-button" type="button" @click="olderLogs(true)">Load earlier output</button><div class="txw-command-output" role="log" aria-label="Manual terminal output"><article v-for="row in manualLogs" :key="row.seq"><small>{{ row.stream==='command'?'$':row.stream }}</small><pre>{{ row.text }}</pre></article><p v-if="!manualLogs.length" class="txw-muted">Manual terminal ready. Starts in Agent Lab or your selected project.</p></div><form class="txw-command-form" @submit.prevent="runCommand"><label><span aria-hidden="true">$</span><input v-model="command" aria-label="Terminal command" autocomplete="off" placeholder="Type a command…" :disabled="busy==='run'" /></label><button class="tv-button primary" type="submit" :disabled="!command.trim()||busy==='run'">{{ busy==='run'?'Running…':'Run' }}</button><label class="txw-background"><input v-model="background" class="tv-checkbox" type="checkbox" />Keep running</label></form><p class="txw-muted">{{ payload.settings?.full_access?'Full host access — commands run through the host shell.':'Restricted mode — command checks and OS isolation apply.' }}</p></template>
+        </template>
+      </section>
     <section v-else class="tsx-settings">
       <div class="tv-panel tsx-access-card"><header><div><span class="tv-eyebrow">Hydra access</span><h2>Terminal availability</h2><p>Choose where Hydra can expose Terminal tools.</p></div><label class="tsx-master-toggle"><span>{{ settingsDraft.enabled ? 'Enabled' : 'Off' }}</span><input v-model="settingsDraft.enabled" class="tv-checkbox" type="checkbox" @change="settingsDirty = true" /></label></header><div class="tsx-settings-grid"><label><span>Starting folder</span><input v-model="settingsDraft.default_cwd" type="text" @input="settingsDirty = true" /></label><label><span>Max task steps</span><input v-model.number="settingsDraft.max_task_steps" type="number" min="1" max="50" @input="settingsDirty = true" /></label><label><span>Command timeout (seconds)</span><input v-model.number="settingsDraft.command_timeout_sec" type="number" min="5" max="3600" @input="settingsDirty = true" /></label></div><div class="tsx-platforms"><div><strong>Platforms</strong><small>Select where Hydra can expose Terminal.</small></div><label v-for="option in platformOptions" :key="option.value" :class="{ running: option.running }"><span><strong>{{ option.label || option.value }}</strong><small>{{ option.value === 'all' ? 'Every platform' : option.running ? 'Running' : 'Stopped' }} · {{ option.description || 'Available platform' }}</small></span><input class="tv-checkbox" type="checkbox" :checked="settingsDraft.allowed_platforms?.includes(option.value)" @change="togglePlatform(String(option.value), ($event.target as HTMLInputElement).checked)" /></label></div></div>
-      <div class="tv-panel tsx-policy-card"><header><div><span class="tv-eyebrow">Terminal capability</span><h2>Full access</h2><p>Use one setting for both Terminal Chat and the manual terminal.</p></div><label class="tsx-master-toggle" :class="{ danger: settingsDraft.full_access }"><span>{{ settingsDraft.full_access ? 'Full access' : 'Restricted' }}</span><input v-model="settingsDraft.full_access" class="tv-checkbox" type="checkbox" @change="settingsDirty = true" /></label></header><div class="tsx-policy-notice" :class="{ danger: settingsDraft.full_access }"><strong>{{ settingsDraft.full_access ? 'Full access is on.' : 'Restricted mode is on.' }}</strong> {{ settingsDraft.full_access ? 'Terminal can run any command available to Tater, including shells, installs, network tools, containers, and host-affecting commands.' : 'Terminal applies its command allow-list and available OS isolation.' }}</div><div v-if="settingsDraft.full_access" class="tsx-policy-notice danger"><strong>Use with care.</strong> Commands may read environment credentials, change or delete host files, install software, control applications, and contact external services.</div><div class="tsx-guardrails"><span>Commands start inside <code>agent_lab</code>.</span><span>Agent Lab is a starting folder, not a filesystem boundary.</span><span>Processes stay tracked and stoppable.</span></div></div>
+      <div class="tv-panel tsx-policy-card"><header><div><span class="tv-eyebrow">Terminal capability</span><h2>Full access</h2><p>Use one setting for both Terminal Chat and the manual terminal.</p></div><label class="tsx-master-toggle" :class="{ danger: settingsDraft.full_access }"><span>{{ settingsDraft.full_access ? 'Full access' : 'Restricted' }}</span><input v-model="settingsDraft.full_access" class="tv-checkbox" type="checkbox" @change="settingsDirty = true" /></label></header><div class="tsx-policy-notice" :class="{ danger: settingsDraft.full_access }"><strong>{{ settingsDraft.full_access ? 'Full access is on.' : 'Restricted mode is on.' }}</strong> {{ settingsDraft.full_access ? 'Terminal can run any command available to Tater, including shells, installs, network tools, containers, and host-affecting commands.' : 'Terminal applies its command allow-list and available OS isolation.' }}</div><div v-if="settingsDraft.full_access" class="tsx-policy-notice danger"><strong>Use with care.</strong> Commands may read environment credentials, change or delete host files, install software, control applications, and contact external services.</div><div class="tsx-guardrails"><span>New tasks start in the selected project folder.</span><span>Agent Lab is a starting folder, not a filesystem boundary.</span><span>Processes stay tracked and stoppable.</span></div></div>
       <div class="tsx-settings-save"><span>Model routing remains in Settings → Models.</span><button class="tv-button primary" type="button" :disabled="busy === 'settings' || !settingsDirty" @click="saveSettings">{{ busy === 'settings' ? 'Saving…' : 'Save settings' }}</button></div>
     </section>
+    </main>
+    <PopupTransition :open="detailsOpen" @close="detailsOpen = false"><section class="tv-modal tsx-details" role="dialog" aria-modal="true" aria-label="Session details"><header><div><span class="tv-eyebrow">Session details</span><h2>{{ detailSession?.label || detailSession?.command || 'No session selected' }}</h2></div><button class="tv-button" type="button" @click="detailsOpen = false">Close</button></header><div v-if="detailSession" class="tsx-insights"><div v-if="detailSession.last_policy_block" class="tsx-policy-notice danger"><strong>{{ detailSession.last_policy_block.title || 'Command blocked' }}</strong> {{ detailSession.last_policy_block.reason || detailSession.last_policy_block.message }}<small v-if="detailSession.last_policy_block.toggle">Policy toggle: {{ detailSession.last_policy_block.toggle }}</small></div><article><h3>Plan</h3><ol v-if="detailSession.plan?.length" class="tsx-plan"><li v-for="item in detailSession.plan" :key="item.step" :class="canonical(item.status)"><span>{{ item.step || 'Step' }}</span><small>{{ String(item.status || 'pending').replaceAll('_', ' ') }}<template v-if="item.detail"> · {{ item.detail }}</template></small></li></ol><div v-else class="tv-empty compact">No task plan yet.</div></article><article><h3>Verification</h3><div v-if="detailSession.verification" class="tsx-verification" :class="canonical(detailSession.verification.status)"><strong>{{ detailSession.verification.status === 'passed' ? 'Verification passed' : detailSession.verification.status === 'failed' ? 'Verification failed' : 'Verification recorded' }}</strong><small>{{ detailSession.verification.command }}</small><pre v-if="detailSession.verification.summary">{{ detailSession.verification.summary }}</pre></div><div v-else class="tv-empty compact">No verification run yet.</div></article><article><h3>App previews</h3><div v-if="detailSession.previews?.length" class="tsx-preview-list"><a v-for="preview in detailSession.previews.slice(-6).reverse()" :key="preview.url" :href="preview.url" target="_blank" rel="noreferrer"><span>{{ preview.url }}</span><small>{{ preview.source || 'preview' }}</small></a></div><div v-else class="tv-empty compact">No app previews detected yet.</div></article><article><h3>Git</h3><div v-if="payload.git?.ok" class="tsx-git"><div><strong>{{ payload.git.branch || 'detached' }}</strong><small>{{ payload.git.repo }}</small></div><span class="tv-state" :class="{ good: !payload.git.dirty }">{{ payload.git.dirty ? `${payload.git.changed_count || payload.git.changed_files?.length || 0} changed` : 'Clean' }}</span><pre v-if="payload.git.changed_files?.length">{{ payload.git.changed_files.slice(0, 24).join('\n') }}</pre></div><div v-else class="tv-empty compact">No Git repository detected.</div></article><article class="wide"><h3>File changes</h3><div v-if="detailSession.file_changes?.length" class="tsx-file-list"><section v-for="change in detailSession.file_changes.slice(-6).reverse()" :key="change.id" :class="{ pending: change.pending, applied: change.applied }"><header><div><strong>{{ change.path_display || change.path || 'File change' }}</strong><small>{{ change.pending ? 'Pending' : change.applied ? 'Applied' : 'Rejected' }}<template v-if="change.bytes"> · {{ change.bytes }} bytes</template></small></div><div v-if="change.pending"><button class="tv-button" type="button" @click="fileChange(String(detailSession.id), String(change.id), 'approve')">Approve</button><button class="tv-button danger" type="button" @click="fileChange(String(detailSession.id), String(change.id), 'reject')">Reject</button></div></header><pre>{{ change.diff || 'No textual diff available.' }}</pre></section></div><div v-else class="tv-empty compact">No file changes yet.</div></article><article class="wide"><h3>Session memory</h3><p v-if="detailSession.memory_summary">{{ detailSession.memory_summary }}</p><div v-else class="tv-empty compact">No session memory yet.</div></article></div><div v-else class="tv-empty">Select a session to see its details.</div></section></PopupTransition>
+    <PopupTransition :open="projectsOpen" @close="projectsOpen=false"><section class="tv-modal txw-project-dialog" role="dialog" aria-modal="true" aria-label="Open project"><header><div><span class="tv-eyebrow">Terminal workspace</span><h2>Open a project</h2></div><button class="tv-button" type="button" @click="projectsOpen=false">Close</button></header><div class="txw-project-list"><button v-for="item in projects" :key="item.id" type="button" :aria-current="project.id===item.id?'page':undefined" @click="chooseProject(String(item.id))"><UiIcon name="folder" /><span><strong>{{ item.name }}</strong><small>{{ item.path }}</small></span></button></div><form @submit.prevent="addProject"><h3>Use another folder</h3><label>Existing folder path<input v-model="projectPath" type="text" placeholder="/path/to/your/project" required /></label><label>Project name <small>Optional</small><input v-model="projectName" type="text" /></label><p v-if="projectError" class="tv-notice error" role="alert">{{ projectError }}</p><button class="tv-button primary" type="submit" :disabled="!projectPath.trim()||busy==='project'">{{ busy==='project'?'Opening…':'Open project' }}</button></form></section></PopupTransition>
+    <PopupTransition :open="taskDrawer" @close="taskDrawer=false"><section class="tv-modal txw-project-dialog" role="dialog" aria-modal="true" aria-label="Terminal tasks"><header><h2>Terminal tasks</h2><button class="tv-button" type="button" @click="taskDrawer=false">Close</button></header><TaskNavigation :sessions="visibleTasks" :selected-id="selectedSessionId" :all="allTasks" :project-name="project.name||'this project'" @select="selectSession" @toggle="allTasks=!allTasks" @close="requestClose" /></section></PopupTransition>
+    <PopupTransition :open="Boolean(pendingClose)" @close="pendingClose=null"><section class="tv-modal txw-project-dialog" role="dialog" aria-modal="true" aria-label="Close running session"><header><h2>Close this running session?</h2></header><p>{{ pendingClose?.label||'This session' }} will stop, and its saved session log will be removed.</p><footer><button class="tv-button" type="button" @click="pendingClose=null">Keep session</button><button class="tv-button danger" type="button" :disabled="Boolean(busy)" @click="pendingClose&&closeSession(pendingClose)">Stop and close</button></footer></section></PopupTransition>
   </div>
-
-  <PopupTransition :open="detailsOpen" @close="detailsOpen = false"><section class="tv-modal tsx-details" role="dialog" aria-modal="true" aria-label="Session details"><header><div><span class="tv-eyebrow">Session details</span><h2>{{ detailSession?.label || detailSession?.command || 'No session selected' }}</h2></div><button class="tv-button" type="button" @click="detailsOpen = false">Close</button></header><div v-if="detailSession" class="tsx-insights"><div v-if="detailSession.last_policy_block" class="tsx-policy-notice danger"><strong>{{ detailSession.last_policy_block.title || 'Command blocked' }}</strong> {{ detailSession.last_policy_block.reason || detailSession.last_policy_block.message }}<small v-if="detailSession.last_policy_block.toggle">Policy toggle: {{ detailSession.last_policy_block.toggle }}</small></div><article><h3>Plan</h3><ol v-if="detailSession.plan?.length" class="tsx-plan"><li v-for="item in detailSession.plan" :key="item.step" :class="canonical(item.status)"><span>{{ item.step || 'Step' }}</span><small>{{ String(item.status || 'pending').replaceAll('_', ' ') }}<template v-if="item.detail"> · {{ item.detail }}</template></small></li></ol><div v-else class="tv-empty compact">No task plan yet.</div></article><article><h3>Verification</h3><div v-if="detailSession.verification" class="tsx-verification" :class="canonical(detailSession.verification.status)"><strong>{{ detailSession.verification.status === 'passed' ? 'Verification passed' : detailSession.verification.status === 'failed' ? 'Verification failed' : 'Verification recorded' }}</strong><small>{{ detailSession.verification.command }}</small><pre v-if="detailSession.verification.summary">{{ detailSession.verification.summary }}</pre></div><div v-else class="tv-empty compact">No verification run yet.</div></article><article><h3>App previews</h3><div v-if="detailSession.previews?.length" class="tsx-preview-list"><a v-for="preview in detailSession.previews.slice(-6).reverse()" :key="preview.url" :href="preview.url" target="_blank" rel="noreferrer"><span>{{ preview.url }}</span><small>{{ preview.source || 'preview' }}</small></a></div><div v-else class="tv-empty compact">No app previews detected yet.</div></article><article><h3>Git</h3><div v-if="payload.git?.ok" class="tsx-git"><div><strong>{{ payload.git.branch || 'detached' }}</strong><small>{{ payload.git.repo }}</small></div><span class="tv-state" :class="{ good: !payload.git.dirty }">{{ payload.git.dirty ? `${payload.git.changed_count || payload.git.changed_files?.length || 0} changed` : 'Clean' }}</span><pre v-if="payload.git.changed_files?.length">{{ payload.git.changed_files.slice(0, 24).join('\n') }}</pre></div><div v-else class="tv-empty compact">No Git repository detected.</div></article><article class="wide"><h3>File changes</h3><div v-if="detailSession.file_changes?.length" class="tsx-file-list"><section v-for="change in detailSession.file_changes.slice(-6).reverse()" :key="change.id" :class="{ pending: change.pending, applied: change.applied }"><header><div><strong>{{ change.path_display || change.path || 'File change' }}</strong><small>{{ change.pending ? 'Pending' : change.applied ? 'Applied' : 'Rejected' }}<template v-if="change.bytes"> · {{ change.bytes }} bytes</template></small></div><div v-if="change.pending"><button class="tv-button" type="button" @click="fileChange(String(detailSession.id), String(change.id), 'approve')">Approve</button><button class="tv-button danger" type="button" @click="fileChange(String(detailSession.id), String(change.id), 'reject')">Reject</button></div></header><pre>{{ change.diff || 'No textual diff available.' }}</pre></section></div><div v-else class="tv-empty compact">No file changes yet.</div></article><article class="wide"><h3>Session memory</h3><p v-if="detailSession.memory_summary">{{ detailSession.memory_summary }}</p><div v-else class="tv-empty compact">No session memory yet.</div></article></div><div v-else class="tv-empty">Select a session to see its details.</div></section></PopupTransition>
 </template>

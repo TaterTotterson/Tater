@@ -132,7 +132,7 @@ class VoiceSatelliteVolumeUiTests(unittest.TestCase):
         self.assertIn("item.volume_control", component)
         self.assertIn("async function saveVolume", component)
         self.assertIn("values: { volume_percent: value }", component)
-        self.assertIn('@change="saveVolume(item)"', component)
+        self.assertIn('@change="saveVolume(settingsItem)"', component)
 
     def test_cards_preserve_live_wifi_and_ethernet_transport_state(self) -> None:
         status = {

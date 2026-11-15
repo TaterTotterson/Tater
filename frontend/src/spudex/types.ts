@@ -18,6 +18,9 @@ export interface SpudexMountOptions {
   initialTab?: string;
   initialSessionId?: string;
   initialManualSessionId?: string;
+  initialProjectId?: string;
+  onProjectChange?: (projectId: string) => void;
+  onOpenModelSettings?: () => void;
   profile?: ChatProfile;
   endpoints: {
     root: string;
@@ -27,6 +30,8 @@ export interface SpudexMountOptions {
     chatSession: string;
     sessions: string;
     chatFiles: string;
+    projects?: string;
+    terminal?: string;
   };
   onTabChange?: (tab: string) => void;
   onSessionChange?: (sessionId: string) => void;

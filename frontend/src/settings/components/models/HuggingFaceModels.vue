@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { modelPresentation } from "./modelPresentation";
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import PopupTransition from "../../../shared/PopupTransition.vue";
 import { getJson, postJson } from "../../../shared/api";
@@ -33,6 +34,7 @@ const emit = defineEmits<{
   "local-models": [payload: JsonRow];
 }>();
 
+const libraryTab = ref("discover");
 const provider = ref("llama_cpp");
 const view = ref("picks");
 const task = ref("text-generation");
@@ -523,6 +525,8 @@ onBeforeUnmount(() => {
 
 <template>
   <section class="tm-stack tm-hf-browser">
+    <nav class="tset-subsection-nav tm-library-tabs" aria-label="Model library views"><button type="button" :aria-current="libraryTab === 'discover' ? 'page' : undefined" @click="libraryTab = 'discover'">Discover</button><button type="button" :aria-current="libraryTab === 'installed' ? 'page' : undefined" @click="libraryTab = 'installed'">Installed <span>{{ installed.length }}</span></button></nav>
+    <details class="tm-library-downloads" :open="Boolean(warmup.running || selectedCount || error)"><summary><span><strong>Download center</strong><small>{{ warmup.running ? 'Downloading models' : selectedCount ? `${selectedCount} waiting` : 'Ready for downloads' }}</small></span><span>View queue & progress</span></summary>
     <article class="tm-form-card tm-hf-download-center" :class="{ quiet: !selectedCount && !warmupItems.length }">
       <header>
         <div><span class="tv-eyebrow">Download center</span><h3>{{ warmup.running ? `Downloading ${Math.min(completedCount + 1, warmupItems.length)} of ${warmupItems.length}` : batchStarting ? `Starting ${selectedCount} model file${selectedCount === 1 ? '' : 's'}…` : selectedCount ? `${selectedCount} model file${selectedCount === 1 ? '' : 's'} waiting` : warmupItems.length ? "Latest download batch" : "Ready for model downloads" }}</h3><p v-if="activeDownload">{{ activeDownload.model }} · {{ downloadMeta(activeDownload) }}<template v-if="selectedCount"> · {{ selectedCount }} queued next</template></p><p v-else-if="selectedCount">Starting automatically. Files download one at a time.</p><p v-else-if="warmupItems.length">{{ completedCount }} of {{ warmupItems.length }} completed.</p><p v-else>Choose a model below and Tater will start it automatically.</p></div>
@@ -538,10 +542,12 @@ onBeforeUnmount(() => {
       </section>
     </article>
 
+    </details>
+
     <div v-if="integration.setup_needed" class="tv-notice">Public models can still be available, but gated or private models need the Hugging Face integration enabled with an access token.</div>
     <div v-if="error" class="tv-notice error" aria-live="polite">{{ error }}</div>
 
-    <article class="tm-form-card tm-hf-guide">
+    <article v-show="libraryTab === 'discover'" class="tm-form-card tm-hf-guide">
       <header><div><span class="tv-eyebrow">Local model library</span><h3>Find GGUF models on Hugging Face</h3><p>{{ task === 'decision' ? "Only text-classification GGUFs whose Hub metadata confirms native llama.cpp System One support are shown. Multimodal, wrapper-based, and ordinary classifiers are excluded." : providers[0].help }}</p></div><ol class="tm-hf-steps" aria-label="Download steps"><li><span>1</span><strong>Find</strong></li><li><span>2</span><strong>Choose</strong></li><li><span>3</span><strong>Download</strong></li></ol></header>
       <div class="tm-hf-filters">
         <label class="tm-field"><span class="tm-field-label">Capability</span><select v-model="task" @change="search()"><option v-for="option in tasks" :key="option.value" :value="option.value">{{ option.label }}</option></select></label>
@@ -550,12 +556,12 @@ onBeforeUnmount(() => {
       <div class="tm-hf-view-switch" role="group" aria-label="Model list"><button v-for="option in views" :key="option.value" type="button" :class="{ active: view === option.value }" :aria-pressed="view === option.value" @click="view = option.value; search()">{{ option.label }}</button></div>
     </article>
 
-    <section class="tm-hf-results">
+    <section v-show="libraryTab === 'discover'" class="tm-hf-results">
       <header class="tm-hf-results-head"><div><h3>{{ views.find((option) => option.value === view)?.label }} models</h3><p>{{ loading && !results.length ? "Finding compatible models…" : task === 'decision' ? `${results.length} verified native System One model${results.length === 1 ? '' : 's'} shown` : `${results.length} compatible ${taskLabel(task).toLowerCase()} model${results.length === 1 ? '' : 's'} shown` }}</p></div><span v-if="selectedCount" class="tm-hf-selected-pill">{{ selectedCount }} selected</span></header>
       <div class="tm-model-grid" :aria-busy="loading">
         <article v-for="model in results" :key="String(model.repo_id || model.id)" class="tm-model-card" :class="{ selected: modelIsSelected(model), pick: model.tater_pick, installed: installedCount(model) > 0, 'target-installed': directTargetInstalled(model) }">
           <div class="tm-model-card-head"><div class="tm-model-badges"><span class="tm-model-kind">{{ model.tater_pick_label || model.pipeline_tag || taskLabel(task) }}</span><span v-if="installedLabel(model)" class="tm-model-installed-badge">✓ {{ installedLabel(model) }}</span></div><button class="tm-model-select" :class="{ selected: modelIsSelected(model), installed: directTargetInstalled(model) }" type="button" :aria-pressed="modelIsSelected(model)" :disabled="Boolean(addingRepo) || directTargetInstalled(model)" @click="toggleModel(model)"><span aria-hidden="true">{{ directTargetInstalled(model) || modelIsSelected(model) ? "✓" : "↓" }}</span>{{ addingRepo === modelRepo(model) ? "Checking…" : directTargetInstalled(model) ? "Installed" : modelIsSelected(model) ? "Queued" : "Download" }}</button></div>
-          <button class="tm-model-card-preview" type="button" @click="openModel(model)"><strong>{{ modelName(model) }}</strong><small>{{ model.author || modelRepo(model).split('/')[0] }} · {{ providerLabel(modelProvider(model)) }}</small><span v-if="model.tater_pick_note" class="tm-model-pick-note">{{ model.tater_pick_note }}</span><div class="tm-model-meta"><span v-if="model.size_label || model.model_size">{{ model.size_label || model.model_size }}</span><span v-if="model.quant">{{ model.quant }}</span><span v-if="model.supports_decisions">Native System One<template v-if="model.decision_type"> · {{ model.decision_type }}</template></span><span v-if="model.supports_vision">Vision</span><span v-if="model.supports_audio">Audio</span><span v-if="model.supports_video">Video</span><span v-if="modelProvider(model) === 'llama_cpp'">{{ formatCount(model.downloads) }} downloads</span><span v-if="modelProvider(model) === 'llama_cpp' && model.likes">{{ formatCount(model.likes) }} likes</span></div></button>
+          <button class="tm-model-card-preview" type="button" @click="openModel(model)"><strong>{{ modelPresentation(modelName(model), modelRepo(model)).name }}</strong><small>{{ model.author || modelRepo(model).split('/')[0] }} · {{ providerLabel(modelProvider(model)) }}</small><span v-if="model.tater_pick_note" class="tm-model-pick-note">{{ model.tater_pick_note }}</span><div class="tm-model-meta"><span v-if="model.size_label || model.model_size">{{ model.size_label || model.model_size }}</span><span v-if="model.quant">{{ model.quant }}</span><span v-if="model.supports_decisions">Native System One<template v-if="model.decision_type"> · {{ model.decision_type }}</template></span><span v-if="model.supports_vision">Vision</span><span v-if="model.supports_audio">Audio</span><span v-if="model.supports_video">Video</span><span v-if="modelProvider(model) === 'llama_cpp'">{{ formatCount(model.downloads) }} downloads</span><span v-if="modelProvider(model) === 'llama_cpp' && model.likes">{{ formatCount(model.likes) }} likes</span></div></button>
           <div class="tm-model-card-actions"><button class="tv-button" type="button" @click="openModel(model)">Details & files</button><a class="tv-button" :href="hubUrl(modelRepo(model))" target="_blank" rel="noopener noreferrer">Open Hub</a></div>
         </article>
         <div v-if="!loading && !results.length" class="tv-notice">{{ view === "picks" && task === "decision" ? "No Tater decision recommendations are published yet. Browse the other model lists or search for a compatible decision model." : "No compatible models matched this search. Try another capability, runtime, or search phrase." }}</div>
@@ -563,7 +569,7 @@ onBeforeUnmount(() => {
       <button v-if="nextCursor" class="tv-button tm-load-more" type="button" :disabled="loading" @click="search(true)">{{ loading ? "Loading…" : "Load more models" }}</button>
     </section>
 
-    <article class="tm-form-card"><header><div><h3>Installed local models</h3><p>Only these downloaded models appear in Tater's LLM, Decision Router, Vision, Audio, and Video selectors.</p></div><button class="tv-button" type="button" @click="refreshLocalModels">Refresh</button></header><div class="tm-installed-list"><div v-for="model in installed" :key="`${model.provider}:${model.model}`"><div><strong>{{ model.label || model.model }}</strong><span>{{ model.provider_label || model.provider }}<template v-if="model.quant"> · {{ model.quant }}</template><template v-if="model.supports_decisions"> · Decision</template><template v-if="model.supports_vision"> · Vision</template><template v-if="model.supports_audio"> · Audio</template><template v-if="model.supports_video"> · Video</template></span></div><button class="tv-button danger" type="button" @click="deleteModel(model)">Delete</button></div><div v-if="!installed.length" class="tv-notice">No local models are installed yet.</div></div></article>
+    <article v-show="libraryTab === 'installed'" class="tm-form-card tm-library-installed"><header><div><h3>Installed local models</h3><p>Only these downloaded models appear in Tater's LLM, Decision Router, Vision, Audio, and Video selectors.</p></div><button class="tv-button" type="button" @click="refreshLocalModels">Refresh</button></header><div class="tm-installed-list"><div v-for="model in installed" :key="`${model.provider}:${model.model}`"><div><strong>{{ modelPresentation(String(model.label || model.model), String(model.model || '')).name }}</strong><details class="tm-model-identifier"><summary>Full model identifier</summary><code>{{ model.model }}</code></details><span>{{ model.provider_label || model.provider }}<template v-if="model.quant || modelPresentation(String(model.label || model.model), String(model.model || '')).quant"> · {{ model.quant || modelPresentation(String(model.label || model.model), String(model.model || '')).quant }}</template><template v-if="model.supports_decisions"> · Decision</template><template v-if="model.supports_vision"> · Vision</template><template v-if="model.supports_audio"> · Audio</template><template v-if="model.supports_video"> · Video</template></span></div><button class="tv-button danger" type="button" @click="deleteModel(model)">Delete</button></div><div v-if="!installed.length" class="tv-notice">No local models are installed yet.</div></div></article>
 
     <PopupTransition :open="detailOpen" backdrop-class="tv-modal-backdrop tset-modal" @close="closeDetail">
       <section class="tv-modal tm-hf-detail-modal" role="dialog" aria-modal="true" aria-labelledby="tm-hf-detail-title">

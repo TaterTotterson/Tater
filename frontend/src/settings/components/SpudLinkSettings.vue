@@ -8,6 +8,7 @@ import {
   watch,
 } from "vue";
 import { getJson, postJson } from "../../shared/api";
+import PopupTransition from "../../shared/PopupTransition.vue";
 import type { JsonRow, SpudLinkSettings } from "../types";
 
 const props = defineProps<{
@@ -591,6 +592,7 @@ onBeforeUnmount(() => {
   window.clearTimeout(statusTimer);
   window.clearTimeout(pairingTimer);
 });
+defineExpose({ hasUnsavedChanges: () => dirty.value });
 </script>
 
 <template>
@@ -1084,13 +1086,7 @@ onBeforeUnmount(() => {
       </button>
     </footer>
 
-    <Teleport to="body">
-      <div
-        v-if="pairing.open"
-        class="tlink-modal-backdrop"
-        role="presentation"
-        @click.self="closePairing"
-      >
+    <PopupTransition :open="pairing.open" backdrop-class="tlink-modal-backdrop" role="presentation" @close="closePairing">
         <section
           class="tlink-modal"
           role="dialog"
@@ -1160,7 +1156,6 @@ onBeforeUnmount(() => {
             >
           </div>
         </section>
-      </div>
-    </Teleport>
+    </PopupTransition>
   </section>
 </template>

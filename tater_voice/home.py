@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import contextlib
 from datetime import datetime
@@ -79,7 +80,7 @@ async def startup() -> None:
     esphome_settings.cleanup_removed_user_settings()
     native_satellite.bind_runtime_loop()
     await esphome_runtime.startup()
-    airplay_input.startup()
+    await asyncio.to_thread(airplay_input.startup)
 
 
 async def shutdown() -> None:
@@ -493,6 +494,7 @@ def _wake_verifier_item_form(native_status: Dict[str, Any]) -> Dict[str, Any]:
     total_checks = 0
     total_rejected = 0
     total_fail_open = 0
+    threshold = esphome_settings.wake_verifier_threshold()
 
     for selector in sorted(selectors, key=esphome_runtime.text):
         raw_row = clients.get(selector) if isinstance(clients.get(selector), dict) else {}
@@ -541,7 +543,14 @@ def _wake_verifier_item_form(native_status: Dict[str, Any]) -> Dict[str, Any]:
             last_result = reason.replace("_", " ").title() if reason else "—"
 
         transcript = esphome_runtime.text(last.get("transcript")) or "—"
-        score = f"{float(last.get('score') or 0.0):.3f}" if last else "—"
+        if last and bool(last.get("available", True)):
+            last_threshold = max(0.5, min(1.0, float(last.get("threshold") or threshold)))
+            score = (
+                f"{float(last.get('score') or 0.0) * 100:.0f}% match · "
+                f"{last_threshold * 100:.0f}% required"
+            )
+        else:
+            score = "—"
         stt_ms = f"{float(last.get('stt_ms') or 0.0):.1f} ms" if last else "—"
         stt_engine = (
             esphome_runtime.text(last.get("stt_engine"))
@@ -610,6 +619,18 @@ def _wake_verifier_item_form(native_status: Dict[str, Any]) -> Dict[str, Any]:
                         "description": "The selected mode is pushed immediately to all connected satellites and is sent to satellites that connect later.",
                     },
                     {
+                        "key": esphome_settings.VOICE_WAKE_VERIFIER_THRESHOLD_KEY,
+                        "label": "STT Match Threshold",
+                        "type": "range",
+                        "value": threshold,
+                        "default": 0.85,
+                        "min": 0.5,
+                        "max": 1.0,
+                        "step": 0.01,
+                        "format": "percent",
+                        "description": "Minimum transcript similarity required in Enabled mode. Higher is stricter; lower tolerates harmless STT substitutions. The on-device wake model remains the first check.",
+                    },
+                    {
                         "key": "wake_verifier_summary",
                         "label": "Current Results",
                         "type": "text",
@@ -647,7 +668,7 @@ def _wake_verifier_item_form(native_status: Dict[str, Any]) -> Dict[str, Any]:
                             {"key": "fail_open", "label": "Fail-open"},
                             {"key": "last_result", "label": "Last"},
                             {"key": "transcript", "label": "Transcript"},
-                            {"key": "score", "label": "Score"},
+                            {"key": "score", "label": "Match"},
                             {"key": "stt_engine", "label": "Last STT Engine"},
                             {"key": "stt_ms", "label": "STT"},
                         ],
@@ -1349,7 +1370,7 @@ def _native_client_to_runtime_row(selector: str, row: Dict[str, Any]) -> Dict[st
                     esphome_runtime.text(live_settings.get("led_listening_animation")) or "directional",
                     esphome_runtime.text(live_settings.get("led_thinking_animation")) or "sparkle",
                     esphome_runtime.text(live_settings.get("led_tool_call_animation")) or "ping_pong",
-                    esphome_runtime.text(live_settings.get("led_replying_animation")) or "audio_glow",
+                    esphome_runtime.text(live_settings.get("led_replying_animation")) or "voice_ring",
                 ]
                 + ([esphome_runtime.text(live_settings.get("led_music_animation")) or "music_bars"] if has_music_led_animation else [])
             ),
@@ -2084,8 +2105,22 @@ def handle_runtime_action(*, action: str, payload: Dict[str, Any], redis_client:
         mode = esphome_runtime.lower(values.get(esphome_settings.VOICE_WAKE_VERIFIER_MODE_KEY))
         if mode not in esphome_settings.VOICE_WAKE_VERIFIER_MODES:
             raise ValueError("Wake verifier mode must be Disabled, Observe, or Enabled.")
+        try:
+            threshold = float(
+                values.get(
+                    esphome_settings.VOICE_WAKE_VERIFIER_THRESHOLD_KEY,
+                    esphome_settings.wake_verifier_threshold(),
+                )
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("STT match threshold must be between 50% and 100%.") from exc
+        if not 0.5 <= threshold <= 1.0:
+            raise ValueError("STT match threshold must be between 50% and 100%.")
         result = esphome_settings.save_settings_values(
-            {esphome_settings.VOICE_WAKE_VERIFIER_MODE_KEY: mode}
+            {
+                esphome_settings.VOICE_WAKE_VERIFIER_MODE_KEY: mode,
+                esphome_settings.VOICE_WAKE_VERIFIER_THRESHOLD_KEY: threshold,
+            }
         )
         push = native_satellite.run_on_runtime_loop(
             native_satellite.push_live_settings(),
@@ -2096,7 +2131,10 @@ def handle_runtime_action(*, action: str, payload: Dict[str, Any], redis_client:
         return {
             "ok": True,
             "action": action_name,
-            "message": f"Wake verification set to {label} for {pushed_count} connected satellite(s).",
+            "message": (
+                f"Wake verification set to {label} at {threshold * 100:.0f}% for "
+                f"{pushed_count} connected satellite(s)."
+            ),
             **result,
             "push": push,
             "wake_verifier": _wake_verifier_item_form(_native_satellite_status_snapshot()),

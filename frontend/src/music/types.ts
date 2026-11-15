@@ -152,6 +152,7 @@ export interface ManagerTab {
 }
 
 export interface MusicUi {
+  workspace?:Record<string,any>;
   kind?: string;
   title?: string;
   appearance?: string;
@@ -175,6 +176,7 @@ export interface CoreTabPayload {
 }
 
 export interface MusicCoreMountOptions {
+  embedded?:boolean;
   initialPayload: CoreTabPayload;
   coreKey: string;
   tabEndpoint: string;

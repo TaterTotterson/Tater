@@ -18,6 +18,7 @@ const props = defineProps<{
   endpoints: SettingsMountOptions["endpoints"];
   initialTab?: string;
   onTabChange?: (tab: string) => void;
+  embedded?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -485,6 +486,10 @@ async function refreshFaceStatus() {
   catch (statusError) { error.value = statusError instanceof Error ? statusError.message : "Face ID status could not be loaded."; }
 }
 
+watch(() => props.initialTab, (next) => {
+  const tab = normalizeTab(next);
+  if (tab !== activeTab.value) select(tab);
+});
 watch(() => props.settings, (next) => sync(next, true), { deep: true });
 onMounted(() => {
   sync(props.settings);
@@ -503,21 +508,22 @@ onBeforeUnmount(() => {
   if (faceTimer !== null) window.clearInterval(faceTimer);
   clearModelWarmupTimer();
 });
+defineExpose({ hasUnsavedChanges: () => Object.values(dirty).some(Boolean) });
 </script>
 
 <template>
   <section class="tset-resource tmodels-resource tm-native-models">
-    <nav class="tv-tabs tmodels-tabs" aria-label="Model settings sections">
+    <nav v-if="!embedded" class="tv-tabs tmodels-tabs" aria-label="Model settings sections">
       <button v-for="tab in tabs" :key="tab.id" type="button" :class="{ active: activeTab === tab.id }" @click="select(tab.id)">{{ tab.label }}</button>
     </nav>
 
-    <header class="tmodels-context"><strong>{{ activeSpec.label }}</strong><span>{{ activeSpec.short }}</span></header>
+    <header v-if="!embedded" class="tmodels-context"><strong>{{ activeSpec.label }}</strong><span>{{ activeSpec.short }}</span></header>
     <div v-if="error" class="tv-notice error" aria-live="polite">{{ error }}</div>
     <div v-if="notice" class="tv-notice" aria-live="polite">{{ notice }}</div>
 
     <HuggingFaceModels v-if="activeTab === 'huggingface'" :local-models="localModels" :endpoints="endpoints" @local-models="updateLocalModels" @notify="(message, tone) => emit('notify', message, tone)" />
     <LlmModels v-else-if="activeTab === 'routing'" :draft="draft" :local-models="localModels" :remote-models-endpoint="endpoints.modelsRemoteLlm" :context-estimate-endpoint="endpoints.modelsContextEstimate" :decision-benchmark-endpoint="endpoints.modelsDecisionBenchmark" :decision-results-endpoint="endpoints.modelsDecisionResults" @dirty="markDirty" />
-    <ListeningModels v-else-if="activeTab === 'listening'" ref="listeningPanel" :draft="draft" :speech-ui="draft.speech_ui || {}" :voice-model-ui="draft.voice_model_ui || {}" :warmup-endpoint="endpoints.modelsSpeechWarmup" @dirty="markDirty" />
+    <ListeningModels v-else-if="activeTab === 'listening'" ref="listeningPanel" :compact="embedded" :draft="draft" :speech-ui="draft.speech_ui || {}" :voice-model-ui="draft.voice_model_ui || {}" :warmup-endpoint="endpoints.modelsSpeechWarmup" @dirty="markDirty" />
     <SpeechModels v-else-if="activeTab === 'speech'" ref="speechPanel" :draft="draft" :speech-ui="draft.speech_ui || {}" :announcement-ui="draft.announcement_speech_ui || {}" :endpoints="endpoints" @dirty="markDirty" @notify="(message, tone) => emit('notify', message, tone)" />
     <WakeWordModels v-else-if="activeTab === 'wake'" ref="wakePanel" :runtime-endpoint="endpoints.modelsVoiceRuntime" :action-endpoint="endpoints.modelsVoiceAction" @dirty="markDirty" @notify="(message, tone) => emit('notify', message, tone)" />
     <MediaModelCard v-else-if="activeTab === 'vision'" kind="vision" :draft="draft" :local-models="localModels" @dirty="markDirty" />
@@ -531,7 +537,7 @@ onBeforeUnmount(() => {
       <button class="tv-button primary" type="button" :disabled="saving" @click="runPrimaryAction">{{ saving ? "Applying…" : actionSpec.label }}</button>
     </footer>
 
-    <LocalModelApplyProgress :open="modelApplyOpen" :snapshot="modelWarmup" :poll-error="modelWarmupPollError" @close="modelApplyOpen = false" />
+    <LocalModelApplyProgress :open="modelApplyOpen" :snapshot="modelWarmup" :poll-error="modelWarmupPollError" @close="modelApplyOpen = false" @reopen="modelApplyOpen = true" />
 
     <PopupTransition :open="pocketSetupOpen" backdrop-class="tv-modal-backdrop tset-modal" @close="closePocketSetup">
       <section class="tv-modal tm-pocket-setup" role="dialog" aria-modal="true" aria-labelledby="tm-pocket-setup-title">

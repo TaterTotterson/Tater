@@ -2,6 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { getJson, postJson } from "../shared/api";
 import ChatMessageView from "./components/ChatMessage.vue";
+import UiIcon from "../shared/UiIcon.vue";
 import type { ChatJobState, ChatMessage, ChatMountOptions, ChatProfile, ChatStatsPayload } from "./types";
 
 const props = defineProps<{
@@ -439,7 +440,7 @@ function resizeComposer() {
     const element = composer.value;
     if (!element) return;
     element.style.height = "auto";
-    element.style.height = `${Math.min(Math.max(element.scrollHeight, 44), 180)}px`;
+    element.style.height = `${Math.min(Math.max(element.scrollHeight, 36), 180)}px`;
   });
 }
 
@@ -504,22 +505,24 @@ onBeforeUnmount(() => {
         </span>
       </div>
 
+      <div v-if="speedLine || liveStatus" class="tc-run-info">
+        <div v-if="speedLine" class="chat-speed-stats tc-speed-stats">{{ speedLine }}</div>
+        <div v-if="liveStatus" class="chat-live-status tc-live-status" aria-live="polite">{{ liveStatus }}</div>
+      </div>
+
       <div class="message-box chat-composer-card tc-composer-card">
         <div class="chat-composer" role="group" aria-label="Chat composer">
           <div class="chat-composer-bar">
-            <label class="chat-composer-btn chat-composer-attach" title="Attach files" aria-label="Attach files">
-              <input ref="fileInput" class="tc-file-input" type="file" multiple @change="handleFiles" />
-              <span class="chat-composer-icon chat-composer-plus" aria-hidden="true">+</span>
-            </label>
-            <textarea ref="composer" v-model="draft" class="chat-composer-input" rows="1" :placeholder="`Message ${taterName}…`" @keydown="handleComposerKeydown" />
-            <button type="button" class="chat-composer-send" :disabled="sending" :title="sending ? 'Preparing message' : 'Send message'" :aria-label="sending ? 'Preparing message' : 'Send message'" @click="sendMessage">
-              <span class="chat-composer-icon chat-composer-send-arrow" aria-hidden="true">➤</span>
+            <button type="button" class="chat-composer-btn chat-composer-attach" title="Attach files" aria-label="Attach files" :disabled="sending" @click="fileInput?.click()"><UiIcon name="plus" /></button>
+            <input ref="fileInput" class="tc-file-input" type="file" multiple aria-label="Choose attachments" @change="handleFiles" />
+            <textarea ref="composer" v-model="draft" class="chat-composer-input" rows="1" aria-label="Message Tater" :placeholder="`Message ${taterName}…`" @keydown="handleComposerKeydown" />
+            <button type="button" class="chat-composer-send" :disabled="sending || (!draft.trim() && !pendingFiles.length)" :title="sending ? 'Preparing message' : 'Send message'" :aria-label="sending ? 'Preparing message' : 'Send message'" @click="sendMessage">
+              <UiIcon name="arrow-up" />
             </button>
           </div>
         </div>
+        <div class="tc-compose-meta"><span>{{ sending ? 'Preparing message…' : activeCount ? `${activeCount} ${activeCount === 1 ? 'job' : 'jobs'} running` : 'Ready' }}</span><span>Enter to send · Shift+Enter for a new line</span></div>
       </div>
-      <div v-if="speedLine" class="chat-speed-stats tc-speed-stats">{{ speedLine }}</div>
-      <div class="chat-live-status tc-live-status" aria-live="polite">{{ liveStatus }}</div>
     </section>
   </div>
 </template>

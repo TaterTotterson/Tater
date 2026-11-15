@@ -130,6 +130,7 @@ watch(
   },
   { immediate: true },
 );
+defineExpose({ hasUnsavedChanges: () => dirty.value });
 </script>
 
 <template>

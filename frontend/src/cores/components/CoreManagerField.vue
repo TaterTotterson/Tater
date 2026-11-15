@@ -1,11 +1,14 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref } from "vue";
+import CoreAgenda from './CoreAgenda.vue';
+import {workspaceKey} from '../drafts';
+import { computed, inject, onBeforeUnmount, onDeactivated, ref, watch } from "vue";
 import type { JsonRow } from "../types";
 
 const props = defineProps<{
   field: JsonRow;
   modelValue: unknown;
   allValues: JsonRow;
+  active?:boolean;
 }>();
 
 const emit = defineEmits<{
@@ -19,6 +22,7 @@ const cameraVideo = ref<HTMLVideoElement | null>(null);
 const mediaVideo = ref<HTMLVideoElement | null>(null);
 const videoPosterVisible = ref(false);
 let cameraStream: MediaStream | null = null;
+let cameraGeneration=0;
 let videoHasPlayed = false;
 let resettingVideo = false;
 
@@ -186,12 +190,16 @@ async function handleFile(event: Event) {
 async function startCamera() {
   if (!navigator.mediaDevices?.getUserMedia) { emit("error", "Camera access is unavailable in this browser."); return; }
   try {
-    cameraStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: text(props.field.camera_facing_mode) === "environment" ? "environment" : "user" }, audio: false });
+    const generation=++cameraGeneration;
+    const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: text(props.field.camera_facing_mode) === "environment" ? "environment" : "user" }, audio: false });
+    if(generation!==cameraGeneration||props.active===false){stream.getTracks().forEach(track=>track.stop());return;}
+    cameraStream=stream;
     cameraOpen.value = true;
     requestAnimationFrame(() => { if (cameraVideo.value) cameraVideo.value.srcObject = cameraStream; });
   } catch (error) { emit("error", error instanceof Error ? error.message : "Could not open the camera."); }
 }
 function stopCamera() {
+  cameraGeneration+=1;
   cameraStream?.getTracks().forEach((track) => track.stop());
   cameraStream = null;
   cameraOpen.value = false;
@@ -239,6 +247,10 @@ async function playVideoFromPoster() {
   }
 }
 
+const metadata=inject(workspaceKey,ref({} as JsonRow));
+watch(visible,isVisible=>{if(!isVisible){stopCamera();mediaVideo.value?.pause();}});
+watch(()=>props.active,active=>{if(active===false){stopCamera();mediaVideo.value?.pause();}});
+onDeactivated(()=>{stopCamera();mediaVideo.value?.pause();});
 onBeforeUnmount(stopCamera);
 </script>
 
@@ -250,6 +262,7 @@ onBeforeUnmount(stopCamera);
 
     <input v-else-if="type === 'hidden'" type="hidden" :value="stringValue" />
 
+    <CoreAgenda v-else-if="type==='table'&&metadata.agenda_fields?.includes(field.key)" :field="field" />
     <label v-else-if="type === 'table'">
       <span>{{ label }}</span><div class="core-data-table-wrap"><table class="core-data-table"><thead><tr><th v-for="column in tableColumns" :key="column.key">{{ column.label }}</th></tr></thead><tbody><tr v-for="(row, rowIndex) in field.rows || []" :key="rowIndex"><td v-for="(column, columnIndex) in tableColumns" :key="column.key">{{ tableCell(row, column.key, columnIndex) }}</td></tr><tr v-if="!(field.rows || []).length"><td :colspan="Math.max(1, tableColumns.length)" class="small">No rows.</td></tr></tbody></table></div><small v-if="field.description">{{ field.description }}</small>
     </label>

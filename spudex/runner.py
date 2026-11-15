@@ -1,4 +1,7 @@
 import asyncio
+from collections import deque
+from functools import wraps
+import threading
 import difflib
 import json
 import os
@@ -26,8 +29,17 @@ SESSIONS_DIR = SPUDEX_DIR / "sessions"
 _ACTIVE_PROCESSES: dict[str, Any] = {}
 _ACTIVE_TASKS: dict[str, asyncio.Task[Any]] = {}
 _SESSION_LOCK = asyncio.Lock()
+_META_LOCK = threading.RLock()
 _DEFAULT_SUBPROCESS_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 _TERMINAL_BUILTINS = {"dir", "ls", "pwd"}
+
+
+def _metadata_update(function):
+    @wraps(function)
+    def update(*args, **kwargs):
+        with _META_LOCK:
+            return function(*args, **kwargs)
+    return update
 
 
 def _now() -> float:
@@ -584,7 +596,10 @@ def register_spudex_task(session_id: str, task: asyncio.Task[Any]) -> None:
     if not clean_id:
         return
     _ACTIVE_TASKS[clean_id] = task
-    task.add_done_callback(lambda _task: _ACTIVE_TASKS.pop(clean_id, None))
+    def finished(completed: asyncio.Task[Any]) -> None:
+        if _ACTIVE_TASKS.get(clean_id) is completed:
+            _ACTIVE_TASKS.pop(clean_id, None)
+    task.add_done_callback(finished)
 
 
 def _save_meta(meta: Dict[str, Any]) -> Dict[str, Any]:
@@ -592,7 +607,9 @@ def _save_meta(meta: Dict[str, Any]) -> Dict[str, Any]:
     session_id = str(meta.get("id") or uuid.uuid4().hex)
     meta["id"] = session_id
     meta_path, _ = _paths(session_id)
-    meta_path.write_text(json.dumps(meta, indent=2, sort_keys=True), encoding="utf-8")
+    pending = meta_path.with_suffix(f".{uuid.uuid4().hex}.tmp")
+    pending.write_text(json.dumps(meta, indent=2, sort_keys=True), encoding="utf-8")
+    pending.replace(meta_path)
     return meta
 
 
@@ -624,6 +641,7 @@ def _normalize_plan(plan: Any) -> list[Dict[str, Any]]:
     return out
 
 
+@_metadata_update
 def update_spudex_plan(session_id: str, plan: Any = None, *, current_step: Any = None) -> list[Dict[str, Any]]:
     meta = _load_meta(session_id)
     current_plan = meta.get("plan") if isinstance(meta.get("plan"), list) else []
@@ -649,6 +667,7 @@ def update_spudex_plan(session_id: str, plan: Any = None, *, current_step: Any =
     return next_plan
 
 
+@_metadata_update
 def finish_spudex_plan(session_id: str, *, success: bool) -> list[Dict[str, Any]]:
     meta = _load_meta(session_id)
     next_plan = _normalize_plan(meta.get("plan") if isinstance(meta.get("plan"), list) else [])
@@ -665,6 +684,7 @@ def finish_spudex_plan(session_id: str, *, success: bool) -> list[Dict[str, Any]
     return next_plan
 
 
+@_metadata_update
 def set_spudex_memory_summary(session_id: str, summary: Any) -> str:
     text = _clip_text(str(summary or "").strip(), 2000)
     if not text:
@@ -676,6 +696,7 @@ def set_spudex_memory_summary(session_id: str, summary: Any) -> str:
     return text
 
 
+@_metadata_update
 def set_spudex_verification(session_id: str, *, command: Any = None, status: str = "", summary: Any = "", returncode: Any = None) -> Dict[str, Any]:
     meta = _load_meta(session_id)
     verification = {
@@ -691,6 +712,7 @@ def set_spudex_verification(session_id: str, *, command: Any = None, status: str
     return verification
 
 
+@_metadata_update
 def _append_meta_list(session_id: str, key: str, item: Dict[str, Any], *, limit: int = 50) -> list[Dict[str, Any]]:
     meta = _load_meta(session_id)
     rows = meta.get(key) if isinstance(meta.get(key), list) else []
@@ -780,7 +802,7 @@ def _detect_previews(session_id: str, text: str) -> None:
 def _git_status_for(path: Path) -> Dict[str, Any]:
     try:
         root = subprocess.run(
-            ["git", "-C", str(path), "rev-parse", "--show-toplevel"],
+            ["git", "--no-pager", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-C", str(path), "rev-parse", "--show-toplevel"],
             capture_output=True,
             text=True,
             timeout=2,
@@ -791,8 +813,8 @@ def _git_status_for(path: Path) -> Dict[str, Any]:
         return {"ok": False}
     repo = root.stdout.strip()
     try:
-        branch = subprocess.run(["git", "-C", repo, "branch", "--show-current"], capture_output=True, text=True, timeout=2)
-        status = subprocess.run(["git", "-C", repo, "status", "--short"], capture_output=True, text=True, timeout=3)
+        branch = subprocess.run(["git", "--no-pager", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-C", repo, "branch", "--show-current"], capture_output=True, text=True, timeout=2)
+        status = subprocess.run(["git", "--no-pager", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-C", repo, "status", "--short"], capture_output=True, text=True, timeout=3)
     except Exception:
         return {"ok": False, "repo": repo}
     rows = [line for line in status.stdout.splitlines() if line.strip()]
@@ -807,46 +829,48 @@ def _git_status_for(path: Path) -> Dict[str, Any]:
 
 
 def append_session_log(session_id: str, *, stream: str, text: str, level: str = "info") -> Dict[str, Any]:
-    _ensure_dirs()
-    meta = _load_meta(session_id)
-    seq = int(meta.get("log_seq") or 0) + 1
-    entry = {
-        "seq": seq,
-        "ts": _now(),
-        "stream": str(stream or "log"),
-        "level": str(level or "info"),
-        "text": str(text or ""),
-    }
-    _, log_path = _paths(session_id)
-    with log_path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
-    meta["log_seq"] = seq
-    meta["updated_ts"] = entry["ts"]
-    _save_meta(meta)
-    return entry
+    with _META_LOCK:
+        _ensure_dirs()
+        meta = _load_meta(session_id)
+        seq = int(meta.get("log_seq") or 0) + 1
+        entry = {
+            "seq": seq,
+            "ts": _now(),
+            "stream": str(stream or "log"),
+            "level": str(level or "info"),
+            "text": str(text or ""),
+        }
+        _, log_path = _paths(session_id)
+        with log_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        meta["log_seq"] = seq
+        meta["updated_ts"] = entry["ts"]
+        _save_meta(meta)
+        return entry
 
 
-def read_spudex_logs(session_id: str, *, after_seq: int = 0, limit: int = 200) -> Dict[str, Any]:
+def read_spudex_logs(session_id: str, *, after_seq: int = 0, limit: int = 200, tail: bool = False, before_seq: int = 0) -> Dict[str, Any]:
     _, log_path = _paths(session_id)
-    entries: list[Dict[str, Any]] = []
     max_limit = max(1, min(1000, int(limit or 200)))
+    entries = deque(maxlen=max_limit) if tail else []
+    count = 0
     if log_path.exists():
         with log_path.open("r", encoding="utf-8") as handle:
             for line in handle:
                 try:
                     entry = json.loads(line)
-                except Exception:
+                    seq = int(entry.get("seq") or 0)
+                except (ValueError, AttributeError, TypeError):
                     continue
-                if not isinstance(entry, dict):
+                if seq <= int(after_seq or 0) or (before_seq and seq >= before_seq):
                     continue
-                seq = int(entry.get("seq") or 0)
-                if seq <= int(after_seq or 0):
-                    continue
-                entries.append(entry)
-                if len(entries) >= max_limit:
+                count += 1
+                if tail or len(entries) < max_limit:
+                    entries.append(entry)
+                elif not tail:
                     break
-    last_seq = int(entries[-1].get("seq") or after_seq or 0) if entries else int(after_seq or 0)
-    return {"ok": True, "session_id": session_id, "entries": entries, "last_seq": last_seq}
+    rows = list(entries)
+    return {"ok": True, "session_id": session_id, "entries": rows, "first_seq": int(rows[0].get("seq") or 0) if rows else 0, "last_seq": int(rows[-1].get("seq") or after_seq or 0) if rows else int(after_seq or 0), "has_more": count > max_limit}
 
 
 def create_spudex_session(
@@ -884,13 +908,14 @@ def create_spudex_session(
 
 
 def update_spudex_session(session_id: str, **updates: Any) -> Dict[str, Any]:
-    meta = _load_meta(session_id)
-    if not meta:
-        meta = {"id": str(session_id or uuid.uuid4().hex), "created_ts": _now()}
-    for key, value in updates.items():
-        meta[str(key)] = value
-    meta["updated_ts"] = _now()
-    return _save_meta(meta)
+    with _META_LOCK:
+        meta = _load_meta(session_id)
+        if not meta:
+            meta = {"id": str(session_id or uuid.uuid4().hex), "created_ts": _now()}
+        for key, value in updates.items():
+            meta[str(key)] = value
+        meta["updated_ts"] = _now()
+        return _save_meta(meta)
 
 
 def list_spudex_sessions(*, limit: int = 80) -> list[Dict[str, Any]]:
@@ -954,6 +979,7 @@ def list_spudex_processes(*, model_only: bool = False) -> list[Dict[str, Any]]:
     return rows
 
 
+@_metadata_update
 def write_spudex_file_in_session(
     session_id: str,
     *,
@@ -1029,6 +1055,7 @@ def write_spudex_file_in_session(
         return {"ok": False, "session_id": session_id, "error": {"code": "write_failed", "message": message}}
 
 
+@_metadata_update
 def approve_spudex_file_change(session_id: str, change_id: str) -> Dict[str, Any]:
     meta = _load_meta(session_id)
     rows = meta.get("file_changes") if isinstance(meta.get("file_changes"), list) else []
@@ -1060,6 +1087,7 @@ def approve_spudex_file_change(session_id: str, change_id: str) -> Dict[str, Any
     return {"ok": True, "change": target}
 
 
+@_metadata_update
 def reject_spudex_file_change(session_id: str, change_id: str) -> Dict[str, Any]:
     meta = _load_meta(session_id)
     rows = meta.get("file_changes") if isinstance(meta.get("file_changes"), list) else []
@@ -1623,9 +1651,18 @@ async def close_spudex_session(session_id: str) -> Dict[str, Any]:
     return {"ok": True, "session_id": clean_id, "closed": True}
 
 
-def spudex_payload(redis_client: Any = None) -> Dict[str, Any]:
+def spudex_payload(redis_client: Any = None, *, project_id: str = "") -> Dict[str, Any]:
     settings = get_spudex_settings(redis_client)
+    from .workspace import get_project, list_projects
+    project = get_project(project_id, settings.get("default_cwd") or "agent_lab")
     sessions = list_spudex_sessions(limit=int(settings.get("max_sessions") or 80))
+    from .workspace import session_project
+    for session in sessions:
+        if not session.get("project") and session.get("source") not in {"ui", "interactive"}:
+            try:
+                session["project"] = session_project(session, settings.get("default_cwd") or "agent_lab")
+            except (ValueError, OSError):
+                pass
     model_processes = list_spudex_processes(model_only=True)
     active_ids = set(_ACTIVE_PROCESSES)
     active_ids.update(session_id for session_id, task in _ACTIVE_TASKS.items() if not task.done())
@@ -1637,5 +1674,8 @@ def spudex_payload(redis_client: Any = None) -> Dict[str, Any]:
         "active_count": len(active_ids),
         "model_processes": model_processes,
         "model_process_count": len(model_processes),
-        "git": _git_status_for(Path.cwd()),
+        "git": _git_status_for(Path(project["path"])),
+        "projects": list_projects(settings.get("default_cwd") or "agent_lab"),
+        "project": project,
+        "interactive_supported": os.name == "posix" and hasattr(os, "posix_spawn"),
     }

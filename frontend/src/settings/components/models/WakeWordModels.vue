@@ -51,6 +51,11 @@ const owwSource = computed(() => String(wakeValues.oww_wake_word || "hey_tater")
 const verifierModeField = computed<JsonRow>(() => Object.values(verifierFields.value).find((field) => String(field.type || "") === "select") || {});
 const verifierModeKey = computed(() => String(verifierModeField.value.key || "wake_verifier_mode"));
 const verifierMode = computed(() => String(verifierValues[verifierModeKey.value] || "off"));
+const verifierThresholdField = computed<JsonRow>(() => verifierFields.value.VOICE_WAKE_VERIFIER_THRESHOLD || {});
+const verifierThresholdKey = computed(() => String(verifierThresholdField.value.key || "VOICE_WAKE_VERIFIER_THRESHOLD"));
+const verifierThresholdDefault = computed(() => Number(verifierThresholdField.value.default ?? 0.85));
+const verifierThreshold = computed(() => Number(verifierValues[verifierThresholdKey.value] ?? verifierThresholdDefault.value));
+const verifierThresholdPercent = computed(() => Math.round(verifierThreshold.value * 100));
 const verifierResults = computed<JsonRow>(() => Object.values(verifierFields.value).find((field) => String(field.type || "") === "table") || {});
 const verifierSummary = computed(() => String(Object.values(verifierFields.value).find((field) => String(field.key || "").includes("summary"))?.value || "No checks recorded yet"));
 const verifierStt = computed(() => String(Object.values(verifierFields.value).find((field) => String(field.key || "").includes("stt_engine"))?.value || stat("STT Backend") || "Unavailable"));
@@ -146,6 +151,8 @@ function chooseWakeSource(value: string) { update(wakeValues, "wake_word", value
 function chooseOwwSource(value: string) { update(wakeValues, "oww_wake_word", value); }
 function chooseDetectorMode(value: string) { update(wakeValues, "wake_detector_mode", value); }
 function chooseVerifierMode(value: string) { update(verifierValues, verifierModeKey.value, value); }
+function setVerifierThreshold(event: Event) { update(verifierValues, verifierThresholdKey.value, Number((event.target as HTMLInputElement).value)); }
+function resetVerifierThreshold() { update(verifierValues, verifierThresholdKey.value, verifierThresholdDefault.value); }
 
 function hydrate(form: JsonRow | null, target: JsonRow) {
   Object.keys(target).forEach((key) => delete target[key]);
@@ -431,6 +438,12 @@ defineExpose({ apply, refresh });
       <div class="tm-choice-grid tm-wake-verifier-grid" role="group" aria-label="Wake verification mode">
         <button v-for="option in optionsFor(verifierModeField)" :key="optionValue(option)" type="button" :class="{ active: verifierMode === optionValue(option) }" :disabled="Boolean(busy)" @click="chooseVerifierMode(optionValue(option))"><i>{{ verifierDetails[optionValue(option)]?.mark }}</i><span><strong>{{ verifierDetails[optionValue(option)]?.label || optionLabel(option) }}</strong><small>{{ verifierDetails[optionValue(option)]?.short }}</small></span><b>✓</b></button>
       </div>
+      <section class="tm-wake-verifier-threshold">
+        <header><div><span>STT match threshold</span><strong>How closely must the transcript match?</strong></div><output>{{ verifierThresholdPercent }}%</output></header>
+        <input type="range" :min="Number(verifierThresholdField.min ?? 0.5)" :max="Number(verifierThresholdField.max ?? 1)" :step="Number(verifierThresholdField.step ?? 0.01)" :value="verifierThreshold" :disabled="Boolean(busy)" aria-label="STT match threshold" @input="setVerifierThreshold" />
+        <div class="tm-wake-verifier-scale"><span>50% · more tolerant</span><span>100% · exact match</span></div>
+        <footer><small>{{ verifierThresholdField.description || "Higher is stricter; lower tolerates harmless STT substitutions. The on-device wake model remains the first check." }}</small><button class="tv-button" type="button" :disabled="Boolean(busy) || verifierThreshold === verifierThresholdDefault" @click="resetVerifierThreshold">Reset to {{ Math.round(verifierThresholdDefault * 100) }}%</button></footer>
+      </section>
       <div class="tm-wake-verifier-summary"><div><span>Current results</span><strong>{{ verifierSummary }}</strong></div><div><span>Configured STT</span><strong>{{ verifierStt }}</strong></div></div>
 
       <details v-if="Array.isArray(verifierResults.rows)" class="tm-wake-results" :open="Boolean(verifierResults.rows.length)"><summary><span><strong>Results by satellite</strong><small>{{ verifierResults.rows.length }} satellite{{ verifierResults.rows.length === 1 ? "" : "s" }} with verification data</small></span><b>⌄</b></summary><div class="tm-table-wrap"><table><thead><tr><th v-for="column in verifierResults.columns || []" :key="String(column.key)">{{ column.label || column.key }}</th></tr></thead><tbody><tr v-for="(row, rowIndex) in verifierResults.rows" :key="rowIndex"><td v-for="column in verifierResults.columns || []" :key="String(column.key)">{{ row[String(column.key)] ?? "—" }}</td></tr><tr v-if="!verifierResults.rows.length"><td :colspan="Math.max(1, (verifierResults.columns || []).length)">No verifier results yet. Observe mode is a good way to collect data safely.</td></tr></tbody></table></div></details>

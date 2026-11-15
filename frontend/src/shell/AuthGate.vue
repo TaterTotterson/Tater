@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from "vue";
+import PopupTransition from "../shared/PopupTransition.vue";
 import type { AppShellAuthRequest, AppShellAuthState } from "./types";
 
 const props = defineProps<{
@@ -44,17 +45,14 @@ async function submit() {
 
 watch(() => props.state.required, (locked) => {
   document.body.classList.toggle("webui-auth-locked", Boolean(locked));
-  if (locked) document.body.classList.remove("modal-open");
-  else error.value = "";
+  if (!locked) error.value = "";
 }, { immediate: true });
 
 onBeforeUnmount(() => document.body.classList.remove("webui-auth-locked"));
 </script>
 
 <template>
-  <Teleport to="body">
-    <Transition name="tater-popup" appear>
-      <div v-if="state.required" id="webui-auth-modal" class="webui-auth-overlay active" aria-hidden="false">
+  <PopupTransition :open="Boolean(state.required)" id="webui-auth-modal" aria-hidden="false" backdrop-class="webui-auth-overlay active">
         <div class="card webui-auth-card" role="dialog" aria-modal="true" aria-label="WebUI Login">
           <div class="webui-auth-avatar-wrap">
             <img v-if="state.userAvatar" class="webui-auth-avatar-img" :src="state.userAvatar" alt="User avatar" />
@@ -69,7 +67,5 @@ onBeforeUnmount(() => document.body.classList.remove("webui-auth-locked"));
           </form>
           <div class="small" :class="{ error: Boolean(error) }">{{ error || state.message || (setupMode ? "Create a password and repeat it to save." : "Enter your password to continue.") }}</div>
         </div>
-      </div>
-    </Transition>
-  </Teleport>
+  </PopupTransition>
 </template>

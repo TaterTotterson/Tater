@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import ModelSelect from "./ModelSelect.vue";
+import { splitListeningSections } from "./modelPresentation";
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { getJson } from "../../../shared/api";
 import type { JsonRow } from "../../types";
@@ -9,6 +11,7 @@ const props = defineProps<{
   speechUi: JsonRow;
   voiceModelUi: JsonRow;
   warmupEndpoint: string;
+  compact?: boolean;
 }>();
 const emit = defineEmits<{ dirty: [] }>();
 
@@ -45,6 +48,7 @@ const visibleVoiceSections = computed(() => voiceSections.value.filter((section)
   const label = String(section.label || "").toLowerCase();
   return !label.includes("faster whisper") || selectedStt.value === "faster_whisper";
 }));
+const listeningSections = computed(() => splitListeningSections(visibleVoiceSections.value));
 
 function optionValue(option: JsonRow) { return String(option.value ?? option.id ?? ""); }
 function optionLabel(option: JsonRow) { return String(option.label ?? option.name ?? option.value ?? option.id ?? ""); }
@@ -80,44 +84,51 @@ defineExpose({ refreshWarmup });
 
 <template>
   <section class="tm-stack tm-speech-workspace tm-listening-workspace">
-    <article class="tm-form-card tm-speech-hero">
+    <article v-if="!compact" class="tm-form-card tm-speech-hero">
       <header>
         <div><span class="tv-eyebrow">Hear clearly</span><h3>Listening and speech recognition</h3><p>Choose how Tater turns speech into text, then tune only the listening runtime that is actually in use.</p></div>
         <div class="tm-speech-hero-status"><span><i />{{ selectedSttLabel }}</span><b>{{ localStt ? selectedAccelerationLabel : "Network service" }}</b></div>
       </header>
     </article>
 
-    <article v-if="warmup.running || warmupItems.length" class="tm-form-card tm-speech-warmup" :class="{ complete: !warmup.running && !warmupHasErrors, error: warmupHasErrors }">
+    <details v-if="warmup.running || warmupItems.length" class="tset-runtime-details tm-listening-status" :class="{ 'is-ready': compact && !warmup.running && !warmupHasErrors }" :open="!compact || warmup.running || warmupHasErrors">
+      <summary v-show="compact">Listening model status · {{ warmup.running ? 'Preparing' : warmupHasErrors ? 'Needs attention' : 'Ready' }}</summary>
+    <article class="tm-form-card tm-speech-warmup" :class="{ complete: !warmup.running && !warmupHasErrors, error: warmupHasErrors }">
       <header><div><span class="tv-eyebrow">Listening runtime</span><h3>{{ warmup.running ? "Preparing listening models" : warmupHasErrors ? "Listening model needs attention" : "Listening models are ready" }}</h3><p>{{ warmup.running ? "Tater is loading the selected local speech-recognition engine in the background." : warmupHasErrors ? "One or more listening models could not be prepared." : "The latest listening-model preparation finished successfully." }}</p></div><span class="tm-speech-status-chip">{{ warmup.running ? "Working" : warmupHasErrors ? "Check status" : "Ready" }}</span></header>
       <div v-if="warmup.running" class="tm-progress-list"><div v-for="item in warmupItems" :key="String(item.key || item.model)" class="tm-progress-row"><div><strong>{{ item.label || item.model || item.backend }}</strong><span>{{ item.message || item.status }}</span></div><progress :value="Number(item.progress || 0)" max="100" /></div></div>
       <div v-else class="tm-speech-ready"><i>{{ warmupHasErrors ? "!" : "✓" }}</i><span>{{ warmupItems.length }} listening {{ warmupItems.length === 1 ? "item" : "items" }} checked</span></div>
     </article>
+    </details>
 
     <article class="tm-form-card tm-speech-picker-card">
-      <header><div><span class="tv-eyebrow">Step 1</span><h3>Choose how Tater listens</h3><p>Only settings for the selected speech-recognition engine appear below.</p></div><span class="tm-speech-status-chip">{{ selectedSttLabel }}</span></header>
-      <div class="tm-speech-provider-grid" role="group" aria-label="Speech recognition backend">
+      <div v-if="compact" class="tset-compact-model-row"><span><strong>Listening model</strong><small>Turns your speech into text.</small></span><ModelSelect label="Listening model"><select aria-label="Listening model" :value="selectedStt" @change="setStt(($event.target as HTMLSelectElement).value)"><option v-for="option in sttOptions" :key="optionValue(option)" :value="optionValue(option)">{{ optionLabel(option) }}</option></select></ModelSelect></div>
+      <header v-if="!compact"><div><span class="tv-eyebrow">Step 1</span><h3>Choose how Tater listens</h3><p>Only settings for the selected speech-recognition engine appear below.</p></div><span class="tm-speech-status-chip">{{ selectedSttLabel }}</span></header>
+      <div v-if="!compact" class="tm-speech-provider-grid" role="group" aria-label="Speech recognition backend">
         <button v-for="option in sttOptions" :key="optionValue(option)" type="button" :class="{ active: selectedStt === optionValue(option) }" :aria-pressed="selectedStt === optionValue(option)" @click="setStt(optionValue(option))"><i>{{ sttMark(option) }}</i><span><strong>{{ optionLabel(option) }}</strong><small>{{ sttDescription(option) }}</small></span><b aria-hidden="true">✓</b></button>
       </div>
     </article>
 
     <article v-if="selectedStt === 'qwen3_asr_llama_cpp'" class="tm-form-card tm-speech-picker-card">
-      <header><div><span class="tv-eyebrow">Step 2</span><h3>Choose the Qwen listening model</h3><p>Use the smaller model for speed, or the larger model when transcription accuracy matters more.</p></div><span class="tm-speech-status-chip">{{ selectedQwenModelLabel }}</span></header>
-      <div class="tm-speech-provider-grid" role="group" aria-label="Qwen speech recognition model">
+      <div v-if="compact" class="tset-compact-model-row"><span><strong>Qwen listening model</strong><small>Choose speed or transcription accuracy.</small></span><ModelSelect label="Qwen listening model"><select aria-label="Qwen listening model" :value="selectedQwenModel" @change="setQwenModel(($event.target as HTMLSelectElement).value)"><option v-for="option in selectedSttModelOptions" :key="optionValue(option)" :value="optionValue(option)">{{ optionLabel(option) }}</option></select></ModelSelect></div>
+      <header v-if="!compact"><div><span class="tv-eyebrow">Step 2</span><h3>Choose the Qwen listening model</h3><p>Use the smaller model for speed, or the larger model when transcription accuracy matters more.</p></div><span class="tm-speech-status-chip">{{ selectedQwenModelLabel }}</span></header>
+      <div v-if="!compact" class="tm-speech-provider-grid" role="group" aria-label="Qwen speech recognition model">
         <button v-for="option in selectedSttModelOptions" :key="optionValue(option)" type="button" :class="{ active: selectedQwenModel === optionValue(option) }" :aria-pressed="selectedQwenModel === optionValue(option)" @click="setQwenModel(optionValue(option))"><i>{{ optionValue(option).includes('1.7b') ? '1.7' : '0.6' }}</i><span><strong>{{ optionLabel(option) }}</strong><small>{{ optionDescription(option) }}</small></span><b aria-hidden="true">✓</b></button>
       </div>
     </article>
 
     <article class="tm-form-card tm-speech-runtime-card">
-      <header><div><span class="tv-eyebrow">{{ selectedStt === 'qwen3_asr_llama_cpp' ? 'Step 3' : 'Step 2' }}</span><h3>{{ localStt ? "Choose the processing hardware" : "Connect the Wyoming service" }}</h3><p>{{ localStt ? "Pick Auto unless you know which accelerator should run speech recognition." : "Enter the host and port of the Wyoming speech-to-text service." }}</p></div><span class="tm-speech-status-chip">{{ localStt ? selectedAccelerationLabel : "Network" }}</span></header>
-      <div v-if="localStt" class="tm-speech-acceleration" role="group" aria-label="Speech acceleration">
+      <label v-if="compact && localStt" class="tset-compact-model-row"><span><strong>Processing hardware</strong><small>Auto chooses the available accelerator.</small></span><select aria-label="Processing hardware" :value="String(draft.speech_acceleration || 'auto')" @change="setAcceleration(($event.target as HTMLSelectElement).value)"><option v-for="option in accelerationOptions" :key="optionValue(option)" :value="optionValue(option)">{{ optionLabel(option) }}</option></select></label>
+      <header v-if="!compact || !localStt"><div><span class="tv-eyebrow">{{ selectedStt === 'qwen3_asr_llama_cpp' ? 'Step 3' : 'Step 2' }}</span><h3>{{ localStt ? "Choose the processing hardware" : "Connect the Wyoming service" }}</h3><p>{{ localStt ? "Pick Auto unless you know which accelerator should run speech recognition." : "Enter the host and port of the Wyoming speech-to-text service." }}</p></div><span class="tm-speech-status-chip">{{ localStt ? selectedAccelerationLabel : "Network" }}</span></header>
+      <div v-if="localStt && !compact" class="tm-speech-acceleration" role="group" aria-label="Speech acceleration">
         <button v-for="option in accelerationOptions" :key="optionValue(option)" type="button" :class="{ active: String(draft.speech_acceleration || 'auto') === optionValue(option) }" @click="setAcceleration(optionValue(option))"><i />{{ optionLabel(option) }}</button>
       </div>
-      <div v-else class="tm-field-grid tm-speech-connection-fields">
+      <div v-if="!localStt" class="tm-field-grid tm-speech-connection-fields">
         <label class="tm-field tm-field-wide"><span class="tm-field-label">Wyoming host</span><input v-model="draft.speech_wyoming_stt_host" type="text" placeholder="127.0.0.1" @input="dirty" /><small>Hostname or IP address of your Wyoming STT service.</small></label>
         <label class="tm-field"><span class="tm-field-label">Wyoming port</span><input v-model="draft.speech_wyoming_stt_port" type="number" min="1" max="65535" placeholder="10300" @input="dirty" /></label>
       </div>
     </article>
 
-    <section v-if="visibleVoiceSections.length" class="tm-speech-runtime-settings"><div class="tm-speech-section-heading"><div><span class="tv-eyebrow">Fine tuning</span><h3>Listening controls</h3><p>These controls apply to the selected recognition path and shared listening runtime.</p></div><span>{{ visibleVoiceSections.length }} {{ visibleVoiceSections.length === 1 ? "section" : "sections" }}</span></div><ModelFields :sections="visibleVoiceSections" :values="voiceValues" @change="updateVoice" /></section>
+    <article v-if="listeningSections.basic.length" class="tm-form-card tm-basic-listening"><header><div><h3>When Tater listens</h3><p>Choose how Tater recognizes speech and detects the end of a turn.</p></div></header><ModelFields :sections="listeningSections.basic" :values="voiceValues" @change="updateVoice" /></article>
+    <details v-if="listeningSections.advanced.length" class="tset-runtime-details tset-advanced-section"><summary>Advanced listening settings</summary><section class="tm-speech-runtime-settings"><div class="tm-speech-section-heading"><div><h3>Listening controls</h3><p>These controls apply to the selected recognition path and shared listening runtime.</p></div><span>{{ listeningSections.advanced.length }} {{ listeningSections.advanced.length === 1 ? "section" : "sections" }}</span></div><ModelFields :sections="listeningSections.advanced" :values="voiceValues" @change="updateVoice" /></section></details>
   </section>
 </template>

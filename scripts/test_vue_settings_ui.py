@@ -14,8 +14,9 @@ class VueSettingsTests(unittest.TestCase):
             REPO_ROOT / "frontend" / "src" / "settings" / "components" / "ModelsSettings.vue"
         ).read_text(encoding="utf-8")
 
-        self.assertIn('<nav class="tv-tabs tmodels-tabs"', source)
-        self.assertIn('<header class="tmodels-context">', source)
+        self.assertIn('class="tv-tabs tmodels-tabs"', source)
+        self.assertIn('class="tmodels-context"', source)
+        self.assertIn('v-if="!embedded"', source)
         self.assertNotIn("Model workspace", source)
         self.assertNotIn("Models, routing, and local runtimes", source)
         self.assertNotIn("Every Models area is reactive", source)
@@ -35,6 +36,7 @@ class VueSettingsTests(unittest.TestCase):
 
     def test_settings_shell_exposes_every_top_level_area(self) -> None:
         source = (REPO_ROOT / "frontend" / "src" / "settings" / "SettingsApp.vue").read_text(encoding="utf-8")
+        navigation = (REPO_ROOT / "frontend" / "src" / "settings" / "navigation.ts").read_text(encoding="utf-8")
 
         for tab_id in (
             "general",
@@ -49,7 +51,7 @@ class VueSettingsTests(unittest.TestCase):
             "system",
             "logs",
         ):
-            self.assertIn(f'id: "{tab_id}"', source)
+            self.assertIn(f'panel: "{tab_id}"', navigation)
         self.assertIn("onTabChange", source)
         self.assertIn("defineExpose", source)
         self.assertNotIn("<span>Sections</span>", source)
@@ -178,7 +180,8 @@ class VueSettingsTests(unittest.TestCase):
 
         self.assertIn("SystemTasksSettingsPanel", settings_app)
         self.assertIn("activeTab === 'system'", settings_app)
-        self.assertIn("Live background snapshots", settings_app)
+        navigation = (REPO_ROOT / "frontend" / "src" / "settings" / "navigation.ts").read_text(encoding="utf-8")
+        self.assertIn("Live snapshots, scheduled maintenance", navigation)
         self.assertNotIn("manual refresh controls", settings_app)
         self.assertIn("getJson<JsonRow>(props.endpoint)", system_tasks)
         self.assertIn("postJson<JsonRow>(endpoint)", system_tasks)
@@ -355,10 +358,10 @@ class VueSettingsTests(unittest.TestCase):
         self.assertNotIn('v-if="llamaConfigured"', llm)
         self.assertNotIn("tm-llm-server-slots-card", llm)
         self.assertIn("tm-llm-context-slot-settings", llm)
-        self.assertIn('v-if="usesLlamaCpp" class="tm-form-card tm-llm-runtime-card"', llm)
+        self.assertIn('v-if="usesLlamaCpp" class="tm-form-card tm-llm-runtime-card tset-advanced-section"', llm)
         self.assertNotIn("const slotModeHelp = computed", llm)
         self.assertIn("Context slot mode", llm)
-        self.assertGreater(llm.index("Context slot mode"), llm.index('class="tm-form-card tm-llm-runtime-card"'))
+        self.assertGreater(llm.index("Context slot mode"), llm.index('class="tm-form-card tm-llm-runtime-card tset-advanced-section"'))
         self.assertNotIn("<h3>Prompt cache mode</h3>", llm)
         self.assertIn("Single shared slot", llm)
         self.assertIn("Dedicated role slots", llm)
@@ -383,7 +386,7 @@ class VueSettingsTests(unittest.TestCase):
         self.assertNotIn("Hydra roles stay assigned to a consistent pool member", llm)
         self.assertIn("Add round-robin route", llm)
         self.assertIn("Model thinking", llm)
-        self.assertIn('v-if="index === 0" class="tm-llm-thinking-card"', llm)
+        self.assertIn('v-if="index === 0" class="tm-llm-thinking-card tset-advanced-section"', llm)
         self.assertIn('class="tm-llm-switch tm-llm-thinking-switch"', llm)
         self.assertGreater(llm.index("Model thinking"), llm.index('class="tm-llm-connection-card"'))
         self.assertIn("Not recommended for Tater", llm)
@@ -438,9 +441,9 @@ class VueSettingsTests(unittest.TestCase):
             self.assertIn(stage, progress)
         self.assertIn("Cores and Portals are restarting", progress)
         self.assertIn("This continues safely if you hide the window or change tabs.", progress)
-        self.assertIn(".tm-model-apply-hero", styles)
-        self.assertIn(".tm-model-spud", styles)
-        self.assertIn(".tm-model-apply-stages", styles)
+        self.assertIn(".tv-modal.tm-model-queue", styles)
+        self.assertIn(".tm-model-queue .mq-model", styles)
+        self.assertIn(".tm-model-queue .mq-stages", styles)
         self.assertIn("if not clean_items and not clean_unload_items:", backend)
         self.assertIn('reason="settings-save-unload"', backend)
         self.assertIn('"active_before": active_before', backend)
@@ -574,7 +577,8 @@ class VueSettingsTests(unittest.TestCase):
 
         self.assertIn("VoiceSettingsPanel", settings_app)
         self.assertIn("activeTab === 'esphome'", settings_app)
-        self.assertIn('{ id: "esphome", label: "Satellites"', settings_app)
+        navigation = (REPO_ROOT / "frontend" / "src" / "settings" / "navigation.ts").read_text(encoding="utf-8")
+        self.assertIn('panel: "esphome", child: "satellites"', navigation)
         for tab in ("satellites", "presence", "firmware", "stereo", "airplay", "stats", "platform"):
             self.assertIn(f'id: "{tab}"', voice)
         self.assertLess(voice.index('id: "airplay"'), voice.index('id: "presence"'))
@@ -587,12 +591,13 @@ class VueSettingsTests(unittest.TestCase):
         self.assertIn("voice_display_sensors_save", satellites)
         self.assertIn('import PopupTransition from "../../../shared/PopupTransition.vue"', satellites)
         self.assertIn("openSettings(item)", satellites)
-        self.assertIn('class="tv-modal tvoice-settings-modal"', satellites)
+        self.assertIn('<FocusedWorkspace :open="Boolean(settingsItem)"', satellites)
         self.assertIn('class="tv-modal tvoice-pairing-modal"', satellites)
         self.assertIn("expires_in_s", satellites)
         self.assertIn("result.paired", satellites)
-        self.assertIn("View all device info", satellites)
-        self.assertNotIn("<details", satellites)
+        self.assertIn("infoSections(settingsItem)", satellites)
+        self.assertIn("satelliteWorkspaceTabs", satellites)
+        self.assertNotIn('class="tvoice-device-manage"', satellites)
         self.assertNotIn('class="tvoice-details tvoice-settings-details"', satellites)
         self.assertIn(".tvoice-settings-modal", styles)
         self.assertIn("width: clamp(142px, 16vw, 210px)", styles)

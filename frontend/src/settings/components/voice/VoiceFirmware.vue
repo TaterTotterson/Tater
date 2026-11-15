@@ -59,19 +59,24 @@ const flashTransport = computed(() => String(factoryArtifact.value.flash_transpo
 const canOta = computed(() => Boolean(selectedSelector.value && selectedTemplate.value && otaArtifact.value.path && (variant.value.connected ?? true)));
 const canUsb = computed(() => Boolean(selectedTemplate.value && selectedArtifact.value.path));
 const sessionRunning = computed(() => {
+  if (busy.value === "batch") return true;
   const state = String(session.value?.phase || session.value?.status || "").toLowerCase();
-  if (["completed", "failed", "cancelled", "stopped"].includes(state)) return false;
+  if (["completed", "failed", "cancelled", "stopped", "skipped"].includes(state)) return false;
   return Boolean(busy.value || session.value?.session_id);
 });
 const sessionProgress = computed(() => Math.max(0, Math.min(100, Number(session.value?.progress_percent ?? session.value?.progress ?? 0))));
 const completedBatchCount = computed(() => batchRows.value.filter((row) => String(row.status) === "completed").length);
+const skippedBatchCount = computed(() => batchRows.value.filter((row) => String(row.status) === "skipped").length);
+const failedBatchCount = computed(() => batchRows.value.filter((row) => String(row.status) === "failed").length);
+const settledBatchCount = computed(() => batchRows.value.filter((row) => ["completed", "skipped", "failed", "stopped"].includes(String(row.status))).length);
 const progress = computed(() => {
   if (!batchRows.value.length) return sessionProgress.value;
-  return Math.max(0, Math.min(100, ((completedBatchCount.value + (sessionRunning.value ? sessionProgress.value / 100 : 0)) / batchRows.value.length) * 100));
+  const activeProgress = currentBatchRow.value?.status === "running" ? Number(currentBatchRow.value.progress || 0) / 100 : 0;
+  return Math.max(0, Math.min(100, ((settledBatchCount.value + activeProgress) / batchRows.value.length) * 100));
 });
-const progressTone = computed(() => String(session.value?.phase || session.value?.status || "starting").toLowerCase());
+const progressTone = computed(() => busy.value === "batch" ? "running" : String(session.value?.phase || session.value?.status || "starting").toLowerCase());
 const progressLabel = computed(() => {
-  if (batchRows.value.length) return `${completedBatchCount.value} of ${batchRows.value.length} complete`;
+  if (batchRows.value.length) return `${settledBatchCount.value} of ${batchRows.value.length} processed`;
   return `${Math.round(sessionProgress.value)}% complete`;
 });
 const currentBatchRow = computed(() => batchCurrentIndex.value >= 0 ? batchRows.value[batchCurrentIndex.value] || null : null);
@@ -240,6 +245,7 @@ async function flashOta(row?: JsonRow) {
 
 async function updateAll(rows = updates.value.length ? updates.value : flashTargets.value) {
   if (!rows.length || busy.value) return;
+  stopPoll();
   busy.value = "batch";
   error.value = "";
   session.value = null;
@@ -260,13 +266,20 @@ async function updateAll(rows = updates.value.length ? updates.value : flashTarg
     if (batchCancelled.value) break;
     const row = rows[index];
     batchCurrentIndex.value = index;
+    session.value = null;
     batchRows.value[index].status = "running";
     sessionEntries.value.push({ level: "info", display: `Starting ${index + 1} of ${rows.length}: ${row.title || row.selector}` });
     try {
-      let result = await run("voice_firmware_flash_start", { ...basePayload(String(row.selector || ""), String(row.template_key || "")), follow_logs: true });
+      // Check the live connection on the server, even if the displayed device
+      // list is stale. Offline devices must not block the remaining queue.
+      let result = await run("voice_firmware_flash_start", { ...basePayload(String(row.selector || ""), String(row.template_key || "")), follow_logs: true, skip_offline: true });
       applySession(result);
-      while (!batchCancelled.value && result.session_id && !["completed", "failed", "cancelled", "stopped"].includes(String(result.phase || result.status || "").toLowerCase())) {
+      if (batchCancelled.value && result.session_id) {
+        await run("voice_firmware_flash_stop", { session_id: result.session_id });
+      }
+      while (!batchCancelled.value && result.session_id && !["completed", "failed", "cancelled", "stopped", "skipped"].includes(String(result.phase || result.status || "").toLowerCase())) {
         await new Promise((resolve) => window.setTimeout(resolve, 1100));
+        if (batchCancelled.value) break;
         const afterSeq = lastSessionSequence(String(result.session_id || ""));
         result = await run("voice_firmware_flash_poll", { session_id: result.session_id, after_seq: afterSeq });
         applySession(result);
@@ -275,41 +288,56 @@ async function updateAll(rows = updates.value.length ? updates.value : flashTarg
         batchRows.value[index].status = "stopped";
         break;
       }
-      if (String(result.phase || "").toLowerCase() === "failed") throw new Error(String(result.error || result.message || "Firmware update failed."));
+      const state = String(result.phase || result.status || "").toLowerCase();
+      if (state === "skipped") {
+        batchRows.value[index].status = "skipped";
+        continue;
+      }
+      if (state !== "completed") throw new Error(String(result.error || result.message || "Firmware update did not complete."));
       batchRows.value[index].status = "completed";
       batchRows.value[index].progress = 100;
     } catch (batchError) {
       batchRows.value[index].status = "failed";
       batchRows.value[index].message = batchError instanceof Error ? batchError.message : "Firmware update failed.";
-      error.value = batchError instanceof Error ? batchError.message : "Firmware batch stopped.";
-      emit("notify", error.value, "error");
-      busy.value = "";
-      return;
+      sessionEntries.value.push({ level: "error", display: `${batchRows.value[index].title}: ${batchRows.value[index].message}` });
     }
   }
   busy.value = "";
   batchCurrentIndex.value = -1;
   if (batchCancelled.value) {
+    for (const row of batchRows.value) {
+      if (["queued", "running"].includes(String(row.status))) {
+        row.status = "stopped";
+        row.message = "Update queue stopped.";
+      }
+    }
+    session.value = { phase: "stopped", message: "Firmware update queue stopped." };
     emit("notify", "Firmware update queue stopped.", "error");
+    emit("refresh");
     return;
   }
-  session.value = { ...(session.value || {}), phase: "completed", progress_percent: 100, message: `Updated ${rows.length} satellite${rows.length === 1 ? "" : "s"}.` };
-  emit("notify", `Updated ${rows.length} satellite${rows.length === 1 ? "" : "s"}.`, "success");
+  const summary = [`Updated ${completedBatchCount.value} satellite${completedBatchCount.value === 1 ? "" : "s"}.`];
+  if (skippedBatchCount.value) summary.push(`Skipped ${skippedBatchCount.value} offline satellite${skippedBatchCount.value === 1 ? "" : "s"}.`);
+  if (failedBatchCount.value) summary.push(`${failedBatchCount.value} update${failedBatchCount.value === 1 ? "" : "s"} failed; see the device details below.`);
+  const message = summary.join(" ");
+  session.value = { phase: failedBatchCount.value ? "failed" : "completed", progress_percent: 100, message };
+  emit("notify", message, failedBatchCount.value ? "error" : skippedBatchCount.value ? "warning" : "success");
   emit("refresh");
 }
 
 async function stopSession() {
+  const batching = busy.value === "batch";
   const sessionId = String(session.value?.session_id || "");
   stopPoll();
   batchCancelled.value = true;
   if (!sessionId) {
     session.value = { ...(session.value || {}), phase: "stopped", message: "Firmware operation stopped." };
-    busy.value = "";
+    if (!batching) busy.value = "";
     return;
   }
   try { applySession(await run("voice_firmware_flash_stop", { session_id: sessionId })); }
   catch (stopError) { error.value = stopError instanceof Error ? stopError.message : "Firmware session could not be stopped."; }
-  busy.value = "";
+  if (!batching) busy.value = "";
 }
 
 async function loadPorts(notify = true) {
@@ -384,7 +412,7 @@ onBeforeUnmount(stopPoll);
     <article class="tm-form-card tvoice-firmware-overview">
       <header><div><span class="tv-eyebrow">Official Tater firmware</span><h3>{{ prebuiltSummary.available ? prebuiltSummary.version || "Latest release ready" : "Firmware manifest unavailable" }}</h3><p>Tater matches each connected satellite to its verified firmware family and installs updates one device at a time.</p></div><span class="tv-live-pill" :class="{ warning: !prebuiltSummary.available }"><i />{{ prebuiltSummary.available ? `${prebuiltSummary.device_count || 0} families ready` : "Unavailable" }}</span></header>
       <div class="tvoice-firmware-summary"><div><span>Connected targets</span><strong>{{ flashTargets.length }}</strong></div><div :class="{ attention: updates.length }"><span>Updates ready</span><strong>{{ updates.length }}</strong></div><div><span>Install method</span><strong>Verified OTA</strong></div></div>
-      <section v-if="updates.length" class="tvoice-updates"><header><div><h4>Ready to update</h4><p>Tater updates the satellite app first when needed, then safely stages Tater Linux in its inactive root slot.</p></div><button class="tv-button primary" type="button" :disabled="Boolean(busy)" @click="updateAll(updates)">Update All ({{ updates.length }})</button></header><div class="tvoice-update-list"><div v-for="row in updates" :key="`${row.selector}:${row.template_key}`"><span class="tvoice-update-mark">↑</span><div><strong>{{ row.title || row.selector }}</strong><span><b>App {{ row.installed || "unknown" }} · Linux {{ row.installed_system || "unknown" }}</b><i>→</i><b>{{ row.latest || "latest" }}</b></span></div><button class="tv-button" type="button" :disabled="Boolean(busy)" @click="flashOta(row)">Update</button></div></div></section>
+      <section v-if="updates.length" class="tvoice-updates"><header><div><h4>Ready to update</h4><p>Offline satellites are skipped. Updates continue if a device fails, with a result shown for each satellite.</p></div><button class="tv-button primary" type="button" :disabled="Boolean(busy)" @click="updateAll(updates)">Update All ({{ updates.length }})</button></header><div class="tvoice-update-list"><div v-for="row in updates" :key="`${row.selector}:${row.template_key}`"><span class="tvoice-update-mark">↑</span><div><strong>{{ row.title || row.selector }}</strong><span><b>App {{ row.installed || "unknown" }} · Linux {{ row.installed_system || "unknown" }}</b><i>→</i><b>{{ row.latest || "latest" }}</b></span></div><button class="tv-button" type="button" :disabled="Boolean(busy) || row.connected === false" @click="flashOta(row)">{{ row.connected === false ? "Offline" : "Update" }}</button></div></div></section>
       <div v-else class="tm-status-card live"><div><strong>Connected satellites are current</strong><span>{{ flashTargets.length ? "No newer firmware is available for the matched devices." : "Connect a supported satellite to check its installed version." }}</span></div></div>
       <div class="tm-inline-actions tvoice-firmware-primary-actions"><button v-if="!updates.length && flashTargets.length" class="tv-button" type="button" :disabled="Boolean(busy)" @click="updateAll(flashTargets)">Reinstall All Connected ({{ flashTargets.length }})</button><button class="tv-button" type="button" :disabled="Boolean(busy)" @click="openManualFlasher">Manual install or recovery</button></div>
     </article>
@@ -404,7 +432,8 @@ onBeforeUnmount(stopPoll);
 
         <section v-if="Object.keys(variant).length" class="tvoice-firmware-target"><img v-if="variant.hero_image_src" :src="String(variant.hero_image_src)" :alt="String(variant.hero_image_alt || variant.title)" /><div><span class="tv-eyebrow">Ready target</span><h4>{{ variant.title || selectedSelector || selectedTemplate }}</h4><p>{{ variant.subtitle || variant.detail }}</p><dl class="tm-detail-list"><dt>App</dt><dd>{{ variant.installed_firmware_version || "unknown" }}</dd><dt>Tater Linux</dt><dd>{{ variant.installed_system_version || "unknown" }}</dd><dt>Available</dt><dd>{{ prebuilt.version || variant.firmware_version || "unknown" }}</dd><dt>Method</dt><dd>{{ transport === "ota" ? "Verified app + A/B system OTA" : flashTransport === "amlogic_usb_burn" ? "Amlogic USB" : "ESP serial" }}</dd></dl></div></section>
 
-        <div v-if="artifact" class="tm-status-card live"><div><strong>Browser image ready</strong><span>{{ artifact.message }}</span></div><a v-if="artifact.binary_url" class="tv-button" :href="artifactUrl(artifact.binary_url)" target="_blank" rel="noreferrer">Download firmware image</a></div>
+        <div v-if="transport === 'ota' && variant.usb_upgrade_required" class="tm-status-card"><div><strong>One-time USB upgrade required</strong><span>{{ variant.firmware_update_status }}</span></div></div>
+        <div v-if="artifact" class="tm-status-card live"><div><strong>Browser image ready</strong><span>{{ artifact.message }}</span></div><a v-if="artifact.binary_url" :href="artifactUrl(artifact.binary_url)" class="tv-button" target="_blank" rel="noreferrer">Download firmware image</a></div>
         <footer class="tvoice-flasher-footer"><button class="tv-button danger" type="button" :disabled="Boolean(busy)" @click="clean">Clean firmware cache</button><div><button v-if="transport === 'ota'" class="tv-button primary" type="button" :disabled="Boolean(busy) || !canOta" @click="flashOta()">{{ busy === "ota" ? "Starting…" : "Install Latest OTA" }}</button><template v-else-if="transport === 'local_usb'"><button class="tv-button" type="button" :disabled="Boolean(busy)" @click="localUsbLogs">Open USB Logs</button><button class="tv-button primary" type="button" :disabled="Boolean(busy) || !canUsb" @click="localUsbFlash">{{ busy === "local-usb" ? "Starting…" : "Start Local USB Flash" }}</button></template><template v-else><a class="tv-button" href="https://taterassistant.com/usb-flasher/" target="_blank" rel="noreferrer">Open Secure Web Flasher ↗</a><button class="tv-button primary" type="button" :disabled="Boolean(busy) || !canUsb" @click="prepareBrowserImage">{{ busy === "browser" ? "Preparing…" : "Prepare Browser USB Image" }}</button></template></div></footer>
       </section>
     </PopupTransition>
@@ -413,9 +442,9 @@ onBeforeUnmount(stopPoll);
       <section class="tv-modal tvoice-progress-modal" role="dialog" aria-modal="true" aria-labelledby="tvoice-progress-title">
         <header><div><span class="tv-eyebrow">{{ sessionRunning ? "Firmware operation in progress" : progressTone === "failed" ? "Firmware operation needs attention" : "Firmware operation complete" }}</span><h2 id="tvoice-progress-title">{{ operationTitle }}</h2><p>{{ operationTarget || "Tater satellite firmware" }}</p></div><button class="tv-button" type="button" @click="closeProgress">{{ sessionRunning ? "Hide" : "Close" }}</button></header>
         <div class="tvoice-progress-hero" :class="`state-${progressTone}`"><div><span>{{ Math.round(progress) }}%</span><small>{{ progressLabel }}</small></div><div><strong>{{ currentBatchRow?.title || operationTarget || "Preparing firmware" }}</strong><p>{{ session?.message || currentBatchRow?.message || "Waiting for firmware output…" }}</p><progress :value="progress" max="100" /></div></div>
-        <div v-if="batchRows.length" class="tvoice-update-queue"><header><h3>Update queue</h3><span>One satellite at a time</span></header><ol><li v-for="(row, index) in batchRows" :key="String(row.key)" :class="`state-${row.status}`"><i>{{ row.status === "completed" ? "✓" : row.status === "running" ? "↻" : row.status === "failed" ? "!" : index + 1 }}</i><span><strong>{{ row.title }}</strong><small>{{ row.message || row.subtitle || (row.status === "queued" ? "Waiting" : row.status) }}</small></span><b>{{ row.status === "running" ? `${Math.round(Number(row.progress || 0))}%` : row.status }}</b></li></ol></div>
+        <div v-if="batchRows.length" class="tvoice-update-queue"><header><h3>Update queue</h3><span>One satellite at a time</span></header><ol><li v-for="(row, index) in batchRows" :key="String(row.key)" :class="`state-${row.status}`"><i>{{ row.status === "completed" ? "✓" : row.status === "running" ? "↻" : row.status === "failed" ? "!" : row.status === "skipped" ? "−" : index + 1 }}</i><span><strong>{{ row.title }}</strong><small>{{ row.message || row.subtitle || (row.status === "queued" ? "Waiting" : row.status) }}</small></span><b>{{ row.status === "running" ? `${Math.round(Number(row.progress || 0))}%` : row.status }}</b></li></ol></div>
         <details class="tvoice-firmware-session"><summary><span><b>Technical details</b><small>{{ sessionEntries.length }} log entr{{ sessionEntries.length === 1 ? "y" : "ies" }}</small></span><span>{{ session?.phase || session?.status || "starting" }}</span></summary><pre>{{ sessionEntries.map((entry) => entry.display || entry.message || entry.text).filter(Boolean).join('\n') || "Waiting for device output…" }}</pre></details>
-        <footer><span>{{ sessionRunning ? "You can hide this window; the update will keep running." : session?.message || progressLabel }}</span><button v-if="sessionRunning" class="tv-button danger" type="button" :disabled="!session?.session_id" @click="stopSession">{{ session?.session_id ? "Stop" : "Starting…" }}</button><button v-else class="tv-button primary" type="button" @click="closeProgress">Done</button></footer>
+        <footer><span>{{ sessionRunning ? "You can hide this window; the update will keep running." : session?.message || progressLabel }}</span><button v-if="sessionRunning" class="tv-button danger" type="button" :disabled="!session?.session_id && busy !== 'batch'" @click="stopSession">{{ busy === "batch" ? "Stop queue" : session?.session_id ? "Stop" : "Starting…" }}</button><button v-else class="tv-button primary" type="button" @click="closeProgress">Done</button></footer>
       </section>
     </PopupTransition>
   </section>

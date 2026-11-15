@@ -27,10 +27,10 @@ class VueCoresTests(unittest.TestCase):
         source = (REPO_ROOT / "frontend" / "src" / "cores" / "CoresApp.vue").read_text(encoding="utf-8")
 
         for feature in (
-            'id: "installed"',
-            'id: "store"',
-            'id: "manage"',
-            'id: "repos"',
+            "id:'installed'",
+            "id:'store'",
+            "id:'updates'",
+            "id:'repos'",
             'action: "start" | "stop"',
             "/settings",
             "update-all",
@@ -40,7 +40,7 @@ class VueCoresTests(unittest.TestCase):
             "shopAction('remove'",
             "Delete data",
             "Running Cores restart automatically",
-            '{ id: "manage", label: "Manage" }',
+            "id:'workspaces',label:'Workspaces'",
             "Core control center",
             "tv-manage-card",
             "Updates ready",
@@ -72,7 +72,7 @@ class VueCoresTests(unittest.TestCase):
         self.assertIn("featured_item_group", channel_chat)
         self.assertIn("core-channel-manager-featured", channel_chat)
         self.assertIn("CoreManagerItems", renderer)
-        self.assertIn("CoreManagerField", item)
+        self.assertIn("CoreFieldsEditor", item)
         self.assertIn('v-if="!item.hide_core_key"', item)
         self.assertIn("type === 'image_checklist'", field)
         self.assertNotIn("renderCorePanel:", app_js)

@@ -2596,6 +2596,8 @@ private final class TaterWindowController: NSWindowController, WKNavigationDeleg
     private let statusTitleLabel: NSTextField
     private let statusDetailLabel: NSTextField
     private var outputBuffer = ""
+    private var webReadinessGeneration = 0
+    private var pendingNavigation: WKNavigation?
 
     init() {
         webView = WKWebView(frame: .zero)
@@ -2614,7 +2616,8 @@ private final class TaterWindowController: NSWindowController, WKNavigationDeleg
         window.title = "Tater"
         window.minSize = NSSize(width: 1100, height: 720)
         window.center()
-        window.backgroundColor = .clear
+        window.backgroundColor = NSColor(calibratedRed: 17 / 255, green: 18 / 255, blue: 19 / 255, alpha: 1)
+        webView.underPageBackgroundColor = window.backgroundColor
 
         super.init(window: window)
 
@@ -2692,13 +2695,53 @@ private final class TaterWindowController: NSWindowController, WKNavigationDeleg
     }
 
     func load(url: URL) {
+        setStatus("Opening Tater", detail: "Loading your workspace...", webVisible: false)
+        // Let WebKit paint behind the setup screen before revealing the page.
+        webView.isHidden = false
         var request = URLRequest(
             url: url,
             cachePolicy: .reloadIgnoringLocalAndRemoteCacheData,
             timeoutInterval: 30.0
         )
         request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
-        webView.load(request)
+        pendingNavigation = webView.load(request)
+    }
+
+    func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        guard let navigation, navigation === pendingNavigation else { return }
+        waitForRenderedWebUI(generation: webReadinessGeneration)
+    }
+
+    private func waitForRenderedWebUI(generation: Int) {
+        guard generation == webReadinessGeneration, !setupView.isHidden else { return }
+        webView.evaluateJavaScript("document.documentElement.dataset.taterUiReady === 'true'") { [weak self] result, _ in
+            guard let self, generation == self.webReadinessGeneration else { return }
+            if result as? Bool == true {
+                self.setStatus("", webVisible: true)
+            } else {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+                    self?.waitForRenderedWebUI(generation: generation)
+                }
+            }
+        }
+    }
+
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        showNavigationFailure(navigation, error: error)
+    }
+
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        showNavigationFailure(navigation, error: error)
+    }
+
+    private func showNavigationFailure(_ navigation: WKNavigation?, error: Error) {
+        guard let navigation, navigation === pendingNavigation,
+              (error as NSError).code != NSURLErrorCancelled else { return }
+        setStatus("Could not open Tater", detail: error.localizedDescription, webVisible: false)
+    }
+
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        setStatus("Tater needs attention", detail: "Open Tater again from the menu bar to reload the workspace.", webVisible: false)
     }
 
     func webView(
@@ -2845,6 +2888,10 @@ private final class TaterWindowController: NSWindowController, WKNavigationDeleg
     }
 
     func setStatus(_ title: String, detail: String = "", webVisible: Bool) {
+        if !webVisible {
+            webReadinessGeneration += 1
+            pendingNavigation = nil
+        }
         statusTitleLabel.stringValue = title
         if !detail.isEmpty {
             statusDetailLabel.stringValue = detail
@@ -3390,7 +3437,6 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     private func refreshWindow(for state: BackendState) {
         switch state {
         case .running:
-            windowController?.setStatus("", webVisible: true)
             windowController?.load(url: backend.webURL)
         case .bootstrapping:
             windowController?.setStatus(

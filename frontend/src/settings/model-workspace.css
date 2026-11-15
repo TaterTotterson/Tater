@@ -1,0 +1,253 @@
+/* Voice and model workspaces use the same controls as the rest of Settings. */
+.tset-subsection-nav,
+.tset-main .tm-llm-tabs {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 5px; width: fit-content; max-width: 100%;
+  padding: 4px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg-soft);
+}
+.tset-main .tm-llm-tabs { position: static; top: auto; z-index: auto; }
+.tset-subsection-nav button,
+.tset-main .tm-llm-tabs button {
+  min-width: 0; padding: 7px 12px; border: 1px solid transparent; border-radius: 7px;
+  background: transparent; color: var(--tv-muted); font-size: 12px; font-weight: 400; cursor: pointer;
+}
+.tset-subsection-nav button[aria-current="page"],
+.tset-main .tm-llm-tabs button.active {
+  border-color: var(--line); color: var(--tv-text); background: var(--panel); box-shadow: none;
+}
+.tset-subsection-nav button:hover,
+.tset-main .tm-llm-tabs button:hover { color: var(--tv-text); }
+.tset-subsection-nav button > span { margin-left: 5px; color: var(--tv-muted); }
+.tset-main :is(.tm-stack, .tm-field, .tm-field-grid, .tm-native-model-picker) { min-width: 0; }
+.tset-main .tm-stack { gap: 18px; }
+.tset-main :is(.tm-form-card, .tv-panel) > header { margin-bottom: 16px; }
+.tset-main :is(.tm-form-card, .tv-panel) > header :is(h3, h4) { font-size: 15px; font-weight: 500; }
+.tset-main :is(.tm-form-card, .tv-panel) > header p { max-width: 78ch; color: var(--tv-muted); }
+.tset-main .tm-field-label { font-size: 13px; font-weight: 500; letter-spacing: 0; text-transform: none; }
+.tset-main .tm-field > small { font-size: 12px; line-height: 1.5; }
+.tset-main :is(.tm-field-grid, .tm-llm-route-fields) { gap: 17px; }
+.tset-main .tset-compact-model-row { grid-template-columns: minmax(0, 1fr); gap: 14px; }
+.tset-main .tset-compact-model-row > span { gap: 5px; }
+.tset-main .tm-basic-listening .tm-field-sections > .tm-form-card { padding: 0; border: 0; background: transparent; }
+.tset-main .tm-basic-listening .tm-field-sections > .tm-form-card > header { display: none; }
+
+/* The enhanced model picker retains the original native select and handlers. */
+.tm-native-model-picker { display: grid; gap: 10px; width: 100%; min-width: 0; }
+.tm-model-selection { display: flex; justify-content: space-between; align-items: center; gap: 15px; padding: 14px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel-2); }
+.tm-model-selection-copy { display: grid; min-width: 0; gap: 5px; }
+.tm-model-selection-copy > strong { color: var(--tv-text); font-size: 15px; font-weight: 500; overflow-wrap: anywhere; }
+.tm-model-selection-copy > small { color: var(--tv-muted); font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
+.tm-model-selection > button { flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; gap: 7px; }
+.tm-model-selection > button svg { width: 14px; height: 14px; }
+.tm-model-chooser { display: grid; gap: 13px; min-width: 0; padding: 16px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg-soft); }
+.tm-model-chooser > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.tm-model-chooser h4 { margin: 0; color: var(--tv-text); font-size: 14px; font-weight: 500; }
+.tm-model-chooser header p { margin: 4px 0 0; color: var(--tv-muted); font-size: 12px; }
+.tm-model-search { display: flex; align-items: center; gap: 9px; min-width: 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--tv-muted); }
+.tset-main .tm-model-search input[type="search"] { width: 100%; min-width: 0; height: auto !important; min-height: 20px !important; padding: 0 !important; border: 0 !important; color: var(--tv-text); background: transparent !important; font-size: 13px !important; box-shadow: none !important; outline-offset: 5px; }
+.tm-model-options { display: grid; min-width: 0; }
+.tm-model-option { display: flex; align-items: center; gap: 11px; min-width: 0; padding: 13px 0; border-bottom: 1px solid var(--line); cursor: pointer; }
+.tm-model-option:last-child { border-bottom: 0; }
+.tm-model-option input[type="radio"] { width: 16px; height: 16px; min-height: 0; margin: 0; flex: 0 0 16px; accent-color: var(--accent-soft); }
+.tm-model-option > span { display: grid; gap: 5px; min-width: 0; flex: 1 1 auto; }
+.tm-model-option strong { color: var(--tv-text); font-size: 13px; font-weight: 500; overflow-wrap: anywhere; }
+.tm-model-option small { color: var(--tv-muted); font-size: 12px; overflow-wrap: anywhere; }
+.tm-model-option.disabled { opacity: .55; cursor: default; }
+.tm-model-current { flex: 0 0 auto; padding: 3px 7px; border-radius: 5px; background: var(--panel-2); }
+.tm-model-chooser > footer { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 12px; }
+.tm-model-chooser > footer > span { color: var(--tv-muted); font-size: 12px; }
+.tm-model-identifier { min-width: 0; color: var(--tv-muted); font-size: 12px; }
+.tm-model-identifier summary { width: fit-content; cursor: pointer; font-size: 12px; }
+.tm-model-identifier code, .tm-model-identifier > small { display: block; margin-top: 8px; color: var(--tv-muted); font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; white-space: normal; }
+
+/* Long tuning forms remain in the same component, behind descriptive headings. */
+.tset-main .tset-advanced-section { padding: 15px 0; border: 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); border-radius: 0; background: transparent; box-shadow: none; }
+.tset-advanced-section > summary { color: var(--tv-text); cursor: pointer; font-size: 13px; font-weight: 400; }
+.tset-advanced-section > summary > small { display: block; margin: 5px 0 0 17px; color: var(--tv-muted); font-size: 12px; font-weight: 400; }
+.tset-advanced-section[open] > summary { margin-bottom: 18px; }
+.tset-main .tm-llm-thinking-card[open] { padding-top: 15px; }
+.tset-main .tm-llm-thinking-card > header { margin-top: 13px; }
+.tset-main .tm-context-shortcut > label { display: grid; grid-template-columns: minmax(0, 1fr) minmax(160px, .65fr); align-items: center; gap: 20px; }
+.tm-context-shortcut label > span { display: grid; gap: 5px; }
+.tm-context-shortcut strong { font-size: 13px; font-weight: 500; }
+.tm-context-shortcut small { color: var(--tv-muted); font-size: 12px; }
+.tset-main :is(.tm-llm-connection-card, .tm-llm-context-card, .tm-llm-thinking-card, .tm-llm-settings-section, .tm-llm-speculative, .tm-media-config-panel) { box-shadow: none; }
+.tset-main :is(.tm-llm-provider-picker, .tm-media-mode-grid, .tm-media-provider-grid, .tm-speech-provider-grid, .tm-choice-grid) { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }
+.tset-main :is(.tm-llm-provider-picker, .tm-choice-grid, .tm-speech-provider-grid) > button { padding: 12px; border-radius: 9px; border-color: var(--line); background: var(--panel); color: var(--tv-muted); box-shadow: none; transform: none; }
+.tset-main :is(.tm-llm-provider-picker, .tm-choice-grid, .tm-speech-provider-grid) > button:hover { background: var(--panel-2); transform: none; }
+.tset-main :is(.tm-llm-provider-picker, .tm-choice-grid, .tm-speech-provider-grid) > button.active { color: var(--accent-soft); border-color: color-mix(in srgb, var(--accent-soft) 35%, var(--line)); background: var(--tv-accent-soft); box-shadow: none; }
+.tset-main :is(.tm-llm-provider-picker, .tm-choice-grid, .tm-speech-provider-grid) > button strong { color: inherit; font-size: 13px; font-weight: 500; white-space: normal; overflow: visible; }
+.tset-main :is(.tm-llm-provider-picker, .tm-choice-grid, .tm-speech-provider-grid) > button small { color: var(--tv-muted); font-size: 11px; white-space: normal; overflow: visible; }
+.tset-main :is(.tm-llm-provider-picker, .tm-choice-grid, .tm-speech-provider-grid) > button > i { width: 27px; height: 27px; border: 0; border-radius: 7px; background: var(--panel-2); color: inherit; font-size: 10px; font-weight: 500; }
+.tset-main :is(.tm-llm-provider-picker, .tm-choice-grid, .tm-speech-provider-grid) > button > b { color: inherit; background: transparent; font-weight: 400; }
+.tset-main :is(.tm-llm-provider-picker, .tm-choice-grid, .tm-speech-provider-grid) > button:not(.active) > b { visibility: hidden; }
+.tset-main .tm-llm-add-route { width: fit-content; padding: 9px 13px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); font-size: 13px; font-weight: 400; }
+.tset-main .tm-llm-section-title { margin-bottom: 13px; }
+.tset-main .tm-llm-route-card::before { display: none; }
+.tset-main .tm-llm-route-card > header { margin-bottom: 0; }
+.tset-main .tm-llm-route-card > header .tv-eyebrow { display: none; }
+.tset-main .tm-llm-provider-section .tm-llm-section-title { margin-bottom: 0; }
+.tset-main .tm-llm-section-title strong { font-size: 13px; font-weight: 500; }
+.tset-main .tm-llm-section-title span { font-size: 12px; }
+.tset-main .tm-llm-connection-card { padding: 0; border: 0; background: transparent; }
+.tset-main .tm-llm-connection-card > header { margin-bottom: 15px; padding-top: 3px; }
+.tset-main .tm-llm-route-state { font-size: 11px; font-weight: 400; }
+.tset-main .tm-media-header .tm-media-title > i { width: 32px; height: 32px; border-radius: 8px; font-size: 10px; }
+.tm-engine-chooser { min-width: 0; }
+.tm-engine-chooser > summary, .tm-library-downloads > summary { display: flex; align-items: center; justify-content: space-between; gap: 15px; padding: 14px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel-2); cursor: pointer; list-style: none; }
+.tm-engine-chooser > summary::-webkit-details-marker, .tm-library-downloads > summary::-webkit-details-marker { display: none; }
+.tm-engine-chooser > summary > span:first-child, .tm-library-downloads > summary > span:first-child { display: grid; min-width: 0; gap: 5px; }
+.tm-engine-chooser summary strong, .tm-library-downloads summary strong { color: var(--tv-text); font-size: 15px; font-weight: 500; }
+.tm-engine-chooser summary small, .tm-library-downloads summary small { color: var(--tv-muted); font-size: 12px; }
+.tm-engine-chooser > summary > span:last-child, .tm-library-downloads > summary > span:last-child { flex-shrink: 0; border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; color: var(--tv-text); background: var(--panel); font-size: 12px; }
+.tm-engine-chooser[open] > summary, .tm-library-downloads[open] > summary { margin-bottom: 15px; }
+
+/* Library discovery, installed files, and all download controls stay together. */
+.tset-main .tm-hf-guide { padding: 0; border: 0; background: transparent; }
+.tset-main .tm-hf-guide > header .tv-eyebrow, .tset-main .tm-hf-steps { display: none; }
+.tset-main .tm-hf-guide > header h3 { font-size: 17px; }
+.tset-main .tm-hf-filters { display: grid; grid-template-columns: minmax(160px, .5fr) minmax(0, 1fr); align-items: end; gap: 15px; }
+.tset-main .tm-hf-view-switch { display: flex; flex-wrap: wrap; gap: 6px; padding: 0; margin-top: 16px; border: 0; background: transparent; }
+.tset-main .tm-hf-view-switch button { padding: 7px 10px; border: 1px solid transparent; border-radius: 7px; color: var(--tv-muted); background: transparent; font-size: 12px; font-weight: 400; }
+.tset-main .tm-hf-view-switch button.active { border-color: var(--line); background: var(--panel); color: var(--tv-text); box-shadow: none; }
+.tset-main .tm-model-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 13px; }
+.tset-main .tm-model-card { min-width: 0; padding: 17px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); box-shadow: none; }
+.tset-main .tm-model-card.pick { border-color: var(--line); background: var(--panel); }
+.tset-main .tm-model-card-preview { padding: 0; margin-block: 13px; color: var(--tv-text); background: transparent; text-align: left; }
+.tset-main .tm-model-card-preview > strong { color: var(--tv-text); font-size: 16px; font-weight: 500; overflow-wrap: anywhere; }
+.tset-main .tm-model-card-preview > small, .tset-main .tm-model-meta { color: var(--tv-muted); font-size: 12px; }
+.tset-main .tm-model-card .tm-model-kind, .tset-main .tm-model-installed-badge { padding: 3px 6px; border: 0; border-radius: 5px; background: var(--panel-2); font-size: 11px; font-weight: 400; }
+.tset-main .tm-model-card .tm-model-kind { color: var(--accent-soft); background: var(--tv-accent-soft); }
+.tset-main .tm-model-card-actions { flex-wrap: wrap; margin-top: auto; padding-top: 9px; }
+.tset-main .tm-hf-download-center { padding: 16px; background: var(--panel); }
+.tset-main .tm-library-downloads > summary { padding: 12px 0; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; background: transparent; }
+.tset-main .tm-library-downloads summary strong { font-size: 13px; }
+.tset-main .tm-hf-download-center > header h3 { font-size: 14px; }
+.tset-main .tm-installed-list > div { display: flex; flex-wrap: wrap; gap: 14px; padding: 17px 0; background: transparent; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; }
+.tset-main .tm-installed-list > div > div { flex: 1 1 220px; min-width: 0; }
+.tset-main .tm-installed-list strong { font-size: 14px; font-weight: 500; }
+.tset-main .tm-installed-list > div > div > span { margin-top: 6px; color: var(--tv-muted); font-size: 12px; }
+.tset-main .tm-library-installed .tm-model-identifier { margin-block: 5px; }
+
+/* Device rows lead directly to each satellite's settings workspace. */
+.tset-main .tvoice-pairing-card { padding: 0; border: 0; background: transparent; }
+.tset-main .tvoice-pairing-card > header { align-items: center; margin-bottom: 10px; }
+.tset-main .tvoice-pairing-card > header .tv-eyebrow { display: none; }
+.tset-main .tvoice-pairing-steps { display: flex; flex-wrap: wrap; gap: 10px 18px; padding: 0; border: 0; background: transparent; }
+.tset-main .tvoice-pairing-steps > span { color: var(--tv-muted); font-size: 11px; }
+.tset-main .tvoice-pairing-steps b { width: 18px; height: 18px; color: var(--tv-muted); background: var(--panel-2); font-weight: 400; }
+.tvoice-device-roster { min-width: 0; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); }
+.tset-main .tvoice-device-roster > .tvoice-satellite-card { position: relative; display: block; margin: 0; padding: 18px; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; background: transparent; }
+.tset-main .tvoice-device-roster > .tvoice-satellite-card:last-child { border-bottom: 0; }
+.tset-main .tvoice-device-head { display: flex; flex-wrap: nowrap; align-items: center; gap: 15px; margin: 0; padding: 0 108px 0 0; border: 0; }
+.tset-main .tvoice-device-identity { display: flex; align-items: center; gap: 12px; min-width: 0; flex: 1 1 auto; }
+.tset-main .tvoice-device-identity > img { width: 35px; height: 42px; flex: 0 0 35px; padding: 3px; border: 0; border-radius: 8px; background: var(--panel-2); object-fit: contain; }
+.tset-main .tvoice-device-identity > div { min-width: 0; }
+.tset-main .tvoice-device-identity h3 { color: var(--tv-text); font-size: 14px; font-weight: 500; }
+.tset-main .tvoice-device-identity p { margin-top: 4px; color: var(--tv-muted); font-size: 12px; overflow-wrap: anywhere; }
+.tset-main .tvoice-device-identity .tvoice-badges { gap: 8px; margin-top: 5px; }
+.tset-main .tvoice-device-identity .tvoice-badges > span { padding: 0; border: 0; background: transparent; color: var(--tv-muted); font-size: 11px; }
+.tset-main .tvoice-connection-pill { flex: 0 0 auto; padding: 0; border: 0; background: transparent; font-size: 12px; }
+.tset-main .tvoice-device-list-heading h3 { font-size: 17px; font-weight: 500; }
+.tset-main .tvoice-device-list-heading p { font-size: 12px; }
+
+@media (min-width: 1100px) {
+  .tset-main .tm-llm-provider-picker { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+}
+
+@media (max-width: 900px) {
+  .tset-main .tm-hf-filters { grid-template-columns: minmax(0, 1fr); }
+  .tset-main .tm-model-grid { grid-template-columns: minmax(0, 1fr); }
+  .tset-main .tvoice-device-head { flex-wrap: wrap; }
+  .tset-main .tvoice-device-identity { flex-basis: 100%; }
+}
+@media (max-width: 600px) {
+  .tset-subsection-nav, .tset-main .tm-llm-tabs { width: 100%; }
+  .tset-subsection-nav button, .tset-main .tm-llm-tabs button { flex: 1 1 auto; padding-inline: 8px; }
+  .tm-model-selection { flex-wrap: wrap; align-items: flex-start; }
+  .tm-model-selection > button { padding: 8px 11px; }
+  .tm-model-chooser { padding: 12px; }
+  .tm-model-chooser > header { flex-wrap: wrap; }
+  .tm-model-chooser > footer .tv-button { width: 100%; }
+  .tm-model-option { flex-wrap: wrap; }
+  .tm-model-current { margin-left: 27px; }
+  .tset-main .tm-model-search input[type="search"] { font-size: 16px !important; }
+  .tset-main .tm-context-shortcut > label { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+  .tset-main :is(.tm-llm-provider-picker, .tm-media-mode-grid, .tm-media-provider-grid, .tm-speech-provider-grid, .tm-choice-grid) { grid-template-columns: minmax(0, 1fr); }
+  .tm-engine-chooser > summary, .tm-library-downloads > summary { flex-wrap: wrap; }
+  .tset-main .tvoice-device-head { padding-right: 0; }
+  .tset-main .tvoice-device-roster > .tvoice-satellite-card { padding: 15px; }
+  .tset-main .tvoice-pairing-card > header { flex-wrap: wrap; }
+}
+@media (pointer: coarse) {
+  .tset-subsection-nav button, .tset-main .tm-llm-tabs button, .tm-model-option, .tm-engine-chooser > summary { min-height: 44px; }
+}
+
+/* Focused workspaces replace a settings page while its drafts stay mounted. */
+.tset-workspace-origin, .tset-workspace-host { min-width: 0; }
+.tset-focused-workspace { display: grid; gap: 20px; min-width: 0; color: var(--tv-text); scroll-margin-top: 20px; }
+.tset-workspace-back { display: inline-flex; align-items: center; gap: 8px; justify-self: start; padding: 8px 0; border: 0; background: transparent; color: var(--accent-soft); font-size: 13px; cursor: pointer; }
+.tset-workspace-heading { display: flex; align-items: flex-start; justify-content: space-between; flex-wrap: wrap; gap: 15px; }
+.tset-workspace-heading > div { min-width: 0; }
+.tset-workspace-heading h1 { margin: 4px 0 0; color: var(--tv-text); font-size: 25px; font-weight: 500; letter-spacing: -.6px; overflow-wrap: anywhere; scroll-margin-top: 24px; }
+.tset-workspace-heading p { margin: 7px 0 0; max-width: 75ch; color: var(--tv-muted); font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+.tset-workspace-heading > .tv-live-pill { margin-top: 8px; padding: 0; border: 0; background: transparent; white-space: nowrap; }
+.tset-workspace-footer { position: sticky; bottom: 0; z-index: 8; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 14px; padding: 17px 0; border-top: 1px solid var(--line); background: var(--bg); }
+.tset-workspace-footer > span { max-width: 58ch; color: var(--tv-muted); font-size: 12px; line-height: 1.5; }
+.tset-main .tm-model-choice-workspace { padding: 19px; border-radius: 12px; background: var(--panel); }
+.tm-model-choice-workspace h2 { margin: 0; font-size: 17px; font-weight: 500; }
+.tm-model-choice-workspace .tm-model-options { border: 1px solid var(--line); border-radius: 10px; }
+.tm-model-choice-workspace .tm-model-option { padding: 16px 14px; }
+.tm-model-choice-workspace .tm-model-option:has(input:checked) { background: var(--tv-accent-soft); }
+.tm-model-choice-workspace .tm-model-option:first-child { border-radius: 9px 9px 0 0; }
+.tm-model-choice-workspace .tm-model-option:last-child { border-radius: 0 0 9px 9px; }
+.tm-model-choice-workspace .tm-model-option:only-child { border-radius: 9px; }
+.tm-model-choice-workspace .tm-model-option code { font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; white-space: normal; }
+.tm-model-choice-workspace .tv-empty { padding: 16px; }
+.tm-model-choice-workspace .tm-model-current { color: var(--accent-soft); background: var(--tv-accent-soft); font-size: 11px; }
+
+.tset-main .tvoice-device-head { padding-right: 0; align-items: center !important; }
+.tvoice-device-actions { display: grid; justify-items: end; gap: 10px; flex: 0 0 auto; }
+.tvoice-device-actions .tv-button { display: inline-flex; align-items: center; gap: 8px; }
+.tvoice-device-actions .tv-button svg { width: 14px; height: 14px; }
+.tvoice-device-actions .tvoice-connection-pill { white-space: nowrap; }
+.tvoice-device-workspace, .tvoice-workspace-display, .tvoice-workspace-info, .tvoice-workspace-fields { display: grid; min-width: 0; gap: 18px; }
+.tvoice-device-workspace .tvoice-settings-overview { padding: 13px 0; border: 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); border-radius: 0; background: transparent; }
+.tvoice-device-workspace .tvoice-settings-overview dl { grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 15px; }
+.tvoice-device-workspace .tvoice-settings-overview dt { font-size: 11px; font-weight: 400; text-transform: none; letter-spacing: 0; }
+.tvoice-device-workspace .tvoice-settings-overview dd { font-size: 12px; font-weight: 500; white-space: normal; overflow-wrap: anywhere; }
+.tset-main .tvoice-workspace-tabs { margin: 0; }
+.tset-main .tvoice-room-controls, .tvoice-workspace-display > section, .tvoice-workspace-info > .tm-form-card { min-width: 0; padding: 18px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); box-shadow: none; }
+.tset-main .tvoice-room-controls h2, .tvoice-workspace-info h2 { margin: 0; font-size: 17px; font-weight: 500; }
+.tvoice-room-controls > header { display: grid; gap: 6px; }
+.tvoice-room-controls > header p { margin: 0; color: var(--tv-muted); }
+.tvoice-room-controls .tvoice-volume { margin: 0 0 18px; padding: 12px 0; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; background: transparent; }
+.tvoice-room-controls .tvoice-volume small { color: var(--tv-muted); font-size: 12px; }
+.tset-main .tvoice-room-controls .tm-field-sections > .tm-form-card { padding: 0; border: 0; background: transparent; }
+.tvoice-workspace-identify { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 14px; padding-top: 17px; border-top: 1px solid var(--line); }
+.tvoice-workspace-identify h3 { margin: 0; font-size: 13px; font-weight: 500; }
+.tvoice-workspace-identify p { margin: 5px 0 0; color: var(--tv-muted); font-size: 12px; }
+.tvoice-workspace-display > section > header { margin-bottom: 14px; }
+.tvoice-workspace-display h3 { margin: 0; font-size: 15px; font-weight: 500; }
+.tvoice-workspace-display header p { margin: 6px 0 0; color: var(--tv-muted); font-size: 12px; }
+.tvoice-workspace-display .tvoice-section-mark { display: none; }
+.tvoice-workspace-display .tvoice-display-photos { display: grid; gap: 13px; }
+.tvoice-workspace-display .tvoice-display-photos > small { font-size: 12px; color: var(--tv-muted); }
+.tvoice-workspace-info .tvoice-device-overview { margin-top: 16px; border-color: var(--line); background: var(--panel-2); }
+.tvoice-workspace-info .tvoice-device-overview > dl > div { background: transparent; border: 0; }
+.tvoice-workspace-info .tvoice-device-overview dd { white-space: normal; overflow-wrap: anywhere; }
+.tvoice-workspace-info .tvoice-info-sections { margin-top: 18px; }
+.tvoice-workspace-info .tvoice-info-sections > section { border: 0; border-top: 1px solid var(--line); border-radius: 0; background: transparent; box-shadow: none; }
+.tvoice-workspace-info .tvoice-info-sections :is(h3,dt,dd) { font-size: 12px; font-weight: 400; }
+.tvoice-workspace-info .tvoice-info-sections dd { white-space: normal; overflow-wrap: anywhere; }
+@media (max-width: 600px) {
+  .tset-workspace-heading h1 { font-size: 23px; }
+  .tset-workspace-footer { align-items: stretch; flex-direction: column; }
+  .tset-workspace-footer .tm-inline-actions { display: flex; flex-wrap: wrap; }
+  .tset-workspace-footer .tv-button { flex: 1 1 auto; }
+  .tset-main .tm-model-choice-workspace { padding: 13px; }
+  .tvoice-device-actions { justify-items: start; }
+  .tvoice-device-workspace .tvoice-settings-overview dl { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (pointer: coarse) {
+  .tset-workspace-back, .tvoice-device-actions .tv-button { min-height: 44px; }
+}

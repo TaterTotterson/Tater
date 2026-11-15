@@ -207,6 +207,46 @@ def _echo_manifest() -> dict[str, object]:
 
 
 class EchoFirmwareOtaTests(unittest.TestCase):
+    def test_new_platform_requires_usb_before_any_bridge_or_ota_is_offered(self):
+        for target in ('biscuit', 'radar', 'checkers', 'cronos', 'crown', 'athena', 'rook'):
+            with self.subTest(target=target):
+                payload = _echo_manifest()
+                payload['version'] = 'v9.0.0'
+                payload['targets'][target]['ota_policy'] = {
+                    'package_schema': 2, 'platform': f'echo-hardware-v1/{target}'}
+                selector = f'native:{target}-platform-test'
+                row = {'connected': True, 'selected': True, 'source': 'tater_native',
+                       'firmware_target': target, 'board': target,
+                       'device_info': {'model': target, 'project_version': 'v4.2.3'},
+                       'capabilities': {'ota': True, 'screen': target not in ('biscuit', 'radar')}}
+                spec = firmware._template_spec_by_key(target)
+                with (
+                    mock.patch.object(firmware, '_remote_json', return_value=payload),
+                    mock.patch.object(firmware, '_native_template_specs', return_value=[spec]),
+                    mock.patch.object(firmware, '_prebuilt_firmware_panel_summary', return_value={'available': True}),
+                    mock.patch.object(firmware, '_load_recorded_firmware_version', return_value={}),
+                ):
+                    panel = firmware.firmware_panel_payload({'clients': {selector: row}})
+                    blocked = panel['variants'][target][selector]
+                    self.assertFalse(blocked['ota_supported'])
+                    self.assertTrue(blocked['usb_upgrade_required'])
+                    for kind in ('ota', 'ota_bridge', 'system'):
+                        self.assertNotIn(kind, blocked['prebuilt_firmware']['artifacts'])
+                    row['capabilities'].update(ota_package_schema=2, ota_platform=f'echo-hardware-v1/{target}')
+                    panel = firmware.firmware_panel_payload({'clients': {selector: row}})
+                    self.assertTrue(panel['variants'][target][selector]['ota_supported'])
+
+    def test_direct_update_request_cannot_bypass_the_platform_guard(self):
+        with (
+            mock.patch.object(firmware, '_prune_firmware_sessions'),
+            mock.patch.object(firmware, '_active_flash_for_selector', return_value=None),
+            mock.patch.object(firmware, '_create_native_ota_artifact') as download,
+            self.assertRaisesRegex(RuntimeError, 'USB upgrade'),
+        ):
+            firmware._start_flash_session({'selector': 'native:rook', 'ota_supported': False,
+                                           'usb_upgrade_reason': 'One-time USB upgrade required'})
+        download.assert_not_called()
+
     def test_echo_release_manifest_is_adapted_to_verified_native_ota(self) -> None:
         source = firmware._firmware_manifest_source("biscuit")
         with mock.patch.object(firmware, "_remote_json", return_value=_echo_manifest()):
@@ -312,6 +352,23 @@ class EchoFirmwareOtaTests(unittest.TestCase):
                 prebuilt, {"ota_bundle_components_version": 1}, {}
             ),
         )
+
+    def test_hardware_components_v3_bridges_ffmpeg_only_v2_updaters(self) -> None:
+        device = _echo_manifest()["targets"]["checkers"]
+        device["ota_migrations"] = [{
+            "id": "linux-app-components-v3",
+            "required_capability": "ota_bundle_components_version",
+            "minimum_capability_version": 3,
+            "bridge_artifact": "ota_bridge",
+            "final_artifact": "ota",
+        }]
+        prebuilt = {"version": "v4.2.3", "device": device}
+        bridge = firmware._required_ota_migration(prebuilt, {"ota_bundle_components_version": 2}, {})
+        self.assertEqual("bridge", bridge["stage"])
+        pending = {"migration_id": "linux-app-components-v3", "version": "v4.2.3"}
+        final = firmware._required_ota_migration(prebuilt, {"ota_bundle_components_version": 3}, pending)
+        self.assertEqual("final", final["stage"])
+        self.assertEqual({}, firmware._required_ota_migration(prebuilt, {"ota_bundle_components_version": 3}, {}))
 
     def test_staged_session_precaches_both_artifacts_and_starts_with_bridge(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

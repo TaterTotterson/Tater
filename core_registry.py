@@ -1,4 +1,5 @@
 import importlib
+import json
 import logging
 import os
 import re
@@ -142,6 +143,19 @@ def _coerce_bool(value: Any, default: bool) -> bool:
     return default
 
 
+def _load_workspace_metadata(raw: Any) -> Dict[str, Any]:
+    """Optional, data-only presentation hints; older and third-party cores need none."""
+    if not isinstance(raw, dict) or raw.get("schema") != 1:
+        return {}
+    try:
+        encoded = json.dumps(raw, allow_nan=False)
+        if len(encoded) > 32768:
+            return {}
+        return json.loads(encoded)
+    except (TypeError, ValueError, OverflowError, RecursionError):
+        return {}
+
+
 def _load_webui_tab_config(module: Any) -> Dict[str, Any]:
     raw = getattr(module, "CORE_WEBUI_TAB", None)
     if not isinstance(raw, dict):
@@ -161,6 +175,7 @@ def _load_webui_tab_config(module: Any) -> Dict[str, Any]:
         "label": label,
         "order": order,
         "requires_running": _coerce_bool(raw.get("requires_running"), True),
+        "workspace": _load_workspace_metadata(raw.get("workspace") or getattr(module, "CORE_WORKSPACE", None)),
     }
 
 

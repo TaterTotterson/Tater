@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { getJson, postJson } from "../shared/api";
+import CatalogToolbar from "../shared/CatalogToolbar.vue";
+import UiIcon from "../shared/UiIcon.vue";
+import { catalogMatches } from "../shared/catalogSearch";
 import ManifestField from "../shared/ManifestField.vue";
 import PopupTransition from "../shared/PopupTransition.vue";
 import type { JsonRow, VerbaPayload, VerbasMountOptions } from "./types";
@@ -52,6 +55,11 @@ const installedRows = computed(() => {
   });
   return rows.sort((a, b) => rowName(a).localeCompare(rowName(b), undefined, { sensitivity: "base", numeric: true }));
 });
+
+const searchQuery = ref("");
+const filteredInstalledRows = computed(() => installedRows.value.filter((row) => catalogMatches(searchQuery.value, row.id, rowName(row), rowDescription(row))));
+const filteredAvailable = computed(() => available.value.filter((row: JsonRow) => catalogMatches(searchQuery.value, row.id, row.name, row.description, row.source_label)));
+const filteredManaged = computed(() => installed.value.filter((row: JsonRow) => catalogMatches(searchQuery.value, row.id, row.name, row.description, row.source_label)).slice().sort(compareRows));
 
 function text(value: unknown): string { return String(value ?? "").trim(); }
 function encode(value: unknown): string { return encodeURIComponent(text(value)); }
@@ -228,7 +236,7 @@ defineExpose({ select: selectTab });
       <div class="tv-heading-actions"><span class="tv-live-pill" :class="{ busy: Boolean(busy) }"><i />{{ busy || 'Ready' }}</span><button class="tv-button" type="button" @click="refresh()">Refresh</button></div>
     </header>
 
-    <div class="tv-metrics">
+    <div class="tv-metrics workspace-library-summary">
       <div><span>Installed</span><strong>{{ installed.length || runtimeItems.length }}</strong></div>
       <div><span>Enabled</span><strong>{{ enabledCount }}</strong></div>
       <div><span>Store</span><strong>{{ catalog.length }}</strong></div>
@@ -241,25 +249,27 @@ defineExpose({ select: selectTab });
       <button v-for="tab in tabs" :key="tab.id" type="button" :class="{ active: activeTab === tab.id }" @click="selectTab(tab.id)">{{ tab.label }}<span v-if="tab.id === 'manage' && updates.length">{{ updates.length }}</span></button>
     </nav>
 
+    <CatalogToolbar v-if="activeTab !== 'repos'" v-model="searchQuery" label="Search Verba" :count="activeTab === 'installed' ? filteredInstalledRows.length : activeTab === 'store' ? filteredAvailable.length : filteredManaged.length" />
+
     <section v-if="activeTab === 'installed'" class="tvb-card-grid">
-      <article v-for="row in installedRows" :key="row.id" class="tv-panel tvb-verba-card">
+      <article v-for="row in filteredInstalledRows" :key="row.id" class="tv-panel tvb-verba-card"><span class="workspace-item-icon"><UiIcon name="verbas" /></span>
         <header><div><span class="tv-eyebrow">{{ row.id }}</span><h2>{{ rowName(row) }}</h2></div><span class="tv-state" :class="{ good: row.runtime?.enabled }">{{ row.runtime?.enabled ? 'Enabled' : 'Disabled' }}</span></header>
         <p>{{ rowDescription(row) }}</p>
-        <div class="tvb-version"><span>Installed {{ row.shop?.installed_ver || '0.0.0' }}</span><span>Store {{ row.shop?.store_ver || '-' }}</span><span>{{ row.shop?.source_label || 'local' }}</span></div>
-        <div v-if="rowPlatforms(row).length" class="ti-tags"><span v-for="platform in rowPlatforms(row).slice(0, 12)" :key="platform">{{ platform }}</span></div>
+        <details class="workspace-item-details"><summary>Version & details</summary><code class="workspace-item-id">{{ row.id }}</code><div class="tvb-version"><span>Installed {{ row.shop?.installed_ver || '0.0.0' }}</span><span>Store {{ row.shop?.store_ver || '-' }}</span><span>{{ row.shop?.source_label || 'local' }}</span></div>
+        <div v-if="rowPlatforms(row).length" class="ti-tags"><span v-for="platform in rowPlatforms(row).slice(0, 12)" :key="platform">{{ platform }}</span></div></details>
         <footer><button v-if="row.runtime?.settings?.length" class="tv-button" type="button" @click="openSettings(row.runtime)">Settings</button><span v-else>{{ row.runtime ? 'No configurable settings' : 'Runtime unavailable' }}</span><button v-if="row.runtime" class="tv-button" :class="{ primary: !row.runtime.enabled }" type="button" @click="toggleVerba(row.id, !row.runtime.enabled)">{{ row.runtime.enabled ? 'Disable' : 'Enable' }}</button></footer>
       </article>
-      <div v-if="!installedRows.length" class="tv-empty">No installed Verba found.</div>
+      <div v-if="!filteredInstalledRows.length" class="tv-empty">{{ searchQuery ? 'No matching Verba.' : 'No installed Verba found.' }}</div>
     </section>
 
     <section v-else-if="activeTab === 'store'" class="tvb-card-grid">
-      <article v-for="row in available" :key="row.id" class="tv-panel tvb-verba-card">
+      <article v-for="row in filteredAvailable" :key="row.id" class="tv-panel tvb-verba-card"><span class="workspace-item-icon"><UiIcon name="verbas" /></span>
         <header><div><span class="tv-eyebrow">{{ row.id }}</span><h2>{{ row.name || row.id }}</h2></div><span class="tv-state">v{{ row.version || '-' }}</span></header>
-        <p>{{ row.description || 'No description provided.' }}</p>
+        <p>{{ row.description || 'No description provided.' }}</p><details class="workspace-item-details"><summary>Package details</summary><code>{{ row.id }}</code></details>
         <div v-if="row.platforms?.length" class="ti-tags"><span v-for="platform in row.platforms.slice(0, 12)" :key="platform">{{ text(platform).replaceAll('_', ' ') }}</span></div>
         <footer><span>{{ row.source_label || 'Tater Shop' }}</span><button class="tv-button primary" type="button" @click="shopAction('install', row.id)">Install</button></footer>
       </article>
-      <div v-if="!available.length" class="tv-empty">No additional Verba are available from the configured repositories.</div>
+      <div v-if="!filteredAvailable.length" class="tv-empty">No additional Verba are available from the configured repositories.</div>
     </section>
 
     <section v-else-if="activeTab === 'manage'" class="tvb-manage-list tv-manage-workspace">
@@ -267,12 +277,12 @@ defineExpose({ select: selectTab });
         <div class="tv-manage-hero-copy"><span class="tv-eyebrow">Manage library</span><h2>Verba control center</h2><p>Keep Tater’s tools current, choose what is enabled, and remove tools you no longer use.</p></div>
         <div class="tv-manage-overview"><div><span>Installed</span><strong>{{ installed.length }}</strong></div><div :class="{ attention: updates.length }"><span>Updates ready</span><strong>{{ updates.length }}</strong></div><button class="tv-button primary" type="button" :disabled="!updates.length" @click="shopAction('update-all')">Update all</button></div>
       </div>
-      <article v-for="row in installed.slice().sort(compareRows)" :key="row.id" class="tv-panel tvb-manage-row tv-manage-card" :class="{ 'has-update': row.update_available }">
+      <article v-for="row in filteredManaged" :key="row.id" class="tv-panel tvb-manage-row tv-manage-card" :class="{ 'has-update': row.update_available }">
         <div class="tv-manage-identity"><span class="tv-manage-monogram">{{ text(row.name || row.id).charAt(0).toUpperCase() }}</span><div><span class="tv-eyebrow">{{ row.id }}</span><h3>{{ row.name || row.id }}</h3><small>{{ row.source_label || 'Local Verba' }}</small></div></div>
         <div class="tv-manage-version"><div><span>Installed</span><strong>{{ row.installed_ver || '0.0.0' }}</strong></div><i>→</i><div><span>Latest</span><strong>{{ row.store_ver || '-' }}</strong></div><span class="tv-state" :class="row.update_available ? 'pending' : 'good'">{{ row.update_available ? 'Update ready' : 'Current' }}</span></div>
         <div class="tv-manage-actions"><span v-if="runtimeById.has(canonicalId(row.id))" class="tv-manage-runtime" :class="{ online: runtimeById.get(canonicalId(row.id))?.enabled }"><i />{{ runtimeById.get(canonicalId(row.id))?.enabled ? 'Enabled' : 'Disabled' }}</span><button class="tv-button" :class="{ primary: row.update_available }" type="button" :disabled="!row.update_available" @click="shopAction('update', row.id)">{{ row.update_available ? 'Update' : 'Current' }}</button><button v-if="runtimeById.has(canonicalId(row.id))" class="tv-button" type="button" @click="toggleVerba(row.id, !runtimeById.get(canonicalId(row.id))?.enabled)">{{ runtimeById.get(canonicalId(row.id))?.enabled ? 'Disable' : 'Enable' }}</button><label v-if="!row.required" class="ti-purge"><input v-model="purgeIds[row.id]" type="checkbox" /> Delete data</label><button v-if="!row.required" class="tv-button danger" type="button" @click="shopAction('remove', row.id)">Remove</button><span v-else class="tv-state good">Required</span></div>
       </article>
-      <div v-if="!installed.length" class="tv-empty">No installed Verba found.</div>
+      <div v-if="!installed.length" class="tv-empty">{{ searchQuery ? 'No matching Verba.' : 'No installed Verba found.' }}</div>
     </section>
 
     <section v-else class="tv-panel tvb-repos tv-repository-manager">

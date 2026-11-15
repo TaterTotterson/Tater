@@ -1,8 +1,10 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, reactive, ref, watch } from "vue";
+import { computed, inject, nextTick, onMounted, reactive, ref, watch } from "vue";
 import { postJson } from "../../shared/api";
 import type { CoreTabSpec, JsonRow } from "../types";
 import CoreManagerItems from "./CoreManagerItems.vue";
+import {workspaceKey} from '../drafts';
+import {workspaceTabs,presentationFor} from '../workspace';
 
 const props = defineProps<{
   payload: JsonRow;
@@ -12,6 +14,7 @@ const props = defineProps<{
   notify?: (message: string, tone?: string) => void;
 }>();
 
+const metadata=inject(workspaceKey,ref<JsonRow>({}));
 const activeTab = ref("chat");
 const activeGroup = ref("");
 const selectedChannel = ref("");
@@ -29,7 +32,7 @@ const channels = computed<JsonRow[]>(() => (Array.isArray(ui.value.channels) ? u
 const messages = computed<JsonRow[]>(() => Array.isArray(ui.value.messages) ? ui.value.messages : []);
 const composer = computed<JsonRow>(() => ui.value.composer && typeof ui.value.composer === "object" ? ui.value.composer : {});
 const managerTabs = computed<JsonRow[]>(() => (Array.isArray(ui.value.manager_tabs) ? ui.value.manager_tabs : []).filter((row: JsonRow) => text(row.key)));
-const topTabs = computed<JsonRow[]>(() => [{ key: "chat", label: ui.value.chat_label || "Chat" }, ...managerTabs.value.filter((row) => text(row.key) !== "chat")]);
+const topTabs = computed<JsonRow[]>(() => workspaceTabs([{ key: "chat", label: ui.value.chat_label || "Chat" }, ...managerTabs.value.filter((row) => text(row.key) !== "chat")],metadata.value));
 const currentManager = computed<JsonRow | null>(() => managerTabs.value.find((row) => text(row.key) === activeTab.value) || null);
 const groupTabs = computed<JsonRow[]>(() => currentManager.value && Array.isArray(currentManager.value.groups) ? currentManager.value.groups.filter((row: JsonRow) => text(row.key)) : []);
 const currentGroup = computed<JsonRow | null>(() => groupTabs.value.find((row) => text(row.key) === activeGroup.value) || groupTabs.value[0] || null);
@@ -61,6 +64,9 @@ function itemsFor(group: unknown): JsonRow[] {
 function listOptions(source: JsonRow | null): JsonRow {
   if (!source) return {};
   return {
+    presentation:presentationFor(source,metadata.value),
+    server_pagination:source.server_pagination,
+    bulk_actions:source.bulk_actions,
     selector: Boolean(source.selector),
     selector_label: source.selector_label,
     item_group: source.item_group,
@@ -76,6 +82,7 @@ async function run(action: string, payload: JsonRow, busyKey = action, successTe
   statusText.value = "Working…";
   try {
     const result = await postJson<JsonRow>(props.actionEndpoint, { action: name, payload: payload || {} });
+    if(result?.ok===false)throw new Error(text(result.message||result.detail)||'Core action failed.');
     const message = text(result?.message) || successText;
     statusText.value = message;
     await props.refresh();
@@ -90,17 +97,18 @@ async function run(action: string, payload: JsonRow, busyKey = action, successTe
   } finally { setBusy(busyKey, false); }
 }
 async function sendMessage() {
-  const message = draft.value.trim();
+  const channel=selectedChannel.value;const original=draft.value;
+  const message = original.trim();
   const action = text(composer.value.action) || "send_message";
   if (!message || isBusy("chat:send")) return;
   const result = await run(
     action,
-    { values: { text: message, channel: selectedChannel.value || "0", destination: text(composer.value.destination) || "broadcast" } },
+    { values: { text: message, channel: channel || "0", destination: text(composer.value.destination) || "broadcast" } },
     "chat:send",
     "Message queued for Meshtastic.",
   );
   if (result) {
-    draft.value = "";
+    if(drafts[channel]===original)drafts[channel]="";
     keepAtBottom.value = true;
     await scrollToBottom(true);
   }
@@ -165,7 +173,7 @@ onMounted(() => void scrollToBottom(true));
 <template>
   <div class="card core-channel-chat" data-core-renderer="vue-channel-chat" :data-core-live-updates="ui.live_updates ? '1' : '0'">
     <header class="core-chat-heading">
-      <div><span class="tv-eyebrow">Live radio workspace</span><h3>{{ ui.title || tab.label || tab.core_key }}</h3><p>{{ body.summary }}</p></div>
+      <div><span class="tv-eyebrow">Live radio workspace</span><p>{{ body.summary }}</p></div>
       <div class="core-chat-connection" :class="{ connected: connection.connected }">
         <span><i />{{ connection.label || (connection.connected ? 'Connected' : 'Disconnected') }}</span>
         <small>{{ connection.radio_name || connection.transport || tab.core_key }}</small>
@@ -222,9 +230,9 @@ onMounted(() => void scrollToBottom(true));
       </div>
       <template v-if="currentManager.source === 'grouped_items' && groupTabs.length">
         <nav class="core-manager-subtabs" :aria-label="`${currentManager.label || currentManager.key} groups`"><button v-for="group in groupTabs" :key="group.key" type="button" class="core-manager-subtab-btn" :class="{ active: activeGroup === group.key }" @click="activeGroup = group.key">{{ group.label || group.key }}</button></nav>
-        <CoreManagerItems v-if="currentGroup" :items="itemsFor(currentGroup.item_group || currentGroup.key)" :ui="ui" :options="listOptions(currentGroup)" :run="run" :busy="isBusy" />
+        <CoreManagerItems v-if="currentGroup" :key="`${activeTab}:${activeGroup}`" :items="itemsFor(currentGroup.item_group || currentGroup.key)" :ui="ui" :options="listOptions(currentGroup)" :run="run" :busy="isBusy" />
       </template>
-      <CoreManagerItems v-else :items="itemsFor(currentManager.item_group)" :ui="ui" :options="listOptions(currentManager)" :run="run" :busy="isBusy" />
+      <CoreManagerItems v-else :key="activeTab" :items="itemsFor(currentManager.item_group)" :ui="ui" :options="listOptions(currentManager)" :run="run" :busy="isBusy" />
     </section>
   </div>
 </template>

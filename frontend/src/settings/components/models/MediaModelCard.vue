@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import ModelSelect from "./ModelSelect.vue";
 import { computed } from "vue";
 import type { JsonRow } from "../../types";
 
@@ -78,7 +79,7 @@ function currentInstalled() { return allInstalled.value.some((model) => String(m
           <label class="tm-field"><span class="tm-field-label">API base URL</span><input v-model="draft[apiBaseKey]" type="url" placeholder="http://127.0.0.1:1234" @input="changed" /><small>Base URL for the compatible inference server.</small></label>
           <label class="tm-field"><span class="tm-field-label">API key</span><input v-model="draft[apiKeyKey]" type="password" autocomplete="off" placeholder="Optional" @input="changed" /><small>Stored locally and sent only to this endpoint.</small></label>
         </div>
-        <label v-if="local()" class="tm-field tm-field-wide"><span class="tm-field-label">Downloaded {{ kind }} model</span><select v-model="draft[modelKey]" @change="changed"><option value="">Select a downloaded model</option><option v-if="draft[modelKey] && !currentInstalled()" :value="draft[modelKey]">Current: {{ draft[modelKey] }}</option><option v-for="model in installed" :key="String(model.model)" :value="model.model">{{ model.model }}</option></select><small v-if="!installed.length">No compatible downloaded models were detected. Add one from the Models tab.</small><small v-else>{{ installed.length }} compatible downloaded model{{ installed.length === 1 ? "" : "s" }} available.</small></label>
+        <div v-if="local()" class="tm-field tm-field-wide"><span class="tm-field-label">Downloaded {{ kind }} model</span><ModelSelect label="Downloaded  model"><select aria-label="Downloaded  model" v-model="draft[modelKey]" @change="changed"><option value="">Select a downloaded model</option><option v-if="draft[modelKey] && !currentInstalled()" :value="draft[modelKey]">Current: {{ draft[modelKey] }}</option><option v-for="model in installed" :key="String(model.model)" :value="model.model">{{ model.model }}</option></select></ModelSelect><small v-if="!installed.length">No compatible downloaded models were detected. Add one from the Models tab.</small><small v-else>{{ installed.length }} compatible downloaded model{{ installed.length === 1 ? "" : "s" }} available.</small></div>
         <label v-else class="tm-field tm-field-wide"><span class="tm-field-label">Model name or alias</span><input v-model="draft[modelKey]" type="text" placeholder="Model id or server alias" @input="changed" /><small>Use the exact model name exposed by the selected server.</small></label>
       </div>
     </section>

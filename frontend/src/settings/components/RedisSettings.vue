@@ -329,6 +329,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   if (refreshTimer !== null) window.clearInterval(refreshTimer);
 });
+defineExpose({ hasUnsavedChanges: () => dirty.value });
 </script>
 
 <template>

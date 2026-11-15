@@ -31,10 +31,11 @@ export async function responseJson<T>(response: Response): Promise<T> {
   throw new Error(detail);
 }
 
-export async function getJson<T>(endpoint: string): Promise<T> {
+export async function getJson<T>(endpoint: string, options: { signal?: AbortSignal } = {}): Promise<T> {
   return responseJson<T>(
     await fetch(endpoint, {
       credentials: "same-origin",
+      signal: options.signal,
       headers: { Accept: "application/json" },
     }),
   );

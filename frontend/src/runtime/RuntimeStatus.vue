@@ -1,13 +1,16 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, useId } from "vue";
 import { getJson, postJson } from "../shared/api";
 import PopupTransition from "../shared/PopupTransition.vue";
+import UiIcon from "../shared/UiIcon.vue";
+import { modelPresentation } from "../settings/components/models/modelPresentation";
 import type { JsonRow, RuntimeStatusMountOptions, RuntimeStatusState } from "./types";
+import "./runtime.css";
 
 type RuntimeTab = "overview" | "activity" | "models" | "context";
 type StreamState = "connecting" | "live" | "reconnecting" | "paused" | "unsupported";
 
-const props = defineProps<{ state: RuntimeStatusState; options: RuntimeStatusMountOptions; assistantName?: string }>();
+const props = defineProps<{ state: RuntimeStatusState; options: RuntimeStatusMountOptions; assistantName?: string; compact?: boolean }>();
 const open = ref(false);
 const loading = ref(false);
 const error = ref("");
@@ -19,6 +22,10 @@ const telemetry = ref<JsonRow>({});
 const streamState = ref<StreamState>("connecting");
 const activeTab = ref<RuntimeTab>("overview");
 const closeButton = ref<HTMLButtonElement | null>(null);
+const triggerButton = ref<HTMLButtonElement | null>(null);
+const monitorDialog = ref<HTMLElement | null>(null);
+const tabNav = ref<HTMLElement | null>(null);
+const monitorId = `runtime-monitor-${useId()}`;
 const unloading = ref("");
 let pollTimer = 0;
 let eventSource: EventSource | null = null;
@@ -32,12 +39,8 @@ const healthSystem = computed(() => Object.keys(streamedSystem.value).length ? s
 const healthCpu = computed(() => row(healthSystem.value.cpu));
 const healthRam = computed(() => row(healthSystem.value.ram));
 const healthVram = computed(() => row(healthSystem.value.vram));
-const loadedCount = computed(() => num(healthMemory.value.loaded_count ?? modelsPayload.value.loaded_count));
+const loadedCount = computed(() => num(modelsPayload.value.loaded_count ?? healthMemory.value.loaded_count));
 const baseText = computed(() => props.state.text || `${num(health.value.verbas_enabled)} verba enabled • ${num(health.value.portals_running)} portals running • ${num(health.value.cores_running)} cores running • ${num(health.value.hydra_jobs_active ?? health.value.chat_jobs_active)} hydra jobs • ${num(health.value.llm_calls_active)} llm calls • ${num(health.value.vision_calls_active ?? health.value.voice_calls_active)} vision calls`);
-const loadedText = computed(() => {
-  const estimated = num(row(healthMemory.value.totals).estimated_total_bytes ?? row(modelsPayload.value.totals).estimated_total_bytes);
-  return `${loadedCount.value} model${loadedCount.value === 1 ? "" : "s"} loaded${estimated > 0 ? ` • est ${bytes(estimated)}` : ""}`;
-});
 const pillSummary = computed(() => props.state.health
   ? `${num(health.value.verbas_enabled)} Verbas · ${num(health.value.portals_running)} Portals · ${num(health.value.cores_running)} Cores`
   : baseText.value);
@@ -74,26 +77,46 @@ const visionCalls = computed<JsonRow[]>(() => rows(vision.value.active_calls));
 const activityCount = computed(() => hydraTurns.value.length + num(llm.value.running_total ?? llm.value.active_total) + num(vision.value.active_total));
 const modelTotals = computed(() => row(modelsPayload.value.totals));
 const displayedActivityCount = computed(() => Object.keys(breakdown.value).length ? activityCount.value : activeWork.value);
+const assistantLabel = computed(() => String(props.assistantName || "Tater").trim() || "Tater");
+const runtimeTone = computed(() => props.state.tone !== "normal" ? props.state.tone : streamState.value === "reconnecting" || error.value ? "degraded" : "normal");
 const runtimeStateLabel = computed(() => {
   if (props.state.tone === "offline") return "Backend offline";
   if (props.state.tone === "degraded") return "Runtime needs attention";
-  const count = displayedActivityCount.value;
-  if (count) return `${count} active operation${count === 1 ? "" : "s"}`;
-  return "All systems ready";
+  if (error.value) return "Runtime details unavailable";
+  if (streamState.value === "reconnecting") return `Reconnecting to ${assistantLabel.value}`;
+  return `${assistantLabel.value} is ${displayedActivityCount.value || num(llm.value.queued_total) ? "working" : "ready"}`;
 });
-const runtimeDetailText = computed(() => Object.keys(breakdown.value).length
-  ? `${num(health.value.verbas_enabled)} verba enabled • ${num(health.value.portals_running)} portals running • ${num(health.value.cores_running)} cores running • ${hydraTurns.value.length} hydra turns • ${num(llm.value.running_total ?? llm.value.active_total)} llm calls • ${num(vision.value.active_total)} vision calls`
-  : baseText.value);
+const runtimeDetailText = computed(() => {
+  if (props.state.tone === "offline") return "The backend is unreachable. Checking the connection.";
+  if (props.state.tone === "degraded") return props.state.text || "Some services need attention. Check the activity and model details.";
+  if (error.value) return "Some details could not be refreshed. Showing the latest available readings.";
+  if (streamState.value === "reconnecting") return "Showing the latest available readings while the connection recovers.";
+  if (displayedActivityCount.value) return `${countLabel(displayedActivityCount.value, "active operation")}${num(llm.value.queued_total) ? ` · ${countLabel(llm.value.queued_total, "model call")} queued` : ""}.`;
+  if (num(llm.value.queued_total)) return `${integer(llm.value.queued_total)} model call${num(llm.value.queued_total) === 1 ? "" : "s"} waiting to run.`;
+  return "Your services are connected and ready to help.";
+});
 const runtimeTabs = computed(() => [
-  { id: "overview" as RuntimeTab, mark: "OV", label: "Overview", meta: streamStatusLabel.value },
-  { id: "activity" as RuntimeTab, mark: "AC", label: "Activity", meta: String(activityCount.value) },
-  { id: "models" as RuntimeTab, mark: "MO", label: "Models", meta: String(models.value.length || loadedCount.value) },
-  { id: "context" as RuntimeTab, mark: "CX", label: "Context", meta: num(context.value.prompt_tokens) ? `${integer(context.value.prompt_tokens)} tok` : "Estimate" },
+  { id: "overview" as RuntimeTab, icon: "dashboard", label: "Overview", meta: "" },
+  { id: "activity" as RuntimeTab, icon: "activity", label: "Activity", meta: String(displayedActivityCount.value) },
+  { id: "models" as RuntimeTab, icon: "cores", label: "Models", meta: String(loadedCount.value) },
+  { id: "context" as RuntimeTab, icon: "chart", label: "Context", meta: "" },
 ]);
+const previewModels = computed(() => [...models.value.filter(model => !model.managed), ...models.value.filter(model => model.managed)].slice(0, 2));
+const activityHeadline = computed(() => {
+  const turn = hydraTurns.value[0];
+  if (turn) return text(turn.task_name) || "Hydra is working";
+  const call = llmCalls.value[0] || visionCalls.value[0];
+  if (call) return text(call.source_label || call.label) || "Processing a model call";
+  if (num(llm.value.queued_total)) return "Model calls are waiting";
+  return displayedActivityCount.value ? "Work is in progress" : "Ready for your next request";
+});
+const activityDescription = computed(() => displayedActivityCount.value || num(llm.value.queued_total)
+  ? `${countLabel(hydraTurns.value.length, "Hydra task")} · ${countLabel(llm.value.running_total ?? llm.value.active_total, "model call")} · ${num(llm.value.queued_total)} queued · ${countLabel(vision.value.active_total, "vision call")}`
+  : "No tasks or model calls are running right now.");
 const modelSummary = computed(() => {
   const totals = modelTotals.value;
   return [
-    `${num(modelsPayload.value.loaded_count ?? models.value.length)} loaded`,
+    `${num(modelsPayload.value.loaded_count ?? loadedCount.value)} loaded`,
     num(modelsPayload.value.local_llm_loaded_count) ? `${num(modelsPayload.value.local_llm_loaded_count)} LLM` : "",
     num(modelsPayload.value.managed_loaded_count) ? `${num(modelsPayload.value.managed_loaded_count)} managed` : "",
     num(totals.estimated_total_bytes) ? `est ${bytes(totals.estimated_total_bytes)}` : "",
@@ -138,6 +161,7 @@ function numbers(value: unknown): number[] { return Array.isArray(value) ? value
 function text(value: unknown): string { return String(value ?? "").trim(); }
 function num(value: unknown): number { const parsed = Number(value); return Number.isFinite(parsed) ? Math.max(0, parsed) : 0; }
 function integer(value: unknown): string { return Math.round(num(value)).toLocaleString(); }
+function countLabel(value: unknown, singular: string): string { return `${integer(value)} ${singular}${num(value) === 1 ? "" : "s"}`; }
 function percent(value: unknown): number | null { if (value === null || value === undefined || text(value) === "") return null; const parsed = Number(value); return Number.isFinite(parsed) && parsed >= 0 ? Math.max(0, Math.min(100, parsed)) : null; }
 function percentText(value: unknown): string { const parsed = percent(value); return parsed === null ? "n/a" : `${Math.round(parsed)}%`; }
 function bytes(value: unknown): string { let amount = num(value); if (!amount) return "0 B"; const units = ["B", "KB", "MB", "GB", "TB"]; let index = 0; while (amount >= 1024 && index < units.length - 1) { amount /= 1024; index += 1; } return `${amount >= 10 || index === 0 ? amount.toFixed(0) : amount.toFixed(1)} ${units[index]}`; }
@@ -146,8 +170,21 @@ function age(value: unknown): string { const seconds = Math.round(num(value)); i
 function loadedAt(value: unknown): string { const stamp = num(value); return stamp ? `Loaded ${new Date(stamp * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}` : ""; }
 function modelMeta(model: JsonRow): string { const estimate = model.remote ? "" : num(model.estimated_bytes) ? `${text(model.memory_kind || "ram").toUpperCase()} est ${bytes(model.estimated_bytes)}` : "Estimate unavailable"; return [text(model.kind_label || model.category), text(model.provider_label || model.provider || "Local"), text(model.device) ? `Device ${text(model.device)}` : "", estimate, loadedAt(model.loaded_ts)].filter(Boolean).join(" • "); }
 function modelDetails(model: JsonRow): string[] { return [...strings(model.details), model.managed ? text(model.managed_by || "Managed by settings") : ""].filter(Boolean); }
-function modelMark(model: JsonRow): string { return text(model.kind_label || model.category || "Model").slice(0, 2).toUpperCase(); }
-function contextRowPercent(tokens: unknown): number { const amount = num(tokens); const window = num(context.value.recommended_context_window) || num(context.value.minimum_context_window); return amount > 0 && window > 0 ? Math.max(1, Math.min(100, (amount / window) * 100)) : 0; }
+function modelName(model: JsonRow): string {
+  const raw = text(model.display_name || model.model) || "Model";
+  if (model.display_name) return raw;
+  if (model.managed && text(model.category) === "speaker_id") return "Speaker ID";
+  if (model.managed && text(model.category) === "emotion_id") return "Emotion ID";
+  if (model.managed && ["stt", "tts"].includes(text(model.category)) && text(model.provider_label).includes("•")) return text(model.provider_label).split("•").pop()!.trim().replace(/\s*\([^)]*\)\s*$/, "") || raw;
+  if (model.managed && /^[a-f0-9]{8,}$/i.test(raw)) return text(model.provider_label || model.provider).split("•").pop()?.trim() || raw;
+  return modelPresentation(raw, text(model.model)).name;
+}
+function modelIcon(model: JsonRow): string {
+  const category = text(model.category).toLowerCase();
+  return category === "llm" ? "brain" : category === "face_id" || category === "speaker_id" ? "users" : category === "emotion_id" ? "sparkles" : category === "stt" || category === "tts" ? "mic" : category === "vision" ? "eye" : "server";
+}
+function modelEstimate(model: JsonRow): string { return model.remote ? "Spud Hub" : num(model.estimated_bytes) ? `${bytes(model.estimated_bytes)} estimated` : "Estimate unavailable"; }
+function contextRowPercent(tokens: unknown): number { const amount = num(tokens); const total = num(context.value.prompt_tokens); return amount > 0 && total > 0 ? Math.min(100, (amount / total) * 100) : 0; }
 function gpuMeta(device: JsonRow): string {
   const power = Number(device.power_draw_w); const powerLimit = Number(device.power_limit_w);
   return [percent(device.utilization_percent) === null ? "GPU load n/a" : `GPU ${percentText(device.utilization_percent)}`, num(device.total_bytes) ? `${device.unified ? "GPU memory" : "VRAM"} ${bytes(device.used_bytes)} / ${bytes(device.total_bytes)}` : "", num(device.shared_memory_total_bytes) ? `Shared RAM ${bytes(device.shared_memory_used_bytes)} / ${bytes(device.shared_memory_total_bytes)}` : "", Number.isFinite(Number(device.temperature_c)) ? `${Number(device.temperature_c).toFixed(0)} C` : "", Number.isFinite(power) ? `${power.toFixed(0)} W${Number.isFinite(powerLimit) && powerLimit > 0 ? ` / ${powerLimit.toFixed(0)} W` : ""}` : "", text(device.detail)].filter(Boolean).join(" • ");
@@ -164,6 +201,24 @@ const meters = computed(() => {
   if (!unified) values.push(metric("System VRAM", modelVram.value.used_bytes, modelVram.value.total_bytes));
   return values;
 });
+function meterLabel(label: string): string { return ({ "CPU Usage": "CPU", "GPU Usage": "GPU", "Unified Memory": "Memory", "System RAM": "RAM", "System VRAM": "VRAM" } as Record<string, string>)[label] || label; }
+function meterSummary(label: string): string {
+  if (label === "CPU Usage") return [num(modelCpu.value.logical_count) ? `${num(modelCpu.value.logical_count)} cores` : "", numbers(modelCpu.value.load_average).length ? `Load ${numbers(modelCpu.value.load_average)[0].toFixed(2)}` : ""].filter(Boolean).join(" · ");
+  if (label === "GPU Usage") return [text(gpuDevices.value[0]?.name), text(modelVram.value.backend)].filter(Boolean).join(" · ") || "GPU telemetry";
+  return label === "Unified Memory" ? "Shared system memory" : label === "System VRAM" ? "Dedicated GPU memory" : "System memory";
+}
+
+async function selectTab(tab: RuntimeTab, focus = false) {
+  activeTab.value = tab;
+  if (focus) { await nextTick(); tabNav.value?.querySelector<HTMLButtonElement>(`[data-runtime-tab="${tab}"]`)?.focus(); }
+}
+function handleTabKey(event: KeyboardEvent) {
+  if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+  event.preventDefault();
+  const index = runtimeTabs.value.findIndex(tab => tab.id === activeTab.value);
+  const next = event.key === "Home" ? 0 : event.key === "End" ? runtimeTabs.value.length - 1 : (index + (event.key === "ArrowRight" ? 1 : runtimeTabs.value.length - 1)) % runtimeTabs.value.length;
+  void selectTab(runtimeTabs.value[next].id, true);
+}
 
 function applyTelemetryEvent(event: Event) {
   try {
@@ -198,58 +253,93 @@ async function refresh(silent = false) {
 function startPolling() { stopPolling(); pollTimer = window.setInterval(() => { if (open.value) void refresh(true); }, 5000); }
 function stopPolling() { if (pollTimer) window.clearInterval(pollTimer); pollTimer = 0; }
 async function openPopup() { activeTab.value = "overview"; open.value = true; await nextTick(); closeButton.value?.focus(); await refresh(false); startPolling(); }
-function closePopup() { open.value = false; stopPolling(); }
+function closePopup() { open.value = false; stopPolling(); triggerButton.value?.focus(); }
 async function unloadModel(model: JsonRow) {
   const key = text(model.cache_key || model.model); if (!key || unloading.value) return; unloading.value = key;
   try { const result = await postJson<JsonRow>(props.options.endpoints.unloadModel, { provider: text(model.provider), model: text(model.model), cache_key: text(model.cache_key) }); const count = num(result.unloaded_count); const message = count ? `Unloaded ${count} local model${count === 1 ? "" : "s"}.` : "No loaded model matched."; props.options.onToast?.(message, "success"); await refresh(true); props.options.onHealthRefresh?.(); }
   catch (requestError) { const message = requestError instanceof Error ? requestError.message : "Model unload failed."; error.value = `Unload failed: ${message}`; props.options.onToast?.(error.value, "error"); }
   finally { unloading.value = ""; }
 }
-function handleKey(event: KeyboardEvent) { if (event.key === "Escape" && open.value) closePopup(); }
+function handleKey(event: KeyboardEvent) {
+  if (!open.value) return;
+  if (event.key === "Escape") { event.preventDefault(); closePopup(); return; }
+  if (event.key !== "Tab" || !monitorDialog.value) return;
+  const controls = Array.from(monitorDialog.value.querySelectorAll<HTMLElement>('button:not([disabled]), summary, [href], [tabindex="0"]')).filter(element => element.tabIndex >= 0 && element.getClientRects().length);
+  const first = controls[0], last = controls[controls.length - 1];
+  if (!first || !last) return;
+  const outside = !monitorDialog.value.contains(document.activeElement);
+  if (event.shiftKey && (document.activeElement === first || outside)) { event.preventDefault(); last.focus(); }
+  else if (!event.shiftKey && (document.activeElement === last || outside)) { event.preventDefault(); first.focus(); }
+}
 onMounted(() => { window.addEventListener("keydown", handleKey); document.addEventListener("visibilitychange", handleVisibility); startTelemetry(); });
 onBeforeUnmount(() => { stopPolling(); stopTelemetry("paused"); window.removeEventListener("keydown", handleKey); document.removeEventListener("visibilitychange", handleVisibility); });
 defineExpose({ open: openPopup });
 </script>
 
 <template>
-  <button class="tr-pill" :class="[state.tone, `stream-${streamState}`]" type="button" :title="`${baseText}. Open the live runtime monitor.`" @click="openPopup">
+  <button ref="triggerButton" class="tr-pill" :class="[state.tone, `stream-${streamState}`, { 'tr-compact': compact }]" type="button" :title="`${baseText}. Open the live runtime monitor.`" aria-haspopup="dialog" :aria-expanded="open" :aria-controls="monitorId" @click="openPopup">
+    <span v-if="compact" class="workspace-runtime-label"><i />{{ state.tone === 'offline' ? 'Backend offline' : state.tone === 'degraded' ? 'Needs attention' : activeWork ? `${activeWork} active operations` : state.health ? 'System connected' : state.text || 'Checking system…' }}<span aria-hidden="true">›</span></span>
     <span class="tr-pill-brand"><span class="tr-pill-copy"><strong>{{ assistantRuntimeLabel }}</strong><small>{{ pillSummary }}</small></span></span>
     <span v-if="state.health" class="tr-pill-resources"><span v-for="item in pillResources" :key="item.label" class="tr-resource" :class="{ unavailable: item.unavailable }"><span><b>{{ item.label }}</b><em>{{ item.value }}</em></span><span class="tr-resource-track"><i :style="{ width: `${item.percent}%` }" /></span></span></span>
     <span class="tr-pill-end"><span><b>{{ loadedCount }}</b><small>models</small></span><i>›</i></span>
   </button>
 
   <PopupTransition :open="open" backdrop-class="tv-modal-backdrop tr-backdrop" @close="closePopup">
-    <section class="tv-modal tr-modal" role="dialog" aria-modal="true" aria-label="Runtime monitor">
-      <header class="tr-modal-head"><div><span class="tv-eyebrow">{{ assistantRuntimeLabel }}</span><h2>Live system monitor</h2><p>Fast compute telemetry with focused views for current work, loaded models, and context.</p></div><div class="tr-modal-actions"><span class="tr-live-state" :class="`stream-${streamState}`"><i />{{ streamStatusLabel }}</span><small>{{ telemetryUpdatedAt ? `Telemetry ${telemetryUpdatedAt}` : detailsUpdatedAt ? `Updated ${detailsUpdatedAt}` : "Starting live telemetry…" }}</small><button ref="closeButton" class="tv-button" type="button" @click="closePopup">Close</button></div></header>
-      <nav class="tr-tabs" aria-label="Runtime monitor sections"><button v-for="tab in runtimeTabs" :key="tab.id" type="button" :class="{ active: activeTab === tab.id }" @click="activeTab = tab.id"><i class="tr-tab-mark">{{ tab.mark }}</i><strong>{{ tab.label }}</strong><small>{{ tab.meta }}</small></button></nav>
-      <div v-if="error || notice" class="tv-notice" :class="{ error: Boolean(error) }">{{ error || notice }}</div>
-      <div v-if="!Object.keys(breakdown).length && loading" class="tv-empty">Loading runtime state…</div>
+    <section :id="monitorId" ref="monitorDialog" class="tv-modal tr-modal tr-clear-tabs" role="dialog" aria-modal="true" :aria-labelledby="`${monitorId}-title`" :aria-describedby="`${monitorId}-description`">
+      <header class="trc-header">
+        <div><div class="trc-title"><UiIcon name="activity" /><h2 :id="`${monitorId}-title`">System monitor</h2></div><p :id="`${monitorId}-description`">A clear view of what {{ assistantLabel }} is doing.</p></div>
+        <div class="trc-header-actions"><span class="trc-live" :class="`stream-${streamState}`"><i />{{ streamStatusLabel }}</span><button ref="closeButton" class="trc-icon-button" type="button" aria-label="Close system monitor" @click="closePopup"><UiIcon name="close" /></button></div>
+      </header>
+      <nav ref="tabNav" class="trc-tabs" role="tablist" aria-label="System monitor sections">
+        <button v-for="tab in runtimeTabs" :id="`${monitorId}-${tab.id}`" :key="tab.id" :data-runtime-tab="tab.id" type="button" role="tab" :aria-selected="activeTab === tab.id" :aria-controls="`${monitorId}-panel`" :tabindex="activeTab === tab.id ? 0 : -1" @click="selectTab(tab.id)" @keydown="handleTabKey"><UiIcon :name="tab.icon" /><span>{{ tab.label }}</span><small v-if="tab.meta" class="trc-count">{{ tab.meta }}</small></button>
+      </nav>
+      <div :id="`${monitorId}-panel`" class="trc-content" role="tabpanel" :aria-labelledby="`${monitorId}-${activeTab}`">
+        <p v-if="error" class="trc-notice error" role="alert">{{ error }}</p>
+        <div v-if="!Object.keys(breakdown).length && loading" class="trc-empty" role="status">Loading runtime state…</div>
 
-      <section v-else-if="activeTab === 'overview'" class="tr-tab-panel tr-overview">
-        <article class="tr-overview-hero"><div class="tr-overview-copy"><span class="tv-eyebrow">Overall runtime</span><h3>{{ runtimeStateLabel }}</h3><p>{{ runtimeDetailText }}</p></div><div class="tr-overview-facts"><div><span>Models</span><strong>{{ loadedCount }}</strong><small>loaded</small></div><div><span>Active</span><strong>{{ displayedActivityCount }}</strong><small>operations</small></div></div></article>
-        <div class="tr-meter-grid tr-live-meter-grid"><div v-for="meter in meters" :key="meter.label" class="tr-meter" :class="{ unavailable: meter.unavailable }"><div><strong>{{ meter.label }}</strong><span>{{ meter.value }}</span></div><span class="tr-meter-track"><i :style="{ width: `${meter.percent}%` }" /></span><small v-if="meter.detail">{{ meter.detail }}</small></div></div>
-        <div class="tr-overview-cards"><button type="button" @click="activeTab = 'activity'"><span>HY</span><div><small>Hydra</small><strong>{{ hydraTurns.length }} active turn{{ hydraTurns.length === 1 ? "" : "s" }}</strong></div><i>›</i></button><button type="button" @click="activeTab = 'activity'"><span>LL</span><div><small>Language models</small><strong>{{ num(llm.running_total ?? llm.active_total) }} running · {{ num(llm.queued_total) }} queued</strong></div><i>›</i></button><button type="button" @click="activeTab = 'activity'"><span>VI</span><div><small>Vision</small><strong>{{ num(vision.active_total) }} active call{{ num(vision.active_total) === 1 ? "" : "s" }}</strong></div><i>›</i></button><button type="button" @click="activeTab = 'models'"><span>MO</span><div><small>Local runtime</small><strong>{{ loadedText }}</strong></div><i>›</i></button></div>
-      </section>
+        <section v-else-if="activeTab === 'overview'" class="trc-overview">
+          <article class="trc-ready" :class="runtimeTone"><span class="trc-ready-icon"><UiIcon :name="runtimeTone !== 'normal' ? 'alert' : displayedActivityCount || num(llm.queued_total) ? 'activity' : 'check'" /></span><div><h3>{{ runtimeStateLabel }}</h3><p>{{ runtimeDetailText }}</p></div><button class="trc-button trc-ready-action" type="button" @click="selectTab('activity', true)">View details</button></article>
+          <div class="trc-resources">
+            <article v-for="meter in meters" :key="meter.label" class="trc-meter" :class="{ unavailable: meter.unavailable }"><div class="trc-meter-heading"><strong>{{ meterLabel(meter.label) }}</strong><span>{{ meter.value }}</span></div><span class="trc-track" aria-hidden="true"><i :style="{ width: `${meter.percent}%` }" /></span><details v-if="meter.detail" class="trc-meter-details"><summary>{{ meterSummary(meter.label) }}</summary><p>{{ meter.detail }}</p></details><small v-else>{{ meterSummary(meter.label) }}</small></article>
+          </div>
+          <section><header class="trc-section-heading"><h3>Current activity</h3><button class="trc-link" type="button" @click="selectTab('activity', true)">View activity <UiIcon name="chevron" /></button></header><div class="trc-activity-summary"><UiIcon :name="displayedActivityCount || num(llm.queued_total) ? 'activity' : 'coffee'" /><div><strong>{{ activityHeadline }}</strong><p>{{ activityDescription }}</p></div></div></section>
+          <section><header class="trc-section-heading"><h3>Loaded models <small class="trc-count">{{ loadedCount }}</small></h3><button class="trc-link" type="button" @click="selectTab('models', true)">View all <UiIcon name="chevron" /></button></header><div v-if="previewModels.length" class="trc-preview-models"><article v-for="model in previewModels" :key="model.cache_key || `${model.provider}:${model.model}`"><UiIcon :name="modelIcon(model)" /><div><strong>{{ modelName(model) }}</strong><small>{{ modelDetails(model)[0] || model.kind_label || model.category || 'Model' }}</small></div><span class="trc-tag">{{ model.remote ? 'Spud Hub' : num(model.estimated_bytes) ? bytes(model.estimated_bytes) : 'Loaded' }}</span></article></div><p v-else class="trc-help">{{ loadedCount ? 'Model details are not available yet.' : 'No runtime models are loaded right now.' }}</p></section>
+          <section><header class="trc-section-heading"><h3>Connected services</h3><span class="trc-connection-state" :class="runtimeTone"><UiIcon :name="runtimeTone === 'normal' ? 'check' : 'alert'" />{{ runtimeTone === 'normal' ? 'All connected' : runtimeTone === 'offline' ? 'Backend offline' : 'Needs attention' }}</span></header><p class="trc-help">{{ num(health.verbas_enabled) }} Verba enabled · {{ num(health.cores_running) }} cores running · {{ num(health.portals_running) }} portals running</p></section>
+        </section>
 
-      <section v-else-if="activeTab === 'activity'" class="tr-tab-panel tr-activity-view">
-        <article class="tr-view-hero"><div class="tr-view-copy"><span class="tv-eyebrow">Live workload</span><h2>Runtime activity</h2><p>See what Hydra and the model runtimes are doing now without mixing active work with lifetime totals.</p></div><div class="tr-view-metrics"><div><span>Hydra</span><strong>{{ hydraTurns.length }}</strong><small>active turns</small></div><div><span>LLM</span><strong>{{ num(llm.running_total ?? llm.active_total) }}</strong><small>{{ num(llm.queued_total) }} queued</small></div><div><span>Vision</span><strong>{{ num(vision.active_total) }}</strong><small>active calls</small></div></div></article>
-        <div class="tr-activity-grid">
-          <article class="tr-runtime-section tr-activity-card hydra"><header><span class="tr-section-mark">HY</span><div><span class="tv-eyebrow">Orchestration</span><h2>Hydra Jobs</h2></div><span class="tv-state" :class="{ good: hydraTurns.length > 0 }">{{ hydraTurns.length ? `${hydraTurns.length} active` : 'Ready' }}</span></header><div class="tr-inline-stats"><span><b>{{ num(hydra.total) }}</b> total</span><span><b>{{ num(hydra.webui_jobs) }}</b> WebUI queue</span><span><b>{{ num(hydra.surface_running_turns) }}</b> surface turns</span></div><section class="tr-block"><h3>Active Turns</h3><div v-if="hydraTurns.length" class="tr-turns"><article v-for="turn in hydraTurns" :key="turn.id"><header><strong>{{ turn.task_name || 'Hydra task' }}</strong><span class="tv-state good">Running {{ age(turn.age_seconds) }}</span></header><div><span>{{ turn.platform_label || turn.platform || 'Unknown' }}</span><span v-if="turn.source">{{ turn.source }}</span><span v-if="turn.id">Drop {{ text(turn.id).slice(0, 8) }}</span></div><small v-if="turn.current_tool">Current verba/tool: {{ turn.current_tool }}</small><small v-if="turn.scope">Scope: {{ turn.scope }}</small></article></div><div v-else class="tv-empty compact">Hydra is ready. No active turns right now.</div></section></article>
-          <article class="tr-runtime-section tr-activity-card calls"><header><span class="tr-section-mark">LL</span><div><span class="tv-eyebrow">Language models</span><h2>LLM Calls</h2></div><span class="tv-state" :class="{ good: num(llm.running_total ?? llm.active_total) > 0 }">{{ num(llm.running_total ?? llm.active_total) ? 'Working' : 'Ready' }}</span></header><div class="tr-inline-stats"><span><b>{{ num(llm.running_total ?? llm.active_total) }}</b> running</span><span><b>{{ num(llm.queued_total) }}</b> queued</span><span><b>{{ num(llm.totals?.completed) }}</b> completed</span></div><section class="tr-block"><h3>Current Calls</h3><div v-if="llmCalls.length" class="tr-list"><article v-for="(call, index) in llmCalls" :key="call.id || index"><div><strong>{{ call.source_label || call.label || 'Unknown source' }}</strong><small>{{ callMeta(call, 'llm') }}</small></div><span class="tv-state" :class="{ good: text(call.state) !== 'queued' }">{{ call.state_label || (text(call.state) === 'queued' ? 'Queued' : 'Running') }} {{ age(call.state_age_seconds ?? call.age_seconds) }}</span></article></div><div v-else class="tv-empty compact">The LLM runtime is ready. No active calls.</div></section></article>
-          <article class="tr-runtime-section tr-activity-card vision"><header><span class="tr-section-mark">VI</span><div><span class="tv-eyebrow">Visual understanding</span><h2>Vision Calls</h2></div><span class="tv-state" :class="{ good: num(vision.active_total) > 0 }">{{ num(vision.active_total) ? 'Working' : 'Ready' }}</span></header><div class="tr-inline-stats"><span><b>{{ num(vision.active_total) }}</b> active</span><span><b>{{ num(vision.totals?.completed) }}</b> completed</span><span><b>{{ num(vision.totals?.failed) }}</b> failed</span></div><section class="tr-block"><h3>Active Calls</h3><div v-if="visionCalls.length" class="tr-list"><article v-for="(call, index) in visionCalls" :key="call.id || index"><div><strong>{{ call.source_label || call.label || 'Unknown source' }}</strong><small>{{ callMeta(call, 'vision') }}</small></div><span class="tv-state good">{{ age(call.age_seconds) }}</span></article></div><div v-else class="tv-empty compact">Vision is ready. No active calls right now.</div></section></article>
-        </div>
-      </section>
+        <section v-else-if="activeTab === 'activity'" class="trc-activity-view">
+          <header class="trc-view-heading"><h3>Current activity</h3><p>What {{ assistantLabel }} is working on right now.</p></header>
+          <section class="trc-work-group"><header><span class="trc-work-icon"><UiIcon name="activity" /></span><div><h4>Hydra tasks</h4><p>{{ hydraTurns.length ? countLabel(hydraTurns.length, 'active task') : 'No active tasks' }}</p></div><span class="trc-tag" :class="{ good: !hydraTurns.length }">{{ hydraTurns.length ? 'Working' : 'Ready' }}</span></header>
+            <div v-if="hydraTurns.length" class="trc-work-list"><article v-for="turn in hydraTurns" :key="turn.id"><div class="trc-call-heading"><strong>{{ turn.task_name || 'Hydra task' }}</strong><span class="trc-tag">Running {{ age(turn.age_seconds) }}</span></div><p>{{ turn.platform_label || turn.platform || 'Unknown' }}<span v-if="turn.source"> · {{ turn.source }}</span></p><p v-if="turn.current_tool">Current Verba/tool: {{ turn.current_tool }}</p><details><summary>Task details</summary><p v-if="turn.id">Turn {{ turn.id }}</p><p v-if="turn.scope">Scope: {{ turn.scope }}</p></details></article></div>
+            <details class="trc-work-details"><summary>Runtime details</summary><p><b>{{ num(hydra.total) }}</b> total · <b>{{ num(hydra.webui_jobs) }}</b> Web UI queue · <b>{{ num(hydra.surface_running_turns) }}</b> surface turns</p></details>
+          </section>
+          <section class="trc-work-group"><header><span class="trc-work-icon"><UiIcon name="brain" /></span><div><h4>Language model calls</h4><p>{{ num(llm.running_total ?? llm.active_total) }} running · {{ num(llm.queued_total) }} queued</p></div><span class="trc-tag" :class="{ good: !num(llm.running_total ?? llm.active_total) && !num(llm.queued_total) }">{{ num(llm.running_total ?? llm.active_total) ? 'Working' : num(llm.queued_total) ? 'Queued' : 'Ready' }}</span></header>
+            <div v-if="llmCalls.length" class="trc-work-list"><article v-for="(call, index) in llmCalls" :key="call.id || index"><div class="trc-call-heading"><strong>{{ call.source_label || call.label || 'Unknown source' }}</strong><span class="trc-tag">{{ call.state_label || (text(call.state) === 'queued' ? 'Queued' : 'Running') }} {{ age(call.state_age_seconds ?? call.age_seconds) }}</span></div><details><summary>Call details</summary><p>{{ callMeta(call, 'llm') }}</p></details></article></div>
+            <details class="trc-work-details"><summary>Runtime details</summary><p><b>{{ num(llm.running_total ?? llm.active_total) }}</b> running · <b>{{ num(llm.queued_total) }}</b> queued · <b>{{ num(llm.totals?.completed) }}</b> completed</p></details>
+          </section>
+          <section class="trc-work-group"><header><span class="trc-work-icon"><UiIcon name="eye" /></span><div><h4>Vision calls</h4><p>{{ num(vision.active_total) ? countLabel(vision.active_total, 'active call') : 'No active vision calls' }}</p></div><span class="trc-tag" :class="{ good: !num(vision.active_total) }">{{ num(vision.active_total) ? 'Working' : 'Ready' }}</span></header>
+            <div v-if="visionCalls.length" class="trc-work-list"><article v-for="(call, index) in visionCalls" :key="call.id || index"><div class="trc-call-heading"><strong>{{ call.source_label || call.label || 'Unknown source' }}</strong><span class="trc-tag">Running {{ age(call.age_seconds) }}</span></div><details><summary>Call details</summary><p>{{ callMeta(call, 'vision') }}</p></details></article></div>
+            <details class="trc-work-details"><summary>Runtime details</summary><p><b>{{ num(vision.active_total) }}</b> active · <b>{{ num(vision.totals?.completed) }}</b> completed · <b>{{ num(vision.totals?.failed) }}</b> failed</p></details>
+          </section>
+        </section>
 
-      <section v-else-if="activeTab === 'models'" class="tr-tab-panel tr-models-view">
-        <article class="tr-view-hero"><div class="tr-view-copy"><span class="tv-eyebrow">Compute and memory</span><h2>Loaded Runtime Models</h2><p>{{ modelSummary }}</p></div><div class="tr-view-metrics"><div><span>Loaded</span><strong>{{ num(modelsPayload.loaded_count ?? models.length) }}</strong><small>models</small></div><div><span>Local LLM</span><strong>{{ num(modelsPayload.local_llm_loaded_count) }}</strong><small>engines</small></div><div><span>Managed</span><strong>{{ num(modelsPayload.managed_loaded_count) }}</strong><small>services</small></div><div><span>Estimated</span><strong>{{ bytes(modelTotals.estimated_total_bytes) }}</strong><small>memory</small></div></div></article>
-        <section v-if="gpuDevices.length" class="tr-runtime-section tr-device-section"><header><div><span class="tv-eyebrow">Accelerators</span><h2>GPU Devices</h2><p>Live utilization and memory reported by the active compute backend.</p></div></header><div class="tr-device-grid"><article v-for="(device, index) in gpuDevices" :key="device.index ?? index"><div class="tr-device-head"><span class="tr-section-mark">GPU</span><div><strong>{{ device.name || `GPU ${device.index ?? ''}` }}</strong><small>{{ gpuMeta(device) }}</small></div><b>{{ percentText(device.utilization_percent) }}</b></div><span class="tr-meter-track"><i :style="{ width: `${percent(device.utilization_percent) ?? 0}%` }" /></span></article></div></section>
-        <section class="tr-runtime-section tr-model-section"><header><div><span class="tv-eyebrow">Inventory</span><h2>Loaded Model Entries</h2><p>Everything currently held by Tater, including managed speech and identity models.</p></div><span class="tv-state good">{{ models.length }} loaded</span></header><div v-if="models.length" class="tr-model-list"><article v-for="model in models" :key="model.cache_key || `${model.provider}:${model.model}`" class="tr-model-entry"><span class="tr-entry-mark">{{ modelMark(model) }}</span><div class="tr-model-copy"><strong>{{ model.model || 'model' }}</strong><small>{{ modelMeta(model) }}</small><small v-if="modelDetails(model).length">{{ modelDetails(model).join(' • ') }}</small><small v-if="model.warning" class="danger">{{ model.warning }}</small></div><div class="tr-model-action"><button v-if="model.unloadable && !model.managed" class="tv-button danger" type="button" :disabled="Boolean(unloading)" @click="unloadModel(model)">{{ unloading === text(model.cache_key || model.model) ? 'Unloading…' : 'Unload' }}</button><span v-else class="tv-state good">{{ model.remote ? 'Spud Hub' : model.managed ? 'Managed' : 'Loaded' }}</span></div></article></div><div v-else class="tv-empty compact">No runtime models are loaded right now.</div></section>
-      </section>
+        <section v-else-if="activeTab === 'models'" class="trc-models-view">
+          <header class="trc-view-heading"><h3>Loaded models <small class="trc-count">{{ loadedCount }}</small></h3><p v-if="Object.keys(modelsPayload).length">{{ countLabel(modelsPayload.local_llm_loaded_count, 'language model') }} · {{ countLabel(modelsPayload.managed_loaded_count, 'managed service') }}<span v-if="num(modelTotals.estimated_total_bytes)"> · Estimated memory {{ bytes(modelTotals.estimated_total_bytes) }}</span></p></header>
+          <details class="trc-hardware-details"><summary>Compute &amp; memory details</summary><p>{{ modelSummary }}</p><section v-if="gpuDevices.length"><h4>GPU devices</h4><article v-for="(device, index) in gpuDevices" :key="device.index ?? index"><strong>{{ device.name || `GPU ${device.index ?? ''}` }}</strong><p>{{ gpuMeta(device) }}</p><span class="trc-track" aria-hidden="true"><i :style="{ width: `${percent(device.utilization_percent) ?? 0}%` }" /></span></article></section></details>
+          <div v-if="models.length" class="trc-model-list"><article v-for="model in models" :key="model.cache_key || `${model.provider}:${model.model}`" class="trc-model-entry"><UiIcon :name="modelIcon(model)" /><div class="trc-model-copy"><strong>{{ modelName(model) }}</strong><p>{{ model.kind_label || model.category || 'Model' }} · {{ modelEstimate(model) }}</p><p v-if="model.warning" class="trc-warning">{{ model.warning }}</p><details><summary>Model details</summary><div class="trc-model-technical"><code>{{ model.model || 'model' }}</code><p>{{ modelMeta(model) }}</p><p v-for="(detail, index) in modelDetails(model)" :key="index">{{ detail }}</p></div></details></div><div class="trc-model-action"><button v-if="model.unloadable && !model.managed" class="trc-button" type="button" :disabled="Boolean(unloading)" :aria-label="`Unload ${modelName(model)}`" @click="unloadModel(model)">{{ unloading === text(model.cache_key || model.model) ? 'Unloading…' : 'Unload' }}</button><span v-else class="trc-tag">{{ model.remote ? 'Spud Hub' : model.managed ? 'Managed' : 'Loaded' }}</span></div></article></div><p v-else class="trc-empty">{{ loadedCount ? 'Model details are not available yet.' : 'No runtime models are loaded right now.' }}</p>
+        </section>
 
-      <section v-else class="tr-tab-panel tr-context-view">
-        <article class="tr-view-hero"><div class="tr-view-copy"><span class="tv-eyebrow">Prompt budget</span><h2>Estimated Chat Context Window</h2><p v-if="context.error">{{ context.error }}</p><p v-else-if="num(context.prompt_tokens) || num(context.minimum_context_window)">A clear estimate of what occupies the active Hydra prompt and how much room the selected model should provide.</p><p v-else>No estimate available yet. Send a chat message so Hydra can sample the active chat prompt stack.</p></div><div v-if="!context.error" class="tr-view-metrics"><div><span>Prompt</span><strong>{{ integer(context.prompt_tokens) }}</strong><small>tokens</small></div><div><span>Reply</span><strong>{{ integer(context.completion_budget_tokens) }}</strong><small>budget</small></div><div><span>Minimum</span><strong>{{ integer(context.minimum_context_window) }}</strong><small>window</small></div><div><span>Recommended</span><strong>{{ integer(context.recommended_context_window) }}</strong><small>window</small></div></div></article>
-        <section v-if="contextRows.length && !context.error" class="tr-runtime-section tr-context-section"><header><div><span class="tv-eyebrow">Token map</span><h2>Prompt Composition</h2><p>{{ contextSummary }}</p></div></header><div class="tr-context-rows"><article v-for="item in contextRows" :key="item.label"><div><strong>{{ item.label }}</strong><span>{{ integer(item.tokens) }} tokens</span></div><span class="tr-meter-track"><i :style="{ width: `${contextRowPercent(item.tokens)}%` }" /></span></article></div><div class="tr-context-stack"><span><b>{{ num(context.enabled_verbas) }}</b> Verbas</span><span><b>{{ num(context.connected_portals) }}</b> Portals</span><span><b>{{ num(context.running_cores) }}</b> Cores</span></div><div v-if="contextNotes.length" class="tr-context-notes"><article v-for="(note, index) in contextNotes" :key="note"><span>{{ index + 1 }}</span><p>{{ note }}</p></article></div></section>
-      </section>
+        <section v-else class="trc-context-view">
+          <header class="trc-view-heading"><h3>Chat context</h3><p v-if="context.error" class="trc-warning" role="alert">{{ context.error }}</p><p v-else-if="num(context.prompt_tokens) || num(context.minimum_context_window)">How much room your current chat needs.</p><p v-else>No estimate available yet. Send a chat message so Hydra can sample the active chat prompt stack.</p></header>
+          <template v-if="!context.error && (num(context.prompt_tokens) || num(context.minimum_context_window))">
+            <div class="trc-budget"><div><span>Current prompt</span><strong>{{ integer(context.prompt_tokens) }}</strong><small>tokens in use</small></div><div><span>Recommended window</span><strong>{{ integer(context.recommended_context_window) }}</strong><small>tokens for this workload</small></div></div>
+            <header class="trc-section-heading"><h4>Prompt breakdown</h4><span>Estimated</span></header>
+            <div class="trc-context-rows"><article v-for="item in contextRows.filter(item => item.label !== 'Capability reserve')" :key="item.label"><div><span>{{ item.label }}</span><b>{{ integer(item.tokens) }} tokens</b></div><span class="trc-track" aria-hidden="true"><i :style="{ width: `${contextRowPercent(item.tokens)}%` }" /></span></article></div>
+            <details class="trc-context-details"><summary>Budget &amp; technical details</summary><dl><div><dt>Reply budget</dt><dd>{{ integer(context.completion_budget_tokens) }} tokens</dd></div><div><dt>Minimum window</dt><dd>{{ integer(context.minimum_context_window) }} tokens</dd></div><div v-if="contextRows.some(item => item.label === 'Capability reserve')"><dt>Capability reserve</dt><dd>{{ integer(contextRows.find(item => item.label === 'Capability reserve')?.tokens) }} tokens</dd></div><div><dt>Burst reserve</dt><dd>{{ integer(context.burst_context_reserve_tokens) }} tokens</dd></div></dl><p>{{ contextSummary }}</p><p>{{ num(context.enabled_verbas) }} Verba · {{ num(context.connected_portals) }} portals · {{ num(context.running_cores) }} cores</p><p v-for="note in contextNotes" :key="note">{{ note }}</p></details>
+          </template>
+        </section>
+      </div>
+      <footer class="trc-footer"><span><UiIcon name="activity" />{{ streamState === 'live' ? 'Live telemetry' : streamStatusLabel }}<span v-if="telemetryUpdatedAt || detailsUpdatedAt"> · Updated {{ telemetryUpdatedAt || detailsUpdatedAt }}</span></span><span>{{ assistantRuntimeLabel }}</span></footer>
     </section>
   </PopupTransition>
 </template>

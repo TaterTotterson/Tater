@@ -4,10 +4,22 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>TaterOS</title>
+    <style>
+      html { background: #111213; color: #f1eee8; color-scheme: dark; }
+      html[data-theme="tater-light"] { color-scheme: light; }
+      body { margin: 0; }
+      #tater-app-root:not([data-v-app]), .tater-startup-error { display: grid; min-height: 100vh; min-height: 100dvh; box-sizing: border-box; place-content: center; padding: 24px; text-align: center; font: 14px/1.5 -apple-system, BlinkMacSystemFont, sans-serif; }
+      .tater-boot-screen { display: grid; justify-items: center; gap: 14px; }
+      .tater-boot-screen strong { color: #ee8954; font: 32px "Marker Felt", "Segoe Print", sans-serif; }
+      .tater-boot-screen span { color: #b0a79c; }
+      .tater-boot-spinner { width: 26px; height: 26px; border: 2px solid #343536; border-top-color: #ee8954; border-radius: 50%; animation: tater-boot-spin 1s linear infinite; }
+      @keyframes tater-boot-spin { to { transform: rotate(360deg); } }
+      @media (prefers-reduced-motion: reduce) { .tater-boot-spinner { animation: none; } }
+    </style>
     <link id="tater-vue-stylesheet" rel="stylesheet" href="./static/ui/tater-ui.css" />
   </head>
   <body>
-    <div id="tater-app-root" aria-live="polite">Loading Tater…</div>
+    <div id="tater-app-root" aria-live="polite"><div class="tater-boot-screen"><strong>Tater</strong><i class="tater-boot-spinner" aria-hidden="true"></i><span>Opening your workspace…</span></div></div>
 
     <script src="./static/app.js" defer></script>
   </body>

@@ -1,7 +1,9 @@
 <script setup lang="ts">
-import { onBeforeUnmount, reactive, ref, watch } from "vue";
+import { computed, onBeforeUnmount, reactive, ref, watch } from "vue";
 import { postJson } from "../../shared/api";
 import PopupTransition from "../../shared/PopupTransition.vue";
+import PopupToast from "../../shared/PopupToast.vue";
+import { normalizePopupEffect, popupEffects } from "../../shared/popupMotion";
 import type { MiscSettings } from "../types";
 
 const props = defineProps<{
@@ -15,7 +17,7 @@ const emit = defineEmits<{
 }>();
 
 const draft = reactive({
-  popup_effect_style: "flame",
+  popup_effect_style: "scale",
   emoji_enable_on_reaction_add: true,
   emoji_enable_auto_reaction_on_reply: true,
   emoji_reaction_chain_chance_percent: 100,
@@ -30,14 +32,11 @@ const error = ref("");
 const notice = ref("");
 const previewOpen = ref(false);
 
-const popupStyles = [
-  ["disabled", "Disabled"],
-  ["flame", "Flame"],
-  ["dust", "Crumble to dust"],
-  ["glitch", "Glitch out"],
-  ["portal", "Portal swirl shut"],
-  ["melt", "Melt downward"],
-];
+const previewToastOpen = ref(false);
+const previewToastEffect = ref("scale");
+const previewToastMessage = ref("");
+let previewToastTimer = 0;
+const selectedEffect = computed(() => popupEffects.find(effect => effect.id === draft.popup_effect_style) || popupEffects[0]);
 
 function bounded(value: unknown, fallback: number, minimum: number, maximum: number): number {
   const parsed = Number(value);
@@ -47,7 +46,7 @@ function bounded(value: unknown, fallback: number, minimum: number, maximum: num
 
 function syncFromSettings(settings: MiscSettings) {
   Object.assign(draft, {
-    popup_effect_style: String(settings.popup_effect_style || "flame"),
+    popup_effect_style: normalizePopupEffect(settings.popup_effect_style),
     emoji_enable_on_reaction_add: settings.emoji_enable_on_reaction_add !== false,
     emoji_enable_auto_reaction_on_reply: settings.emoji_enable_auto_reaction_on_reply !== false,
     emoji_reaction_chain_chance_percent: bounded(settings.emoji_reaction_chain_chance_percent, 100, 0, 100),
@@ -65,14 +64,14 @@ function markDirty() {
   notice.value = "";
 }
 
-function preview() {
-  document.body.dataset.popupEffect = String(draft.popup_effect_style || "flame");
-  previewOpen.value = true;
-}
-
-function closePreview() {
-  previewOpen.value = false;
-  document.body.dataset.popupEffect = String(props.settings.popup_effect_style || "flame");
+function preview() { previewOpen.value = true; }
+function closePreview() { previewOpen.value = false; }
+function previewToast() {
+  if (previewToastTimer) window.clearTimeout(previewToastTimer);
+  previewToastEffect.value = draft.popup_effect_style;
+  previewToastMessage.value = `${selectedEffect.value.label} preview. Click to dismiss, or watch it close.`;
+  previewToastOpen.value = true;
+  previewToastTimer = window.setTimeout(() => { previewToastOpen.value = false; }, 2200);
 }
 
 async function save() {
@@ -111,9 +110,8 @@ watch(
   { immediate: true },
 );
 
-onBeforeUnmount(() => {
-  if (previewOpen.value) document.body.dataset.popupEffect = String(props.settings.popup_effect_style || "flame");
-});
+onBeforeUnmount(() => { if (previewToastTimer) window.clearTimeout(previewToastTimer); });
+defineExpose({ hasUnsavedChanges: () => dirty.value });
 </script>
 
 <template>
@@ -123,24 +121,26 @@ onBeforeUnmount(() => {
     </div>
 
     <div class="tset-resource-grid">
-      <section class="tv-panel tset-form-card">
+      <section class="tv-panel tset-form-card popup-motion-card">
         <header>
-          <span class="tv-eyebrow">Motion</span>
+          <div>
+            <span class="tv-eyebrow">Motion</span>
           <h2>Compotato popup effects</h2>
-          <p>Choose the closing animation used by modals and toast messages.</p>
-        </header>
-        <div class="tv-form-grid">
-          <label>
-            Popup animation style
-            <select v-model="draft.popup_effect_style" @change="markDirty">
-              <option v-for="style in popupStyles" :key="style[0]" :value="style[0]">{{ style[1] }}</option>
-            </select>
-          </label>
-          <div class="tset-preview-control">
-            <span>Reduced-motion preferences are respected automatically.</span>
-            <button class="tv-button" type="button" @click="preview">Preview selected effect</button>
+          <p>A little Compiz spirit. Choose how dialogs and notifications open and close.</p>
           </div>
+          <div class="popup-motion-preview-actions">
+          <button class="tv-button" type="button" @click="preview">Preview dialog</button>
+          <button class="tv-button" type="button" :disabled="previewToastOpen" @click="previewToast">Preview notification</button>
         </div>
+        </header>
+        <fieldset class="popup-motion-options">
+          <legend>Popup animation style</legend>
+          <label v-for="effect in popupEffects" :key="effect.id" class="popup-motion-choice" :class="{ selected: draft.popup_effect_style === effect.id }">
+            <input v-model="draft.popup_effect_style" type="radio" name="popup-motion" :value="effect.id" @change="markDirty" />
+            <span class="popup-motion-choice-copy"><span><strong>{{ effect.label }}</strong><small>{{ effect.hint }}</small></span><span>{{ effect.description }}</span></span>
+          </label>
+        </fieldset>
+        <p class="popup-motion-note">Previews use your selection without saving. Reduced Motion in your system settings turns animations off automatically.</p>
       </section>
 
       <section class="tv-panel tset-form-card">
@@ -187,13 +187,16 @@ onBeforeUnmount(() => {
       <button class="tv-button primary" type="button" :disabled="saving || !dirty" @click="save">{{ saving ? "Saving…" : "Save misc settings" }}</button>
     </footer>
 
-    <PopupTransition :open="previewOpen" backdrop-class="tv-modal-backdrop tset-modal" @close="closePreview">
+    <PopupTransition :open="previewOpen" :effect="draft.popup_effect_style" backdrop-class="tv-modal-backdrop tset-modal" @close="closePreview">
       <section class="tv-modal popup-effect-preview-dialog" role="dialog" aria-modal="true" aria-label="Compotato popup effect preview">
         <header>
-          <div><span class="tv-eyebrow">Compotato preview</span><h2>{{ draft.popup_effect_style === "disabled" ? "Simple" : `${draft.popup_effect_style[0].toUpperCase()}${draft.popup_effect_style.slice(1)}` }} popup effect</h2><p>This is how dialogs enter and leave throughout the Tater WebUI.</p></div>
+          <div><span class="tv-eyebrow">Compotato preview</span><h2>{{ selectedEffect.label }} popup effect</h2><p>{{ selectedEffect.description }} Close this dialog to see the exit animation.</p></div>
           <button class="tv-button" type="button" @click="closePreview">Close preview</button>
         </header>
       </section>
     </PopupTransition>
+    <div class="toast-root" aria-live="polite">
+      <PopupToast :open="previewToastOpen" :effect="previewToastEffect" :message="previewToastMessage" @close="previewToastOpen = false" />
+    </div>
   </section>
 </template>

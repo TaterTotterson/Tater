@@ -57,7 +57,8 @@ class FirmwareProgressUiTests(unittest.TestCase):
         self.assertIn("async function updateAll", self.component)
         self.assertIn("for (let index = 0; index < rows.length; index += 1)", self.component)
         self.assertIn("Starting ${index + 1} of ${rows.length}", self.component)
-        self.assertIn("Updated ${rows.length} satellite", self.component)
+        self.assertIn("Updated ${completedBatchCount.value} satellite", self.component)
+        self.assertIn("Skipped ${skippedBatchCount.value} offline satellite", self.component)
         self.assertIn("Update All ({{ updates.length }})", self.component)
 
     def test_backend_exposes_real_ota_progress(self) -> None:

@@ -1541,6 +1541,7 @@ def _load_echo_firmware_manifest(
                 "flash_transport": "tater_native_ota",
                 "artifacts": artifacts,
                 "ota_migrations": migrations,
+                "ota_policy": copy.deepcopy(raw_device.get("ota_policy")),
                 "support": {
                     key: copy.deepcopy(value)
                     for key, value in raw_device.items()
@@ -2972,6 +2973,21 @@ def _required_ota_migration(
     return {}
 
 
+def _echo_usb_upgrade_reason(device: Dict[str, Any], capabilities: Dict[str, Any]) -> str:
+    policy = device.get("ota_policy")
+    if policy is None:
+        return ""
+    if (not isinstance(policy, dict)
+            or type(policy.get("package_schema")) is not int
+            or policy["package_schema"] < 2
+            or not _text(policy.get("platform"))):
+        return "Echo OTA platform policy is invalid; update is blocked."
+    if (_capability_version(capabilities, "ota_package_schema") < policy["package_schema"]
+            or _text(capabilities.get("ota_platform")) != _text(policy["platform"])):
+        return "One-time full USB upgrade required for this Echo hardware update. Wi-Fi, pairing and satellite settings are preserved by default; do not use rootfs-only repair."
+    return ""
+
+
 def _build_device_context(
     selector: str,
     client_row: Dict[str, Any],
@@ -3007,10 +3023,12 @@ def _build_device_context(
     capabilities = client_row.get("capabilities") if isinstance(client_row.get("capabilities"), dict) else {}
     if not capabilities and isinstance(metadata.get("capabilities"), dict):
         capabilities = metadata["capabilities"]
+    usb_upgrade_reason = _echo_usb_upgrade_reason(prebuilt_device, capabilities)
     ota_supported = not (
         template_key in _ECHO_FIRMWARE_TARGETS
         and capabilities.get("ota") is False
     )
+    ota_supported = ota_supported and not usb_upgrade_reason
     latest_firmware_version = (
         _text(prebuilt_firmware.get("version"))
         if bool(prebuilt_firmware.get("available")) and _text(prebuilt_firmware.get("version"))
@@ -3152,7 +3170,8 @@ def _build_device_context(
         item["prebuilt_firmware"]["artifacts"].pop("ota", None)
         item["prebuilt_firmware"]["artifacts"].pop("ota_bridge", None)
         item["prebuilt_firmware"]["artifacts"].pop("system", None)
-        item["firmware_update_status"] = "This Echo build needs one USB/recovery update to enable OTA."
+        item["firmware_update_status"] = usb_upgrade_reason or "This Echo build needs one USB/recovery update to enable OTA."
+        item["usb_upgrade_required"] = bool(usb_upgrade_reason)
 
     return {
         "selector": selector_token,
@@ -3171,6 +3190,7 @@ def _build_device_context(
         },
         "prebuilt_firmware": prebuilt_firmware,
         "ota_supported": ota_supported,
+        "usb_upgrade_reason": usb_upgrade_reason,
         "native_firmware": True,
         "capabilities": copy.deepcopy(capabilities),
         "ota_migration": copy.deepcopy(ota_migration),
@@ -3495,6 +3515,7 @@ def firmware_panel_payload(status: Dict[str, Any]) -> Dict[str, Any]:
                 "installed_system": _text(item.get("installed_system_version")) or "unknown",
                 "minimum_system": _text(item.get("minimum_system_version")) or "unknown",
                 "latest": _text(item.get("firmware_version")),
+                "connected": bool(item.get("connected")),
                 "system_update_available": bool(item.get("system_update_available")),
                 "prebuilt_firmware_available": bool(item.get("prebuilt_firmware_available")),
                 "prebuilt_firmware": copy.deepcopy(item.get("prebuilt_firmware") if isinstance(item.get("prebuilt_firmware"), dict) else {}),
@@ -5936,7 +5957,7 @@ def _start_flash_session(
     host = _text(context.get("host"))
     if context.get("ota_supported") is False:
         raise RuntimeError(
-            "This Echo build cannot receive OTA yet. Install an OTA-capable build over USB/recovery once."
+            _text(context.get("usb_upgrade_reason")) or "This Echo build cannot receive OTA yet. Install an OTA-capable build over USB/recovery once."
         )
     ota_migration = context.get("ota_migration") if isinstance(context.get("ota_migration"), dict) else {}
     ota_stage = _lower(ota_migration.get("stage")) if ota_migration else "final"
@@ -6372,6 +6393,16 @@ def handle_runtime_action(action_name: str, payload: Dict[str, Any]) -> Optional
         action_name in {"voice_firmware_flash", "voice_firmware_flash_start"}
         and not bool(client_row.get("connected"))
     ):
+        if _as_bool(body.get("skip_offline"), False):
+            return {
+                "ok": True,
+                "action": action_name,
+                "selector": selector,
+                "template_key": template_key,
+                "phase": "skipped",
+                "reason": "offline",
+                "message": "Satellite is offline. Skipped; update it when it reconnects.",
+            }
         raise RuntimeError(f"Tater Native satellite {selector} is offline. Use Browser USB Flash to recover it from this browser.")
 
     context = _build_device_context(

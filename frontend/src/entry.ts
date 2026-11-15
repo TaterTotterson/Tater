@@ -45,6 +45,11 @@ import type { VerbaPayload, VerbasController, VerbasMountOptions } from "./verba
 import "./base.css";
 import "./music/music-core.css";
 import "./tater-ui.css";
+import "./settings/settings.css";
+import "./workspace.css";
+import "./cores/workspaces.css";
+import "./spudex/workspace.css";
+import "./settings/model-workspace.css";
 
 export function mountAppShell(
   container: HTMLElement,

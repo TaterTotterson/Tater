@@ -14,7 +14,7 @@ class VueSpudexTests(unittest.TestCase):
         source = (REPO_ROOT / "frontend" / "src" / "spudex" / "SpudexApp.vue").read_text(encoding="utf-8")
 
         self.assertIn('{ id: "spudex", label: "Terminal"', shell)
-        self.assertIn("<h1>Terminal</h1>", source)
+        self.assertIn("txw-project-bar", source)
         self.assertIn('aria-label="Terminal command"', source)
         self.assertNotIn('label: "Spudex"', shell)
         self.assertNotIn("<h1>Spudex</h1>", source)
@@ -35,18 +35,18 @@ class VueSpudexTests(unittest.TestCase):
         source = (REPO_ROOT / "frontend" / "src" / "spudex" / "SpudexApp.vue").read_text(encoding="utf-8")
 
         for feature in (
-            'id: "workbench"',
-            'id: "manual"',
-            'id: "settings"',
+            "id:'workbench'",
+            "id:'manual'",
+            "setTab('settings')",
             "sendChat",
             "newChat",
             "runCommand",
             "stopSession",
             "closeSession",
             "fileChange",
-            '"approve" | "reject"',
+            "'approve'|'reject'",
             "saveSettings",
-            'method: "DELETE"',
+            "method:'DELETE'",
             'file-changes/${action}',
         ):
             self.assertIn(feature, source)
@@ -63,39 +63,22 @@ class VueSpudexTests(unittest.TestCase):
         self.assertNotIn("location.reload", source)
         self.assertNotIn("innerHTML", source)
 
-    def test_workbench_keeps_chat_and_runtime_output_separate(self) -> None:
-        source = (REPO_ROOT / "frontend" / "src" / "spudex" / "SpudexApp.vue").read_text(encoding="utf-8")
-        styles = (REPO_ROOT / "frontend" / "src" / "tater-ui.css").read_text(encoding="utf-8")
+    def test_task_workspace_keeps_conversation_review_and_output_available(self) -> None:
+        source = (REPO_ROOT / "frontend/src/spudex/SpudexApp.vue").read_text()
+        styles = (REPO_ROOT / "frontend/src/spudex/workspace.css").read_text()
+        for feature in ('class="txw-conversation"', 'class="txw-inspector"', 'role="log"', 'const nonChatLogs', 'Load earlier messages', 'Continue task', 'Review changes', 'EventSource', 'onDeactivated'):
+            self.assertIn(feature, source)
+        self.assertIn('grid-template-columns:minmax(0,1fr) 230px', styles)
+        self.assertIn('height:max(450px,calc(100dvh - 230px))', styles)
+        self.assertGreaterEqual(styles.count('overscroll-behavior:contain'), 3)
 
-        self.assertIn('class="tsx-spud-bar"', source)
-        self.assertIn('class="tv-panel tsx-chat-card"', source)
-        self.assertIn('class="tv-panel tsx-terminal-card"', source)
-        self.assertIn('role="log"', source)
-        self.assertIn("const nonChatLogs", source)
-        self.assertIn("grid-template-columns: minmax(0, 1.06fr) minmax(0, .94fr)", styles)
-        self.assertIn("height: max(620px, min(690px, calc(100dvh - 225px)))", styles)
-        self.assertIn("grid-template-rows: minmax(0, 1fr)", styles)
-        self.assertIn(".tsx-chat-card, .tsx-terminal-card { display: flex; height: 100%; min-height: 0", styles)
-        self.assertGreaterEqual(styles.count("overscroll-behavior: contain"), 2)
-
-    def test_manual_session_is_a_single_interactive_terminal(self) -> None:
-        source = (REPO_ROOT / "frontend" / "src" / "spudex" / "SpudexApp.vue").read_text(encoding="utf-8")
-        styles = (REPO_ROOT / "frontend" / "src" / "tater-ui.css").read_text(encoding="utf-8")
-
-        self.assertIn('class="tsx-manual-terminal"', source)
-        self.assertIn('class="tsx-manual-prompt"', source)
-        self.assertIn('aria-label="Terminal command"', source)
-        self.assertIn("preserveLogs", source)
-        self.assertIn('const manualCwd = ref("agent_lab")', source)
-        self.assertIn('const manualCwdDisplay = ref("~")', source)
-        self.assertIn("cwd: manualCwd.value", source)
-        self.assertIn('result.builtin === "cd"', source)
-        self.assertIn("Starts in Agent Lab", source)
-        self.assertIn("commands run through the host shell", source)
-        self.assertIn("Full host access", source)
-        self.assertNotIn('class="tv-panel tsx-run-card"', source)
-        self.assertNotIn('class="tv-panel tsx-manual-history"', source)
-        self.assertIn(".tsx-terminal-check input.tv-checkbox", styles)
+    def test_manual_commands_and_real_interactive_terminal_remain_available(self) -> None:
+        source = (REPO_ROOT / "frontend/src/spudex/SpudexApp.vue").read_text()
+        terminal = (REPO_ROOT / "frontend/src/spudex/InteractiveTerminal.vue").read_text()
+        for feature in ('aria-label="Terminal command"', "const manualCwd=ref(text(project.value.path)", "const manualCwdDisplay=ref(manualCwd.value)", 'cwd:manualCwd.value', "result.builtin==='cd'", 'Starts in Agent Lab', 'commands run through the host shell', 'Full host access', 'InteractiveTerminal', 'background:background.value'):
+            self.assertIn(feature, source)
+        for feature in ('@xterm/xterm', 'onData', 'ResizeObserver', 'dispose', 'disposed=true'):
+            self.assertIn(feature, terminal)
 
     def test_settings_checkboxes_keep_compact_dimensions(self) -> None:
         styles = (REPO_ROOT / "frontend" / "src" / "tater-ui.css").read_text(encoding="utf-8")

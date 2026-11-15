@@ -7,6 +7,7 @@ const props = defineProps<{
   settings: GeneralSettings;
   endpoint: string;
   onThemePreview?: (theme: string) => void;
+  section?: "general" | "login";
 }>();
 
 const emit = defineEmits<{
@@ -210,6 +211,8 @@ watch(
   { immediate: true },
 );
 
+defineExpose({ hasUnsavedChanges: () => dirty.value });
+
 onBeforeUnmount(() => {
   if (dirty.value) props.onThemePreview?.(text(props.settings.webui_theme, "tater").toLowerCase());
 });
@@ -222,7 +225,7 @@ onBeforeUnmount(() => {
     </div>
 
     <div class="tset-general-grid">
-      <section class="tv-panel tset-form-card tset-theme-section">
+      <section v-show="section !== 'login'" class="tv-panel tset-form-card tset-theme-section">
         <header>
           <span class="tv-eyebrow">Appearance</span>
           <h2>Color theme</h2>
@@ -248,7 +251,7 @@ onBeforeUnmount(() => {
         </div>
       </section>
 
-      <section class="tv-panel tset-form-card">
+      <section v-show="section !== 'login'" class="tv-panel tset-form-card">
         <header>
           <span class="tv-eyebrow">Identity</span>
           <h2>Names and personality</h2>
@@ -278,7 +281,7 @@ onBeforeUnmount(() => {
         </div>
       </section>
 
-      <section class="tv-panel tset-form-card">
+      <section v-show="!section || section === 'login'" class="tv-panel tset-form-card">
         <header>
           <span class="tv-eyebrow">Access</span>
           <h2>WebUI login</h2>
@@ -302,7 +305,7 @@ onBeforeUnmount(() => {
         </div>
       </section>
 
-      <section class="tv-panel tset-form-card tset-avatar-section">
+      <section v-show="section !== 'login'" class="tv-panel tset-form-card tset-avatar-section">
         <header>
           <span class="tv-eyebrow">Appearance</span>
           <h2>Chat avatars</h2>

@@ -1,10 +1,13 @@
 <script setup lang="ts">
-import { computed, reactive, ref, watch } from "vue";
+import { computed, provide, reactive, ref, watch } from "vue";
 import { postJson } from "../../shared/api";
 import type { CoreTabSpec, JsonRow } from "../types";
 import CoreChannelChat from "./CoreChannelChat.vue";
 import CoreManagerField from "./CoreManagerField.vue";
 import CoreManagerItems from "./CoreManagerItems.vue";
+import CoreFieldsEditor from './CoreFieldsEditor.vue';
+import {coreWorkspace,workspaceTabs,initialWorkspaceTab,presentationFor} from '../workspace';
+import {provideCoreDrafts,workspaceKey,cloneFieldValue,sameFieldValue} from '../drafts';
 
 const props = defineProps<{
   payload: JsonRow;
@@ -14,6 +17,9 @@ const props = defineProps<{
   notify?: (message: string, tone?: string) => void;
 }>();
 
+provideCoreDrafts();
+const metadata=computed(()=>coreWorkspace(props.tab.core_key,props.payload.ui?.workspace||props.tab.workspace));
+provide(workspaceKey,metadata);
 const activeManagerTab = ref("");
 const activeGroupTab = ref("");
 const status = ref("");
@@ -21,7 +27,9 @@ const error = ref("");
 const busyKeys = ref<string[]>([]);
 const addValues = reactive<JsonRow>({});
 const statsValues = reactive<JsonRow>({});
-const addDirty = new Set<string>();
+const addDirty = reactive(new Set<string>());
+const statsDirty=reactive(new Set<string>());
+let statsSaving=false;
 
 const body = computed(() => props.payload && typeof props.payload === "object" ? props.payload : {});
 const ui = computed<JsonRow>(() => body.value.ui && typeof body.value.ui === "object" ? body.value.ui : {});
@@ -31,7 +39,7 @@ const stats = computed<JsonRow[]>(() => Array.isArray(body.value.stats) ? body.v
 const itemForms = computed<JsonRow[]>(() => Array.isArray(ui.value.item_forms) ? ui.value.item_forms : []);
 const addForm = computed<JsonRow>(() => ui.value.add_form && typeof ui.value.add_form === "object" ? ui.value.add_form : {});
 const addFields = computed<JsonRow[]>(() => Array.isArray(addForm.value.fields) ? addForm.value.fields : []);
-const managerTabs = computed<JsonRow[]>(() => (Array.isArray(ui.value.manager_tabs) ? ui.value.manager_tabs : []).filter((tab: JsonRow) => text(tab.key)));
+const managerTabs = computed<JsonRow[]>(()=>workspaceTabs(ui.value.manager_tabs,metadata.value));
 const currentTab = computed<JsonRow | null>(() => managerTabs.value.find((tab) => text(tab.key) === activeManagerTab.value) || managerTabs.value[0] || null);
 const groupTabs = computed<JsonRow[]>(() => currentTab.value && Array.isArray(currentTab.value.groups) ? currentTab.value.groups.filter((group: JsonRow) => text(group.key)) : []);
 const currentGroup = computed<JsonRow | null>(() => groupTabs.value.find((group) => text(group.key) === activeGroupTab.value) || groupTabs.value[0] || null);
@@ -70,6 +78,7 @@ async function run(action: string, payload: JsonRow, busyKey = action, successTe
   status.value = "Working…";
   try {
     const result = await postJson<JsonRow>(props.actionEndpoint, { action: name, payload: payload || {} });
+    if(result?.ok===false)throw new Error(text(result.message||result.detail)||'Core action failed.');
     const message = text(result?.message) || successText;
     status.value = message;
     const sampleUrl = text(result?.sample_url);
@@ -79,7 +88,7 @@ async function run(action: string, payload: JsonRow, busyKey = action, successTe
     }
     await props.refresh();
     props.notify?.(message, "success");
-    return result || {};
+    return {...(result||{}),__workspaceRefreshFailed:Boolean(body.value.load_error)};
   } catch (requestError) {
     const message = requestError instanceof Error ? requestError.message : "Core action failed.";
     error.value = message;
@@ -96,6 +105,7 @@ function itemsFor(group: unknown): JsonRow[] {
 function listOptions(source: JsonRow | null): JsonRow {
   if (!source) return {};
   return {
+    presentation:presentationFor(source,metadata.value),
     selector: Boolean(source.selector),
     selector_label: source.selector_label,
     item_group: source.item_group,
@@ -114,35 +124,29 @@ function setAddValue(field: JsonRow, value: unknown) {
 async function submitAdd() {
   const action = text(addForm.value.action);
   if (!action) return;
-  const result = await run(action, { ...addValues, values: { ...addValues } }, `add:${action}`, text(addForm.value.success_text) || "Saved.");
+  const submitted=cloneFieldValue(addValues);
+  const result = await run(action, { ...submitted, values: submitted }, `add:${action}`, text(addForm.value.success_text) || "Saved.");
   if (result) {
-    addDirty.clear();
-    addFields.value.forEach((field) => { addValues[text(field.key)] = initialValue(field); });
+    addFields.value.forEach(field=>{const key=text(field.key);if(sameFieldValue(addValues[key],submitted[key])){addDirty.delete(key);addValues[key]=initialValue(field);}});
   }
 }
-async function updateStats(field: JsonRow, value: unknown) {
-  const key = text(field.key);
-  if (!key) return;
-  statsValues[key] = value;
-  if (ui.value.stats_controls_auto_save !== false && ui.value.stats_controls_action) {
-    await run(text(ui.value.stats_controls_action), { ...statsValues, values: { ...statsValues } }, "stats-controls", "Saved.");
-  }
-}
-async function saveStats() {
-  if (ui.value.stats_controls_action) await run(text(ui.value.stats_controls_action), { ...statsValues, values: { ...statsValues } }, "stats-controls", "Saved.");
+async function updateStats(field:JsonRow,value:unknown){const key=text(field.key);if(!key)return;statsValues[key]=value;statsDirty.add(key);if(ui.value.stats_controls_auto_save!==false)await saveStats();}
+async function saveStats(){
+  if(statsSaving||!ui.value.stats_controls_action)return;statsSaving=true;
+  try{while(statsDirty.size){const submitted=cloneFieldValue(statsValues);const result=await run(text(ui.value.stats_controls_action),{...submitted,values:submitted},'stats-controls','Saved.');if(!result)break;for(const key of [...statsDirty])if(sameFieldValue(statsValues[key],submitted[key]))statsDirty.delete(key);}}
+  finally{statsSaving=false;}
 }
 
 watch(managerTabs, (tabs) => {
   const available = new Set(tabs.map((tab) => text(tab.key)));
-  const requested = text(ui.value.default_tab);
-  if (!available.has(activeManagerTab.value)) activeManagerTab.value = available.has(requested) ? requested : text(tabs[0]?.key);
+  if (!available.has(activeManagerTab.value)) activeManagerTab.value=initialWorkspaceTab(tabs,metadata.value,ui.value.default_tab);
 }, { immediate: true });
 watch(groupTabs, (tabs) => {
   const available = new Set(tabs.map((tab) => text(tab.key)));
   if (!available.has(activeGroupTab.value)) activeGroupTab.value = text(tabs[0]?.key);
 }, { immediate: true });
 watch(addFields, (fields) => fields.forEach((field) => { const key = text(field.key); if (key && !addDirty.has(key)) addValues[key] = initialValue(field); }), { immediate: true });
-watch(statsControls, (fields) => fields.forEach((field) => { const key = text(field.key); if (key) statsValues[key] = initialValue(field); }), { immediate: true });
+watch(statsControls, (fields) => fields.forEach((field) => { const key = text(field.key); if (key&&!statsDirty.has(key)) statsValues[key] = initialValue(field); }), { immediate: true });
 </script>
 
 <template>
@@ -152,7 +156,6 @@ watch(statsControls, (fields) => fields.forEach((field) => { const key = text(fi
     <CoreChannelChat v-else-if="isChannelChat" :payload="payload" :tab="tab" :action-endpoint="actionEndpoint" :refresh="refresh" :notify="notify" />
 
     <div v-else-if="isManager" class="card core-settings-manager tcx-native-manager" :class="appearanceClass" :data-core-live-updates="ui.live_updates ? '1' : '0'">
-      <div class="card-head"><h3 class="card-title">{{ tab.label || tab.core_key }}</h3><span class="small">{{ tab.core_key }}</span></div>
       <div v-if="body.summary" class="small">{{ body.summary }}</div>
       <div v-if="error || status" class="tv-notice compact" :class="{ error: Boolean(error) }">{{ error || status }}</div>
 
@@ -160,30 +163,30 @@ watch(statsControls, (fields) => fields.forEach((field) => { const key = text(fi
 
       <div v-if="stats.length || statsControls.length || ui.stats_refresh_button" class="core-metric-row tcx-native-stats">
         <div v-for="entry in stats" :key="entry.label" class="core-metric-pill"><div class="small">{{ entry.label }}</div><div>{{ entry.value ?? '-' }}</div></div>
-        <form v-if="statsControls.length && ui.stats_controls_action" class="inline-row tcx-native-stats-controls" @submit.prevent="saveStats"><CoreManagerField v-for="field in statsControls" :key="field.key" :field="field" :model-value="statsValues[field.key]" :all-values="statsValues" @update:model-value="updateStats(field, $event)" @error="error = $event" /><button v-if="ui.stats_controls_auto_save === false" class="action-btn" type="submit" :disabled="isBusy('stats-controls')">Save</button></form>
+        <form v-if="statsControls.length && ui.stats_controls_action" class="inline-row tcx-native-stats-controls" @submit.prevent="saveStats"><CoreManagerField v-for="field in statsControls" :key="field.key" :field="field" :model-value="statsValues[field.key]" :all-values="statsValues" @update:model-value="updateStats(field, $event)" @error="error = $event" /><button v-if="ui.stats_controls_auto_save === false || statsDirty.size>0" class="action-btn" type="submit" :disabled="isBusy('stats-controls')">Save</button></form>
         <button v-if="ui.stats_refresh_button" class="action-btn" type="button" @click="refresh">{{ ui.stats_refresh_label || 'Refresh' }}</button>
       </div>
 
       <div class="card tcx-native-manager-body">
-        <div class="card-head"><h3 class="card-title">{{ ui.title || 'Manager' }}</h3></div>
-        <nav v-if="managerTabs.length" class="core-manager-tabs" aria-label="Core manager sections"><button v-for="managerTab in managerTabs" :key="managerTab.key" type="button" class="core-manager-tab-btn" :class="{ active: activeManagerTab === managerTab.key }" @click="activeManagerTab = managerTab.key">{{ managerTab.label || managerTab.key }}</button></nav>
+
+        <div v-if="metadata.primary_tab&&managerTabs.some(t=>t.key===metadata.primary_tab)&&activeManagerTab!==metadata.primary_tab" class="cw-primary-action"><button class="tv-button primary" type="button" @click="activeManagerTab=metadata.primary_tab">+ {{ managerTabs.find(t=>t.key===metadata.primary_tab)?.label||'Add' }}</button></div><nav v-if="managerTabs.length" class="core-manager-tabs" aria-label="Core manager sections"><button v-for="managerTab in managerTabs" :key="managerTab.key" type="button" class="core-manager-tab-btn" :class="{ active: activeManagerTab === managerTab.key }" @click="activeManagerTab = managerTab.key">{{ managerTab.label || managerTab.key }}</button></nav>
 
         <template v-if="managerTabs.length">
-          <form v-if="currentTab?.source === 'add_form'" class="form-grid core-manager-add-form tcx-native-add-form" @submit.prevent="submitAdd">
-            <CoreManagerField v-for="field in addFields" :key="field.key" :field="field" :model-value="addValues[field.key]" :all-values="addValues" @update:model-value="setAddValue(field, $event)" @error="error = $event" />
+          <form v-if="currentTab?.source === 'add_form'" class="core-manager-add-form tcx-native-add-form" @submit.prevent="submitAdd">
+            <CoreFieldsEditor :fields="addFields" :values="addValues" :metadata="metadata" label="New item sections" @update="setAddValue" @error="error=$event" />
             <div class="inline-row tcx-native-form-actions"><button class="action-btn" type="submit" :disabled="isBusy(`add:${addForm.action}`)">{{ addForm.submit_label || 'Add' }}</button></div>
           </form>
 
           <div v-else-if="currentTab?.source === 'grouped_items' && groupTabs.length" class="core-manager-subtabs-wrap">
             <nav class="core-manager-subtabs" aria-label="Core item groups"><button v-for="group in groupTabs" :key="group.key" type="button" class="core-manager-subtab-btn" :class="{ active: activeGroupTab === group.key }" @click="activeGroupTab = group.key">{{ group.label || group.key }}</button></nav>
-            <CoreManagerItems v-if="currentGroup" :items="itemsFor(currentGroup.item_group || currentGroup.key)" :ui="ui" :options="{ ...listOptions(currentGroup), selector: currentGroup.selector !== false }" :run="run" :busy="isBusy" />
+            <CoreManagerItems v-if="currentGroup" :key="`${activeManagerTab}:${activeGroupTab}`" :items="itemsFor(currentGroup.item_group || currentGroup.key)" :ui="ui" :options="{ ...listOptions(currentGroup), selector: currentGroup.selector !== false }" :run="run" :busy="isBusy" />
           </div>
 
-          <CoreManagerItems v-else :items="itemsFor(currentTab?.item_group)" :ui="ui" :options="listOptions(currentTab)" :run="run" :busy="isBusy" />
+          <CoreManagerItems v-else :key="activeManagerTab" :items="itemsFor(currentTab?.item_group)" :ui="ui" :options="listOptions(currentTab)" :run="run" :busy="isBusy" />
         </template>
         <template v-else>
-          <form v-if="addForm.action" class="form-grid core-manager-add-form tcx-native-add-form" @submit.prevent="submitAdd">
-            <CoreManagerField v-for="field in addFields" :key="field.key" :field="field" :model-value="addValues[field.key]" :all-values="addValues" @update:model-value="setAddValue(field, $event)" @error="error = $event" />
+          <form v-if="addForm.action" class="core-manager-add-form tcx-native-add-form" @submit.prevent="submitAdd">
+            <CoreFieldsEditor :fields="addFields" :values="addValues" :metadata="metadata" label="New item sections" @update="setAddValue" @error="error=$event" />
             <div class="inline-row tcx-native-form-actions"><button class="action-btn" type="submit" :disabled="isBusy(`add:${addForm.action}`)">{{ addForm.submit_label || 'Add' }}</button></div>
           </form>
           <CoreManagerItems :items="itemsFor('')" :ui="ui" :options="{ empty_message: body.empty_message }" :run="run" :busy="isBusy" />
@@ -192,7 +195,6 @@ watch(statsControls, (fields) => fields.forEach((field) => { const key = text(fi
     </div>
 
     <div v-else class="card tcx-native-simple">
-      <div class="card-head"><h3 class="card-title">{{ tab.label || tab.core_key }}</h3><span class="small">{{ tab.core_key }}</span></div>
       <div v-if="body.summary" class="small">{{ body.summary }}</div>
       <div v-if="stats.length" class="core-metric-row"><div v-for="entry in stats" :key="entry.label" class="core-metric-pill"><div class="small">{{ entry.label }}</div><div>{{ entry.value ?? '-' }}</div></div></div>
       <div v-if="body.items?.length" class="core-tab-items"><article v-for="(item, index) in body.items" :key="item.id || item.title || index" class="core-tab-item"><div class="card-head"><h3 class="card-title">{{ item.title || '(untitled)' }}</h3></div><div v-if="item.subtitle" class="small">{{ item.subtitle }}</div><div v-if="item.detail" class="muted">{{ item.detail }}</div></article></div>

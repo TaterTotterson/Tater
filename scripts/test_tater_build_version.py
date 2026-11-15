@@ -137,7 +137,8 @@ class TaterBuildVersionTests(unittest.TestCase):
     def test_sidebar_branding_is_text_only(self) -> None:
         shell = (REPO_ROOT / "frontend" / "src" / "shell" / "AppShell.vue").read_text(encoding="utf-8")
 
-        self.assertIn('class="brand-wrap"', shell)
+        self.assertIn('class="workspace-brand"', shell)
+        self.assertIn('id="brand-name">{{ branding.firstName }}', shell)
         self.assertNotIn("/static/assets/tater-app-sidebar-icon.png", shell)
 
     def test_app_javascript_parses(self) -> None:

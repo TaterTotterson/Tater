@@ -51,10 +51,20 @@ if ! "${TATER_PYTHON}" -c 'import pychromecast' >/dev/null 2>&1; then
   exit 1
 fi
 
+# Uvicorn's automatic selection can pick the legacy websockets transport.
+# Its automatic pong and a backpressured media write can enter drain together,
+# asserting inside the library and dropping an otherwise healthy native call.
+if ! "${TATER_PYTHON}" -c 'from uvicorn.protocols.websockets.wsproto_impl import WSProtocol' >/dev/null 2>&1; then
+  printf '%s\n' "ERROR Tater's wsproto WebSocket transport is missing. Rerun sh setup_tater.sh for this machine, then start Tater again." >&2
+  exit 1
+fi
+printf '%s\n' "Tater WebSocket transport: wsproto"
+
 set -- \
   "${TATER_PYTHON}" -m uvicorn tateros_app:app \
   --host "${HTMLUI_HOST}" \
   --port "${HTMLUI_PORT}" \
+  --ws wsproto \
   --timeout-graceful-shutdown "${HTMLUI_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS}" \
   --no-access-log
 

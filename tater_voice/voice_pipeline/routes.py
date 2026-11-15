@@ -175,11 +175,7 @@ def _display_snapshot_response(snapshot_id: str) -> Response:
     )
 
 
-async def startup() -> None:
-    vp = _vp()
-    from .. import native_satellite
-
-    native_satellite.bind_runtime_loop()
+def _prepare_startup_models(vp: Any) -> None:
     selected_stt_backend = vp._selected_stt_backend()
     effective_stt_backend, stt_backend_note = vp._resolve_stt_backend()
     selected_tts_backend = vp._selected_tts_backend()
@@ -297,6 +293,16 @@ async def startup() -> None:
             vp.logger.warning("[native-voice] webrtc VAD dependency unavailable: %s", exc)
 
     vp.logger.info("[native-voice] satellite transport active=native_websocket legacy_satellite_api=disabled")
+
+
+async def startup() -> None:
+    vp = _vp()
+    from .. import native_satellite
+
+    native_satellite.bind_runtime_loop()
+    # Model imports, device probes, and VAD preloads must not block HTTP startup.
+    await asyncio.to_thread(_prepare_startup_models, vp)
+
     watchdog = vp._background_tasks.get("event_loop_watchdog")
     if not isinstance(watchdog, asyncio.Task) or watchdog.done():
         vp._background_tasks["event_loop_watchdog"] = asyncio.create_task(
@@ -453,6 +459,17 @@ async def native_sat_chat_status(
     from .. import sat_chat
 
     return await sat_chat.participants(viewer=viewer)
+
+
+@router.get("/api/tater/satellite/v1/sat-chat/diagnostics")
+async def native_sat_chat_diagnostics(
+    x_tater_token: Optional[str] = Header(None),
+) -> Dict[str, Any]:
+    vp = _vp()
+    vp._require_api_auth(x_tater_token)
+    from .. import sat_chat
+
+    return await sat_chat.relay_diagnostics()
 
 
 @router.post("/api/tater/satellite/v1/sat-chat")

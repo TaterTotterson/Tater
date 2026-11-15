@@ -48,9 +48,11 @@ LEGACY_RUNTIME_SETTING_KEYS = {
 } | REMOVED_DISCOVERY_SETTING_KEYS
 
 VOICE_WAKE_VERIFIER_MODE_KEY = "VOICE_WAKE_VERIFIER_MODE"
+VOICE_WAKE_VERIFIER_THRESHOLD_KEY = "VOICE_WAKE_VERIFIER_THRESHOLD"
 VOICE_WAKE_VERIFIER_MODES = {"off", "observe", "enforce"}
 VOICE_STANDALONE_SETTING_KEYS = {
     VOICE_WAKE_VERIFIER_MODE_KEY,
+    VOICE_WAKE_VERIFIER_THRESHOLD_KEY,
     "VOICE_CONTINUED_CHAT_ENABLED",
 }
 VOICE_INTERNAL_TUNING_KEYS = {
@@ -107,6 +109,16 @@ def voice_ui_setting_specs() -> List[Dict[str, Any]]:
                 {"value": "enforce", "label": "Enabled"},
             ],
             "description": "Applies to every Tater Native satellite. Observe records results without blocking wakes; Enabled rejects transcript mismatches and fails open on timeout or error.",
+        },
+        {
+            "key": VOICE_WAKE_VERIFIER_THRESHOLD_KEY,
+            "label": "STT Match Threshold",
+            "type": "number",
+            "default": 0.85,
+            "min": 0.5,
+            "max": 1.0,
+            "step": 0.01,
+            "description": "The minimum transcript similarity accepted by STT wake verification. Higher is stricter; lower tolerates harmless substitutions such as Juniper being heard as Jennifer.",
         },
         {
             "key": "VOICE_NATIVE_DEBUG",
@@ -704,6 +716,16 @@ def wake_verifier_mode() -> str:
     vp = _vp()
     mode = vp._lower(vp._voice_settings().get(VOICE_WAKE_VERIFIER_MODE_KEY)) or "off"
     return mode if mode in VOICE_WAKE_VERIFIER_MODES else "off"
+
+
+def wake_verifier_threshold() -> float:
+    vp = _vp()
+    return vp._as_float(
+        vp._voice_settings().get(VOICE_WAKE_VERIFIER_THRESHOLD_KEY),
+        0.85,
+        minimum=0.5,
+        maximum=1.0,
+    )
 
 
 def settings_item_form() -> Dict[str, Any]:

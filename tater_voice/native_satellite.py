@@ -2033,7 +2033,9 @@ def _upsert_registry_from_hello(selector: str, payload: Dict[str, Any], *, conne
     return _vp()._upsert_satellite(row)
 
 
-def _client_snapshot(selector: str, row: Dict[str, Any]) -> Dict[str, Any]:
+def _client_snapshot(
+    selector: str, row: Dict[str, Any], *, include_live_settings: bool = True
+) -> Dict[str, Any]:
     hello = row.get("hello") if isinstance(row.get("hello"), dict) else {}
     payload = hello.get("payload") if isinstance(hello.get("payload"), dict) else {}
     queue = row.get("queue")
@@ -2044,7 +2046,7 @@ def _client_snapshot(selector: str, row: Dict[str, Any]) -> Dict[str, Any]:
     bridge = row.get("voice_bridge")
     if isinstance(bridge, _NativeVoicePipelineBridge):
         voice["audio_transport"] = bridge.audio_stats()
-    return {
+    snapshot = {
         "selector": selector,
         "connected": connected,
         "host": _text(row.get("client_host")),
@@ -2077,11 +2079,6 @@ def _client_snapshot(selector: str, row: Dict[str, Any]) -> Dict[str, Any]:
             if isinstance(row.get("audio_overlay"), dict)
             else {"active": False}
         ),
-        "live_settings": _live_settings_payload(
-            selector,
-            board=_text(payload.get("board")),
-            capabilities=_capabilities(payload),
-        ),
         "auth": {
             "mode": _text(auth.get("mode")) or "open",
             "paired": _text(auth.get("mode")) in {"paired", "device_token"},
@@ -2090,6 +2087,11 @@ def _client_snapshot(selector: str, row: Dict[str, Any]) -> Dict[str, Any]:
         "queued_commands": queue.qsize() if isinstance(queue, asyncio.Queue) else 0,
         "binary_frames": int(row.get("binary_frames") or 0),
         "binary_bytes": int(row.get("binary_bytes") or 0),
+        "egress": (
+            dict(row.get("egress"))
+            if isinstance(row.get("egress"), dict)
+            else {}
+        ),
         "wake_verifier": {
             "count": int(row.get("wake_verifier_count") or 0),
             "rejections": int(row.get("wake_verifier_rejections") or 0),
@@ -2098,9 +2100,21 @@ def _client_snapshot(selector: str, row: Dict[str, Any]) -> Dict[str, Any]:
         "ble": dict(row.get("ble")) if isinstance(row.get("ble"), dict) else {},
         "voice": voice,
     }
+    if include_live_settings:
+        _hydrate_status_live_settings({selector: snapshot})
+    return snapshot
 
 
-async def status() -> Dict[str, Any]:
+def _hydrate_status_live_settings(clients: Dict[str, Dict[str, Any]]) -> None:
+    # Settings use synchronous Redis reads. Never run this while holding the
+    # async client lock or on the media-relay event loop.
+    for selector, snapshot in clients.items():
+        snapshot["live_settings"] = _live_settings_payload(
+            selector, board=snapshot["board"], capabilities=snapshot["capabilities"]
+        )
+
+
+async def status(*, include_live_settings: bool = True) -> Dict[str, Any]:
     now_ts = _now()
     stale_after = _stale_after_s()
     registry_updates: list[tuple[str, Dict[str, Any]]] = []
@@ -2121,7 +2135,7 @@ async def status() -> Dict[str, Any]:
                 registry_updates.append((selector, hello_payload))
             disconnected_selectors.append(selector)
         clients = {
-            selector: _client_snapshot(selector, row)
+            selector: _client_snapshot(selector, row, include_live_settings=False)
             for selector, row in _clients.items()
             if isinstance(row, dict)
         }
@@ -2133,6 +2147,8 @@ async def status() -> Dict[str, Any]:
         from . import sat_chat
 
         await sat_chat.disconnected(selector)
+    if include_live_settings and clients:
+        await asyncio.to_thread(_hydrate_status_live_settings, clients)
     return {"ok": True, "protocol": PROTOCOL_VERSION, "clients": clients, "count": len(clients)}
 
 
@@ -2305,17 +2321,29 @@ async def send_command(selector: str, message_type: str, payload: Optional[Dict[
 
 async def send_binary(selector: str, data: bytes) -> Dict[str, Any]:
     """Send one live PCM frame to a connected native satellite."""
-    token = _canonical_selector(selector)
+    token = _text(selector)
     payload = bytes(data or b"")
     if not token:
         raise ValueError("selector is required")
-    if not payload:
-        return {"ok": True, "selector": token, "bytes": 0}
+
+    # Live PCM/video peers are stored by their canonical selector already.
+    # Avoid a synchronous Redis alias read for every media packet; a slow
+    # Redis call here stalls the asyncio media loop shared by the whole call.
+    # Migrated/legacy selectors retain the established alias behavior through
+    # the off-loop fallback below.
     async with _clients_lock:
         row = _clients.get(token)
-        if not isinstance(row, dict) or not bool(row.get("connected")):
-            raise RuntimeError(f"Native satellite is not connected: {token}")
-        sender = row.get("send_binary")
+        sender = row.get("send_binary") if isinstance(row, dict) and bool(row.get("connected")) else None
+    if not callable(sender):
+        canonical = await asyncio.to_thread(_canonical_selector, token)
+        token = canonical or token
+        async with _clients_lock:
+            row = _clients.get(token)
+            if not isinstance(row, dict) or not bool(row.get("connected")):
+                raise RuntimeError(f"Native satellite is not connected: {token}")
+            sender = row.get("send_binary")
+    if not payload:
+        return {"ok": True, "selector": token, "bytes": 0}
     if not callable(sender):
         raise RuntimeError(f"Native satellite binary sender unavailable: {token}")
     await sender(payload)
@@ -5166,21 +5194,65 @@ async def _cancel_websocket_tasks(tasks: Any, *, selector: str, label: str) -> N
         )
 
 
-async def _handle_text_message(selector: str, message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+async def _record_client_activity(
+    selector: str,
+    websocket: WebSocket,
+    *,
+    recover: bool = True,
+) -> bool:
+    """Fresh traffic on the current socket can recover a heartbeat-only timeout."""
+    recovered = False
+    hello_payload: Dict[str, Any] = {}
+    async with _clients_lock:
+        row = _clients.get(selector)
+        if not isinstance(row, dict) or row.get("websocket") is not websocket:
+            return False
+        row["last_seen_ts"] = _now()
+        if recover and not row.get("connected") and row.get("last_error") == "stale heartbeat":
+            row["connected"] = True
+            row["last_error"] = ""
+            hello = row.get("hello") if isinstance(row.get("hello"), dict) else {}
+            hello_payload = _message_payload(hello)
+            recovered = True
+    if recovered:
+        _cancel_media_disconnect_abort(selector)
+        if hello_payload:
+            _upsert_registry_from_hello(selector, hello_payload, connected=True)
+        _notify_state_change("connected", selector)
+        _vp().logger.info("[native-satellite] heartbeat resumed selector=%s", selector)
+    return True
+
+
+async def _handle_text_message(
+    selector: str,
+    message: Dict[str, Any],
+    *,
+    websocket: Optional[WebSocket] = None,
+) -> Optional[Dict[str, Any]]:
     msg_type = _message_type(message)
     payload = _message_payload(message)
     reply_to = _text(payload.get("reply_to")) if msg_type.endswith(".result") else ""
     setup_state_seen = msg_type == "status" and _is_setup_state(payload)
+    if websocket is not None and not await _record_client_activity(
+        selector, websocket, recover=not setup_state_seen
+    ):
+        return None
     setup_connection_changed = False
     hello_payload: Dict[str, Any] = {}
     response_future: Optional[asyncio.Future] = None
     reported_volume: Any = None
     reported_volume_changed = False
     reported_volume_board = ""
+    reported_text_style: Any = None
+    reported_text_style_board = ""
     settings_result_changed = False
+    ble_metadata: Optional[Dict[str, Any]] = None
+    ble_owner: Optional[Dict[str, Any]] = None
     async with _clients_lock:
         row = _clients.get(selector)
         if not isinstance(row, dict):
+            return None
+        if websocket is not None and row.get("websocket") is not websocket:
             return None
         row["last_seen_ts"] = _now()
         row["last_message_type"] = msg_type
@@ -5193,6 +5265,13 @@ async def _handle_text_message(selector: str, message: Dict[str, Any]) -> Option
             if msg_type == "settings.changed":
                 settings_error = _text(payload.get("error"))
                 settings_ok = _as_bool(payload.get("ok"), not bool(settings_error))
+                if settings_ok and not settings_error and "screen_text_style" in reported_settings:
+                    hello = row.get("hello") if isinstance(row.get("hello"), dict) else {}
+                    hello_values = _message_payload(hello)
+                    capabilities = hello_values.get("capabilities") or {}
+                    if isinstance(capabilities, dict) and capabilities.get("screen_text_style") is True:
+                        reported_text_style = reported_settings["screen_text_style"]
+                        reported_text_style_board = _text(hello_values.get("board"))
                 # Physical controls also report small settings.changed deltas.
                 # Only a full live-settings acknowledgement (wake_word is
                 # always present) or a failure should replace this diagnostic.
@@ -5273,24 +5352,18 @@ async def _handle_text_message(selector: str, message: Dict[str, Any]) -> Option
             }
             _record_stereo_overlay_finished(selector, payload)
         elif msg_type == "ble.advertisements":
-            from . import native_ble
-
             hello = row.get("hello") if isinstance(row.get("hello"), dict) else {}
-            hello_payload = _message_payload(hello)
-            row["ble"] = native_ble.ingest_advertisements(
-                selector,
-                payload,
-                metadata={
-                    "device_id": _text(hello_payload.get("device_id")),
-                    "device_name": _device_name_from_hello(hello_payload, selector),
-                    "board": _text(hello_payload.get("board")),
-                    "room": _text(
-                        hello_payload.get("room")
-                        or hello_payload.get("area_name")
-                        or hello_payload.get("room_name")
-                    ),
-                },
-            )
+            ble_hello = _message_payload(hello)
+            ble_owner = row
+            # BLE metadata is not a setup/disconnect transition. Reusing
+            # hello_payload here marked the registry offline and performed
+            # synchronous Redis/disk I/O on every advertisement batch.
+            ble_metadata = {
+                "device_id": _text(ble_hello.get("device_id")),
+                "device_name": _device_name_from_hello(ble_hello, selector),
+                "board": _text(ble_hello.get("board")),
+                "room": _text(ble_hello.get("room") or ble_hello.get("area_name") or ble_hello.get("room_name")),
+            }
         elif msg_type in {"log", "ota.status"}:
             logs_deque = row.get("logs")
             if isinstance(logs_deque, deque):
@@ -5325,6 +5398,17 @@ async def _handle_text_message(selector: str, message: Dict[str, Any]) -> Option
     if response_future is not None and not response_future.done():
         response_future.set_result(payload)
         return None
+    if ble_metadata is not None:
+        from . import native_ble
+
+        ble_result = await asyncio.to_thread(
+            native_ble.ingest_advertisements, selector, payload, metadata=ble_metadata
+        )
+        async with _clients_lock:
+            current = _clients.get(selector)
+            if current is ble_owner and (websocket is None or current.get("websocket") is websocket):
+                current["ble"] = ble_result
+        return None
     if hello_payload:
         _upsert_registry_from_hello(selector, hello_payload, connected=False)
     if setup_connection_changed:
@@ -5340,6 +5424,16 @@ async def _handle_text_message(selector: str, message: Dict[str, Any]) -> Option
             _notify_state_change("settings", selector)
     if settings_result_changed:
         _notify_state_change("settings_result", selector)
+    if reported_text_style is not None:
+        from . import native_live_settings
+
+        if await asyncio.to_thread(
+            native_live_settings.adopt_reported_device_text_style,
+            reported_text_style,
+            selector=selector,
+            board=reported_text_style_board,
+        ):
+            _notify_state_change("settings", selector)
     if msg_type == "camera.stream.ended":
         await _native_camera_source_ended(selector)
         return None
@@ -5529,14 +5623,47 @@ async def handle_websocket(websocket: WebSocket) -> None:
     client_row: Optional[Dict[str, Any]] = None
     client_host = getattr(websocket.client, "host", "unknown") if websocket.client is not None else "unknown"
     send_lock = asyncio.Lock()
+    egress: Dict[str, Any] = {}
+
+    def observe_egress(kind: str, size: int, queued: float, acquired: float, finished: float) -> None:
+        prefix = "binary" if kind == "binary" else "json"
+        egress[f"{prefix}_frames"] = int(egress.get(f"{prefix}_frames") or 0) + 1
+        egress[f"{prefix}_bytes"] = int(egress.get(f"{prefix}_bytes") or 0) + max(0, int(size))
+        egress[f"{prefix}_maximum_lock_wait_ms"] = round(
+            max(
+                float(egress.get(f"{prefix}_maximum_lock_wait_ms") or 0.0),
+                (acquired - queued) * 1000.0,
+            ),
+            3,
+        )
+        egress[f"{prefix}_maximum_write_ms"] = round(
+            max(
+                float(egress.get(f"{prefix}_maximum_write_ms") or 0.0),
+                (finished - acquired) * 1000.0,
+            ),
+            3,
+        )
+        egress[f"{prefix}_maximum_total_ms"] = round(
+            max(
+                float(egress.get(f"{prefix}_maximum_total_ms") or 0.0),
+                (finished - queued) * 1000.0,
+            ),
+            3,
+        )
 
     async def send_json(message: Dict[str, Any]) -> None:
+        queued = time.monotonic()
         async with send_lock:
+            acquired = time.monotonic()
             await websocket.send_json(message)
+            observe_egress("json", len(json.dumps(message, separators=(",", ":"))), queued, acquired, time.monotonic())
 
     async def send_binary_frame(data: bytes) -> None:
+        queued = time.monotonic()
         async with send_lock:
+            acquired = time.monotonic()
             await websocket.send_bytes(data)
+            observe_egress("binary", len(data), queued, acquired, time.monotonic())
 
     try:
         first = await asyncio.wait_for(websocket.receive_text(), timeout=10.0)
@@ -5618,6 +5745,8 @@ async def handle_websocket(websocket: WebSocket) -> None:
         async with _clients_lock:
             row = _clients.get(selector)
             client_row = row if isinstance(row, dict) and row.get("websocket") is websocket else None
+            if isinstance(client_row, dict):
+                client_row["egress"] = egress
         bridge = client_row.get("voice_bridge") if isinstance(client_row, dict) else None
         bridge = bridge if isinstance(bridge, _NativeVoicePipelineBridge) else None
         if bridge is not None:
@@ -5778,7 +5907,7 @@ async def handle_websocket(websocket: WebSocket) -> None:
                     await send_json(_envelope("error", {"ok": False, "error": f"Invalid JSON: {exc}"}))
                     continue
                 try:
-                    response = await _handle_text_message(selector, message)
+                    response = await _handle_text_message(selector, message, websocket=websocket)
                 except Exception as exc:
                     await send_json(
                         _envelope(
@@ -5793,6 +5922,9 @@ async def handle_websocket(websocket: WebSocket) -> None:
                 continue
             binary = raw.get("bytes")
             if binary is not None:
+                binary_received_at = time.monotonic()
+                if not await _record_client_activity(selector, websocket):
+                    continue
                 data = bytes(binary or b"")
                 if isinstance(client_row, dict):
                     client_row["binary_frames"] = int(client_row.get("binary_frames") or 0) + 1
@@ -5805,7 +5937,7 @@ async def handle_websocket(websocket: WebSocket) -> None:
                 from . import sat_chat
                 from . import wake_verifier
 
-                if await sat_chat.route_audio(selector, data):
+                if await sat_chat.route_audio(selector, data, received_at=binary_received_at):
                     continue
                 if wake_verifier.is_wake_verifier_packet(data):
                     task = asyncio.create_task(

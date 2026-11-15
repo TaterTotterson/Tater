@@ -124,6 +124,8 @@ export interface RedisEncryptionStatus extends JsonRow {
 }
 
 export interface SettingsMountOptions {
+  initialPage?: string;
+  onPageChange?: (page: string) => void;
   initialTab?: string;
   initialSummary: SettingsSummary;
   initialGeneral: GeneralSettings;
@@ -217,6 +219,7 @@ export interface SettingsMountOptions {
   onRedisStatusChange?: (status: RedisConnectionStatus) => void;
   onLogAutoScrollChange?: (enabled: boolean) => void;
   onToast?: (message: string, tone?: string) => void;
+  onExitSettings?: () => void;
 }
 
 export interface SettingsController {

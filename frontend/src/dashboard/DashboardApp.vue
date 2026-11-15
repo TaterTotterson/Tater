@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { getJson, postJson } from "../shared/api";
 import PopupTransition from "../shared/PopupTransition.vue";
+import UiIcon from "../shared/UiIcon.vue";
 import type { DashboardMountOptions, DashboardPayload, JsonRow } from "./types";
 
 const props = defineProps<{
@@ -15,17 +16,22 @@ const error = ref("");
 const showMetrics = ref(props.options.initialPreferences?.showMetrics !== false);
 const showMedia = ref(props.options.initialPreferences?.showMedia !== false);
 let refreshTimer = 0;
-let sectionLayoutFrame = 0;
-let sectionResizeObserver: ResizeObserver | null = null;
-const sectionGrid = ref<HTMLElement | null>(null);
+const activeSectionId = ref("overview");
+const updatesOpen = ref(false);
 
 const payload = computed(() => props.state.payload || {});
 const sections = computed(() => (Array.isArray(payload.value.sections) ? payload.value.sections : []));
+const sectionOrder = ["environment", "awareness", "personal", "voice"];
 const sortedSections = computed(() =>
-  [...sections.value].sort((left, right) =>
-    text(left?.title || left?.id).localeCompare(text(right?.title || right?.id), undefined, { sensitivity: "base" })
-  )
+  [...sections.value].sort((left, right) => {
+    const rank = (section: JsonRow) => {
+      const index = sectionOrder.indexOf(sectionId(section));
+      return index < 0 ? sectionOrder.length : index;
+    };
+    return rank(left) - rank(right) || text(left?.title || left?.id).localeCompare(text(right?.title || right?.id), undefined, { sensitivity: "base" });
+  })
 );
+const selectedSection = computed(() => sortedSections.value.find((section) => sectionId(section) === activeSectionId.value));
 const briefRows = computed(() => (Array.isArray(payload.value.briefs) ? payload.value.briefs : []));
 const briefById = computed(() => new Map(briefRows.value.map((row) => [String(row?.id || ""), row])));
 const updates = computed(() => (payload.value.updates && typeof payload.value.updates === "object" ? payload.value.updates : {}));
@@ -38,6 +44,12 @@ const briefRefreshSeconds = ref(3600);
 
 const overviewBrief = computed(() => briefById.value.get("overview"));
 const systemBrief = computed(() => briefById.value.get("system"));
+const systemCards = computed(() => (Array.isArray(payload.value.cards) ? payload.value.cards : []).filter((card) => ["tater", "hydra", "surfaces"].includes(text(card.id))));
+const updateHeadline = computed(() => {
+  const total = Number(updates.value.total || 0);
+  if (total > 0) return `${total} ${total === 1 ? "update" : "updates"} available`;
+  return updateGroups.value.some((group) => group.error) ? "Updates need a check" : "Everything current";
+});
 
 function text(value: unknown): string {
   return String(value ?? "").trim();
@@ -142,36 +154,39 @@ function scheduleRefresh() {
   }
 }
 
-function layoutSectionCards() {
-  sectionLayoutFrame = 0;
-  const grid = sectionGrid.value;
-  if (!grid) return;
-  const gridStyle = window.getComputedStyle(grid);
-  const rowHeight = Number.parseFloat(gridStyle.gridAutoRows) || 8;
-  const rowGap = Number.parseFloat(gridStyle.rowGap) || 12;
-  const cards = Array.from(grid.children).filter((row): row is HTMLElement => row instanceof HTMLElement);
-  cards.forEach((card) => { card.style.gridRowEnd = "auto"; });
-  cards.forEach((card) => {
-    const height = card.getBoundingClientRect().height;
-    const span = Math.max(1, Math.ceil((height + rowGap) / (rowHeight + rowGap)));
-    card.style.gridRowEnd = `span ${span}`;
-  });
+function sectionId(section: JsonRow): string {
+  return text(section.id || section.title);
 }
 
-function scheduleSectionLayout() {
-  window.cancelAnimationFrame(sectionLayoutFrame);
-  sectionLayoutFrame = window.requestAnimationFrame(layoutSectionCards);
+function sectionTabId(section: JsonRow): string {
+  return `td-tab-${encodeURIComponent(sectionId(section))}`;
 }
 
-function observeSectionCards() {
-  sectionResizeObserver?.disconnect();
-  const grid = sectionGrid.value;
-  if (!grid) return;
-  sectionResizeObserver = new ResizeObserver(scheduleSectionLayout);
-  sectionResizeObserver.observe(grid);
-  Array.from(grid.children).forEach((card) => sectionResizeObserver?.observe(card));
-  scheduleSectionLayout();
+function sectionIcon(section: JsonRow): string {
+  return ({ environment: "sun", awareness: "eye", personal: "calendar", voice: "mic", guardian: "shield" } as Record<string, string>)[sectionId(section)] || "dashboard";
 }
+
+function sectionSummary(section: JsonRow): string {
+  const brief = text(briefFor(section)?.text);
+  if (brief) return brief;
+  const card = (payload.value.cards || []).find((row) => text(row.id) === sectionId(section));
+  return [text(card?.value), text(card?.detail)].filter(Boolean).join(" · ") || text(section.subtitle) || "View this section's latest readings.";
+}
+
+function moveSectionFocus(event: KeyboardEvent) {
+  if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+  const tabs = Array.from((event.currentTarget as HTMLElement).querySelectorAll<HTMLButtonElement>('[role="tab"]'));
+  const current = tabs.indexOf(event.target as HTMLButtonElement);
+  if (current < 0) return;
+  event.preventDefault();
+  const next = event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1 : (current + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
+  tabs[next]?.click();
+  tabs[next]?.focus();
+}
+
+watch(sortedSections, () => {
+  if (activeSectionId.value !== "overview" && !selectedSection.value) activeSectionId.value = "overview";
+});
 
 watch([showMetrics, showMedia], savePreferences);
 watch(
@@ -181,19 +196,15 @@ watch(
     refreshSeconds.value = Number(refreshSettings.value.refresh_interval_seconds ?? 300);
     briefRefreshSeconds.value = Number(refreshSettings.value.brief_refresh_interval_seconds ?? 3600);
     scheduleRefresh();
-    void nextTick().then(observeSectionCards);
   },
   { immediate: true },
 );
 
 onMounted(() => {
   void refresh({ quiet: true });
-  void nextTick().then(observeSectionCards);
 });
 onBeforeUnmount(() => {
   window.clearInterval(refreshTimer);
-  window.cancelAnimationFrame(sectionLayoutFrame);
-  sectionResizeObserver?.disconnect();
 });
 
 const refreshOptions = [
@@ -204,72 +215,92 @@ const briefOptions = [
 ];
 </script>
 
+
 <template>
   <div class="tater-vue-surface td-dashboard">
-    <header class="tv-page-heading">
+    <header class="tv-page-heading td-page-heading">
       <div>
-        <span class="tv-eyebrow">Home at a glance</span>
         <h1>Dashboard</h1>
-        <p>
-          <span v-if="payload.generated_at">Updated {{ timeLabel(payload.generated_at) }}</span>
-          <span v-else>Live status, signals, and Tater summaries.</span>
+        <p class="td-page-status">
+          <span class="tv-live-pill" :class="{ busy: Boolean(busy) }"><i />{{ busy || "Live" }}</span>
+          <span v-if="payload.generated_at">· Updated {{ timeLabel(payload.generated_at) }}</span>
         </p>
       </div>
-      <div class="tv-heading-actions">
-        <span class="tv-live-pill" :class="{ busy: Boolean(busy) }"><i />{{ busy || "Live" }}</span>
-        <button type="button" class="tv-button" @click="controlsOpen = true">Controls</button>
-      </div>
+      <button type="button" class="tv-button" :aria-expanded="controlsOpen" @click="controlsOpen = true"><UiIcon name="sliders" />Controls</button>
     </header>
 
-    <div v-if="error" class="tv-notice error">{{ error }}</div>
+    <div v-if="error" class="tv-notice error" role="alert">{{ error }}</div>
 
-    <section v-if="overviewBrief?.text" class="td-overview tv-panel">
-      <div>
-        <span class="tv-eyebrow">Today</span>
-        <h2>{{ overviewBrief.title || "Home Brief" }}</h2>
-      </div>
-      <p>{{ overviewBrief.text }}</p>
+    <section class="td-overview tv-panel">
+      <header class="td-card-heading"><UiIcon name="sparkles" /><h2>{{ overviewBrief?.title || "Home Brief" }}</h2><span>Today</span></header>
+      <p v-if="overviewBrief?.text">{{ overviewBrief.text }}</p>
+      <p v-else class="td-pending-brief">Your home brief will appear here when it is ready.</p>
+      <footer class="workspace-brief-footer"><span>{{ overviewBrief?.updated_at ? `Generated ${timeLabel(overviewBrief.updated_at)}` : "Home summary" }}</span><button type="button" class="workspace-text-button" :disabled="Boolean(busy)" @click="refreshBriefs"><UiIcon name="refresh" />Refresh brief</button></footer>
     </section>
 
-    <section v-if="updateGroups.length" class="tv-panel td-updates">
-      <div class="tv-panel-head">
-        <div><span class="tv-eyebrow">Update watch</span><h2>{{ Number(updates.total || 0) ? `${updates.total} available` : "Everything current" }}</h2></div>
-        <span>{{ updates.summary || "Firmware and Tater Shop surfaces checked." }}</span>
-      </div>
-      <div class="td-update-grid">
-        <button v-for="group in updateGroups" :key="text(group.kind)" type="button" @click="navigate(group.kind)">
-          <span>{{ group.label || group.kind }}</span>
-          <strong>{{ group.error ? "Needs check" : Number(group.count || 0) ? `${group.count} available` : "Current" }}</strong>
-          <small v-if="group.items?.length">{{ group.items.slice(0, 3).map((row: JsonRow) => row.name || row.id).join(" • ") }}</small>
-          <small v-else>{{ group.error || "No pending updates" }}</small>
-        </button>
-      </div>
-    </section>
+    <nav class="td-section-tabs" role="tablist" aria-label="Dashboard sections" @keydown="moveSectionFocus">
+      <button id="td-tab-overview" type="button" role="tab" aria-controls="td-section-content" :aria-selected="activeSectionId === 'overview'" :tabindex="activeSectionId === 'overview' ? 0 : -1" @click="activeSectionId = 'overview'"><UiIcon name="dashboard" />Overview</button>
+      <button v-for="section in sortedSections" :id="sectionTabId(section)" :key="sectionId(section)" type="button" role="tab" aria-controls="td-section-content" :aria-selected="activeSectionId === sectionId(section)" :tabindex="activeSectionId === sectionId(section) ? 0 : -1" @click="activeSectionId = sectionId(section)"><UiIcon :name="sectionIcon(section)" />{{ section.title || section.id }}</button>
+    </nav>
 
-    <section v-if="systemBrief?.text" class="tv-panel td-system-brief">
-      <span class="tv-eyebrow">Tater</span>
-      <h2>{{ systemBrief.title || "System summary" }}</h2>
-      <p>{{ systemBrief.text }}</p>
-    </section>
-
-    <section ref="sectionGrid" class="td-section-grid">
-      <article v-for="section in sortedSections" :key="text(section.id)" class="tv-panel td-section" :class="`section-${text(section.id)}`">
-        <header class="tv-panel-head">
-          <div><span class="tv-eyebrow">{{ section.id }}</span><h2>{{ section.title || section.id }}</h2><p>{{ section.subtitle }}</p></div>
-          <span v-if="briefFor(section)?.updated_at">{{ timeLabel(briefFor(section)?.updated_at) }}</span>
-        </header>
-        <p v-if="briefFor(section)?.text" class="td-brief">{{ briefFor(section)?.text }}</p>
-        <div v-if="showMetrics && section.stats?.length" class="tv-metrics">
-          <div v-for="stat in section.stats" :key="text(stat.label)"><span>{{ stat.label }}</span><strong>{{ stat.value ?? "-" }}</strong></div>
-        </div>
-        <div v-if="sectionItems(section).length" class="td-items">
-          <article v-for="(item, index) in sectionItems(section)" :key="text(item.id || item.title || index)" class="td-item">
-            <img v-if="showMedia && itemImage(item)" :src="itemImage(item)" :alt="text(item.image_alt || item.title || 'Dashboard image')" loading="lazy" />
-            <div><strong>{{ item.title || item.name || item.label || "Signal" }}</strong><span>{{ item.subtitle || item.when || item.state || item.detail }}</span></div>
+    <div class="td-navigator-layout">
+      <div id="td-section-content" class="td-section-content" role="tabpanel" :aria-labelledby="selectedSection ? sectionTabId(selectedSection) : 'td-tab-overview'">
+        <section v-if="activeSectionId === 'overview'" class="tv-panel td-section-overview" aria-label="Section overview">
+          <article v-for="section in sortedSections" :key="sectionId(section)" class="td-overview-row">
+            <UiIcon :name="sectionIcon(section)" />
+            <div><h2>{{ section.title || section.id }}</h2><p>{{ sectionSummary(section) }}</p></div>
+            <button type="button" class="workspace-text-button" :aria-label="`View ${text(section.title || section.id)}`" @click="activeSectionId = sectionId(section)"><span>View</span><UiIcon name="chevron" /></button>
           </article>
-        </div>
-      </article>
-    </section>
+          <p v-if="!sortedSections.length" class="td-empty-copy">Live sections will appear as your connected cores report in.</p>
+        </section>
+
+        <article v-else-if="selectedSection" class="tv-panel td-section" :class="`section-${sectionId(selectedSection)}`">
+          <header class="tv-panel-head">
+            <div><div class="td-card-heading"><UiIcon :name="sectionIcon(selectedSection)" /><h2>{{ selectedSection.title || selectedSection.id }}</h2></div><p>{{ selectedSection.subtitle }}</p></div>
+            <span v-if="briefFor(selectedSection)?.updated_at">{{ timeLabel(briefFor(selectedSection)?.updated_at) }}</span>
+          </header>
+          <p v-if="briefFor(selectedSection)?.text" class="td-brief">{{ briefFor(selectedSection)?.text }}</p>
+          <div v-if="showMetrics && selectedSection.stats?.length" class="td-metric-pills">
+            <span v-for="stat in selectedSection.stats" :key="text(stat.label)"><strong>{{ stat.value ?? "-" }}</strong>{{ stat.label }}</span>
+          </div>
+          <div v-if="sectionItems(selectedSection).length" class="td-items">
+            <article v-for="(item, index) in sectionItems(selectedSection)" :key="text(item.id || item.title || index)" class="td-item">
+              <img v-if="showMedia && itemImage(item)" :src="itemImage(item)" :alt="text(item.image_alt || item.title || 'Dashboard image')" loading="lazy" />
+              <UiIcon v-else :name="sectionIcon(selectedSection)" />
+              <div><strong>{{ item.title || item.name || item.label || "Signal" }}</strong><span>{{ item.subtitle || item.when || item.state || item.detail }}</span></div>
+            </article>
+          </div>
+          <p v-if="!briefFor(selectedSection)?.text && !selectedSection.stats?.length && !sectionItems(selectedSection).length" class="td-empty-copy">No recent readings for this section yet.</p>
+        </article>
+      </div>
+
+      <aside class="td-status-rail" aria-label="Tater status and updates">
+        <section v-if="systemBrief?.text || systemCards.length" class="tv-panel td-system-brief">
+          <header class="td-card-heading"><UiIcon name="activity" /><h2>Tater status</h2><span>Live</span></header>
+          <h3 v-if="systemBrief?.title && systemBrief.title !== 'Tater status'">{{ systemBrief.title }}</h3>
+          <p v-if="systemBrief?.text">{{ systemBrief.text }}</p>
+          <div v-if="systemCards.length" class="td-system-lines">
+            <div v-for="card in systemCards" :key="text(card.id)" class="td-system-line"><span>{{ card.label || card.id }}</span><div><strong :class="{ good: card.tone === 'good', warning: card.tone === 'warning' }">{{ card.value }}</strong><small v-if="card.detail">{{ card.detail }}</small></div></div>
+          </div>
+        </section>
+
+        <section v-if="updateGroups.length" class="td-update-watch">
+          <button type="button" class="td-update-summary" :aria-expanded="updatesOpen" aria-controls="td-update-groups" @click="updatesOpen = !updatesOpen">
+            <UiIcon name="download" />
+            <span><strong>{{ updateHeadline }}</strong><small>{{ updates.summary || "Firmware and Tater Shop surfaces checked." }}</small><span>{{ updatesOpen ? "Hide updates" : "View updates" }}</span></span>
+            <UiIcon name="chevron" />
+          </button>
+          <div v-if="updatesOpen" id="td-update-groups" class="td-update-groups">
+            <button v-for="group in updateGroups" :key="text(group.kind)" type="button" @click="navigate(group.kind)">
+              <div><strong>{{ group.label || group.kind }}</strong><span :class="{ available: group.error || Number(group.count || 0) > 0 }">{{ group.error ? "Needs check" : Number(group.count || 0) ? `${group.count} available` : "Current" }}</span></div>
+              <small v-if="group.items?.length">{{ group.items.slice(0, 3).map((row: JsonRow) => row.name || row.id).join(" • ") }}</small>
+              <small v-else>{{ group.error || "No pending updates" }}</small>
+              <small v-if="group.error && group.items?.length">{{ group.error }}</small>
+            </button>
+          </div>
+        </section>
+      </aside>
+    </div>
 
     <PopupTransition :open="controlsOpen" @close="controlsOpen = false">
         <section class="tv-modal td-dashboard-controls" role="dialog" aria-modal="true" aria-label="Dashboard controls">
@@ -281,7 +312,7 @@ const briefOptions = [
             <label><span>Brief refresh</span><select v-model.number="briefRefreshSeconds" @change="saveSettings({ refresh_interval_seconds: refreshSeconds, brief_refresh_interval_seconds: briefRefreshSeconds }, 'Brief refresh updated.')"><option v-for="row in briefOptions" :key="row[0]" :value="row[0]">{{ row[1] }}</option></select></label>
             <label><span>Personal profile</span><select v-model="personalId" @change="saveSettings({ personal_person_id: personalId || null }, 'Personal dashboard profile updated.')"><option value="">All people</option><option v-for="row in personal.people_options || []" :key="text(row.value)" :value="text(row.value)">{{ row.label || row.value }}</option></select></label>
           </div>
-          <footer><span>{{ busy || error }}</span><div><button class="tv-button" type="button" @click="refresh({ snapshot: true })">Refresh snapshot</button><button class="tv-button primary" type="button" @click="refreshBriefs">Generate briefs</button></div></footer>
+          <footer><span>{{ busy || error }}</span><div><button class="tv-button" type="button" :disabled="Boolean(busy)" @click="refresh({ snapshot: true })">Refresh snapshot</button><button class="tv-button primary" type="button" :disabled="Boolean(busy)" @click="refreshBriefs">Generate briefs</button></div></footer>
         </section>
     </PopupTransition>
   </div>

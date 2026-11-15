@@ -65,12 +65,20 @@ class EchoDisplayThemeSettingsTests(unittest.TestCase):
                 board: native_live_settings.settings_fields(f"native:{board}", board=board)
                 for board in ("biscuit", "radar")
             }
+            payloads_by_board = {
+                board: native_live_settings.firmware_settings_snapshot(f"native:{board}", board=board)
+                for board in ("biscuit", "radar")
+            }
 
-        for fields in fields_by_board.values():
-            keys = {str(field.get("key") or "") for field in fields}
+        for board, fields in fields_by_board.items():
+            by_key = {str(field.get("key") or ""): field for field in fields}
+            keys = set(by_key)
             self.assertIn("led_section", keys)
             self.assertIn("led_replying_animation", keys)
             self.assertIn("led_music_animation", keys)
+            self.assertEqual(by_key["led_replying_animation"]["value"], "voice_ring")
+            self.assertEqual(by_key["led_replying_animation"]["default"], "voice_ring")
+            self.assertEqual(payloads_by_board[board]["led_replying_animation"], "voice_ring")
             self.assertNotIn("display_wallpaper_interval_minutes", keys)
             self.assertTrue(native_live_settings._DISPLAY_THEME_FIELD_KEYS.isdisjoint(keys))
 

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import ModelSelect from "./ModelSelect.vue";
 import { computed, ref } from "vue";
 import { postJson, responseJson } from "../../../shared/api";
 import type { JsonRow } from "../../types";
@@ -169,9 +170,11 @@ async function deleteClone() {
     <article class="tm-form-card tm-tts-engine-card">
       <header><div><span class="tv-eyebrow">Voice engine</span><h3>{{ announcement ? "Choose the announcement voice" : "Choose Tater's reply voice" }}</h3><p>{{ announcement ? "Reuse the Reply Voice profile or select a dedicated engine for announcements." : "Select one engine. Only its matching model and connection settings appear." }}</p></div><span class="tm-speech-status-chip">{{ activeBackendMeta.label }}</span></header>
       <div v-if="error" class="tv-notice error">{{ error }}</div>
+      <details class="tm-engine-chooser"><summary><span><strong>{{ activeBackendMeta.label }}</strong><small>{{ activeBackendMeta.short }}</small></span><span>Change engine</span></summary>
       <div class="tm-speech-provider-grid tm-tts-provider-grid" role="group" :aria-label="`${announcement ? 'Announcement' : 'Reply'} voice engine`">
         <button v-for="option in backendOptions" :key="optionValue(option)" type="button" :class="{ active: backend === optionValue(option) }" :aria-pressed="backend === optionValue(option)" @click="selectBackend(optionValue(option))"><i>{{ detailsFor(optionValue(option)).mark }}</i><span><strong>{{ optionLabel(option) }}</strong><small>{{ detailsFor(optionValue(option)).short }}</small></span><b aria-hidden="true">✓</b></button>
       </div>
+      </details>
     </article>
 
     <article v-if="inheritsDirect" class="tm-form-card tm-speech-inherit-card">
@@ -199,9 +202,9 @@ async function deleteClone() {
       <section v-if="showModelVoicePanel" class="tm-speech-voice-panel">
         <div class="tm-speech-section-heading compact"><div><h3>Model and voice</h3><p>Choose what generates the audio and how Tater should sound.</p></div><span>{{ modelOptions.length || voiceOptions.length ? "Available choices" : "Manual entry" }}</span></div>
         <div class="tm-field-grid">
-          <label v-if="modelOptions.length" class="tm-field"><span class="tm-field-label">Model</span><select v-model="draft[modelKey]" @change="changed"><option value="">Choose a model</option><option v-if="draft[modelKey] && !hasOption(modelOptions, draft[modelKey])" :value="draft[modelKey]">Current: {{ draft[modelKey] }}</option><option v-for="option in modelOptions" :key="optionValue(option)" :value="optionValue(option)">{{ optionLabel(option) }}</option></select></label>
+          <div v-if="modelOptions.length" class="tm-field"><span class="tm-field-label">Model</span><ModelSelect label="Model"><select aria-label="Model" v-model="draft[modelKey]" @change="changed"><option value="">Choose a model</option><option v-if="draft[modelKey] && !hasOption(modelOptions, draft[modelKey])" :value="draft[modelKey]">Current: {{ draft[modelKey] }}</option><option v-for="option in modelOptions" :key="optionValue(option)" :value="optionValue(option)">{{ optionLabel(option) }}</option></select></ModelSelect></div>
           <label v-else-if="effectiveBackend !== 'wyoming'" class="tm-field"><span class="tm-field-label">Model</span><input v-model="draft[modelKey]" type="text" placeholder="Model id or alias" @input="emit('dirty')" /></label>
-          <label v-if="needsVoice && voiceOptions.length" class="tm-field"><span class="tm-field-label">Voice</span><select v-model="draft[voiceKey]" @change="emit('dirty')"><option value="">Choose a voice</option><option v-if="draft[voiceKey] && !hasOption(voiceOptions, draft[voiceKey])" :value="draft[voiceKey]">Current: {{ draft[voiceKey] }}</option><option v-for="option in voiceOptions" :key="optionValue(option)" :value="optionValue(option)">{{ optionLabel(option) }}</option></select></label>
+          <div v-if="needsVoice && voiceOptions.length" class="tm-field"><span class="tm-field-label">Voice</span><ModelSelect label="Voice" action-label="Change voice"><select aria-label="Voice" v-model="draft[voiceKey]" @change="emit('dirty')"><option value="">Choose a voice</option><option v-if="draft[voiceKey] && !hasOption(voiceOptions, draft[voiceKey])" :value="draft[voiceKey]">Current: {{ draft[voiceKey] }}</option><option v-for="option in voiceOptions" :key="optionValue(option)" :value="optionValue(option)">{{ optionLabel(option) }}</option></select></ModelSelect></div>
           <label v-else-if="needsVoice" class="tm-field"><span class="tm-field-label">Voice</span><input v-model="draft[voiceKey]" type="text" placeholder="Voice id or name" @input="emit('dirty')" /></label>
         </div>
       </section>

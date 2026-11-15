@@ -146,6 +146,9 @@ class GlobalWakeVerifierSettingsTests(unittest.TestCase):
         self.assertNotIn('=== "echo_satellite_model_settings"', source)
         self.assertIn(verifier_group, source)
         self.assertLess(source.index(wake_fields), source.index(verifier_fields))
+        self.assertIn("tm-wake-verifier-threshold", source)
+        self.assertIn("verifierThresholdPercent", source)
+        self.assertIn("resetVerifierThreshold", source)
         self.assertEqual(source.count("Apply To All Satellites"), 0)
 
     def test_faster_whisper_card_visibility_follows_selected_stt_backend(self) -> None:
@@ -154,7 +157,10 @@ class GlobalWakeVerifierSettingsTests(unittest.TestCase):
 
         self.assertIn("function setStt", speech)
         self.assertIn("visibleVoiceSections", speech)
-        self.assertIn('<ModelFields :sections="visibleVoiceSections"', speech)
+        self.assertIn("splitListeningSections(visibleVoiceSections.value)", speech)
+        self.assertIn('selectedStt.value === "faster_whisper"', speech)
+        self.assertIn('<ModelFields :sections="listeningSections.basic"', speech)
+        self.assertIn('<ModelFields :sections="listeningSections.advanced"', speech)
         self.assertIn("show_when", fields)
         self.assertIn("function visible", fields)
 
@@ -178,6 +184,7 @@ class GlobalWakeVerifierSettingsTests(unittest.TestCase):
             if isinstance(field, dict)
         }
         self.assertNotIn(settings.VOICE_WAKE_VERIFIER_MODE_KEY, section_keys)
+        self.assertNotIn(settings.VOICE_WAKE_VERIFIER_THRESHOLD_KEY, section_keys)
 
     def test_internal_endpoint_tuning_is_not_user_configurable(self) -> None:
         voice_pipeline = settings._vp()
@@ -245,6 +252,27 @@ class GlobalWakeVerifierSettingsTests(unittest.TestCase):
 
         self.assertEqual(snapshot["wake_verifier_mode"], "observe")
 
+    def test_global_threshold_overrides_device_value(self) -> None:
+        def fake_hget(_key: str, field: str) -> str | None:
+            if field == native_live_settings.GLOBAL_WAKE_VERIFIER_MODE_KEY:
+                return "observe"
+            if field == native_live_settings.GLOBAL_WAKE_VERIFIER_THRESHOLD_KEY:
+                return "0.76"
+            return None
+
+        fake_redis = mock.Mock()
+        fake_redis.hgetall.return_value = {
+            "wake_verifier_threshold": "0.95",
+            "wake_word": "hey_tater",
+        }
+        fake_redis.hget.side_effect = fake_hget
+        with mock.patch.object(native_live_settings, "redis_client", fake_redis):
+            snapshot = native_live_settings.settings_snapshot("native:test-sat")
+            shared = native_live_settings.shared_wake_settings_snapshot()
+
+        self.assertEqual(snapshot["wake_verifier_threshold"], 0.76)
+        self.assertEqual(shared["wake_verifier_threshold"], 0.76)
+
     def test_satellite_settings_do_not_expose_verifier_controls(self) -> None:
         fake_redis = mock.Mock()
         fake_redis.hgetall.return_value = {}
@@ -299,9 +327,10 @@ class GlobalWakeVerifierSettingsTests(unittest.TestCase):
 
         self.assertEqual(card["group"], "wake_verifier")
         self.assertEqual(card["sections"][0]["fields"][0]["value"], "observe")
-        self.assertIn("3 checks", card["sections"][0]["fields"][1]["value"])
+        self.assertEqual(card["sections"][0]["fields"][1]["value"], 0.85)
+        self.assertIn("3 checks", card["sections"][0]["fields"][2]["value"])
         self.assertEqual(
-            card["sections"][0]["fields"][2]["value"],
+            card["sections"][0]["fields"][3]["value"],
             "faster_whisper",
         )
         rows = card["sections"][1]["fields"][0]["rows"]
@@ -310,6 +339,7 @@ class GlobalWakeVerifierSettingsTests(unittest.TestCase):
         self.assertEqual(rows[0]["rejected"], 2)
         self.assertEqual(rows[0]["fail_open"], 1)
         self.assertEqual(rows[0]["stt_engine"], "faster_whisper")
+        self.assertEqual(rows[0]["score"], "20% match · 85% required")
 
     def test_result_card_prefers_persisted_wake_verifier_counters(self) -> None:
         native_status = {
@@ -349,7 +379,7 @@ class GlobalWakeVerifierSettingsTests(unittest.TestCase):
         ):
             card = home._wake_verifier_item_form(native_status)
 
-        self.assertIn("4 checks", card["sections"][0]["fields"][1]["value"])
+        self.assertIn("4 checks", card["sections"][0]["fields"][2]["value"])
         row = card["sections"][1]["fields"][0]["rows"][0]
         self.assertEqual(row["accepted"], 3)
         self.assertEqual(row["rejected"], 1)
@@ -391,7 +421,7 @@ class GlobalWakeVerifierSettingsTests(unittest.TestCase):
             card = home._wake_verifier_item_form(native_status)
 
         self.assertEqual(
-            card["sections"][0]["fields"][2]["value"],
+            card["sections"][0]["fields"][3]["value"],
             "qwen3_asr_llama_cpp",
         )
         results_field = card["sections"][1]["fields"][0]
@@ -496,18 +526,30 @@ class GlobalWakeVerifierSettingsTests(unittest.TestCase):
             mock.patch.object(home, "_runtime_status_with_native", return_value={}),
             mock.patch.object(home.esphome_speaker_id, "handle_runtime_action", return_value=None),
             mock.patch.object(home.esphome_emotion_id, "handle_runtime_action", return_value=None),
-            mock.patch.object(home.esphome_settings, "save_settings_values", return_value={"updated_count": 1}),
+            mock.patch.object(home.esphome_settings, "save_settings_values", return_value={"updated_count": 2}) as save_mock,
             mock.patch.object(home.native_satellite, "push_live_settings", new=lambda: "push-all"),
             mock.patch.object(home.native_satellite, "run_on_runtime_loop", return_value={"count": 4}) as run_mock,
             mock.patch.object(home, "_native_satellite_status_snapshot", return_value={"clients": {}}),
         ):
             result = home.handle_runtime_action(
                 action="voice_wake_verifier_save",
-                payload={"values": {settings.VOICE_WAKE_VERIFIER_MODE_KEY: "observe"}},
+                payload={
+                    "values": {
+                        settings.VOICE_WAKE_VERIFIER_MODE_KEY: "observe",
+                        settings.VOICE_WAKE_VERIFIER_THRESHOLD_KEY: 0.75,
+                    }
+                },
             )
 
         self.assertTrue(result["ok"])
+        self.assertIn("75%", result["message"])
         self.assertIn("4 connected satellite(s)", result["message"])
+        save_mock.assert_called_once_with(
+            {
+                settings.VOICE_WAKE_VERIFIER_MODE_KEY: "observe",
+                settings.VOICE_WAKE_VERIFIER_THRESHOLD_KEY: 0.75,
+            }
+        )
         run_mock.assert_called_once_with("push-all", timeout=10.0)
 
     def test_reset_action_clears_redis_and_live_wake_counters(self) -> None:

@@ -13,6 +13,9 @@ import SettingsApp from "../settings/SettingsApp.vue";
 import LocalModelApplyProgress from "../settings/components/models/LocalModelApplyProgress.vue";
 import SpudexApp from "../spudex/SpudexApp.vue";
 import VerbasApp from "../verbas/VerbasApp.vue";
+import UiIcon from "../shared/UiIcon.vue";
+import PopupToast from "../shared/PopupToast.vue";
+import { normalizePopupEffect, prefersReducedMotion } from "../shared/popupMotion";
 import type { AppShellAuthState, AppShellBranding, AppShellMountOptions, AppView, ShellJson, ShellViewDescriptor } from "./types";
 
 const props = defineProps<{ options: AppShellMountOptions }>();
@@ -28,6 +31,7 @@ const viewSpecs: Array<{ id: AppView; label: string; subtitle: string }> = [
   { id: "settings", label: "Settings", subtitle: "Global WebUI and Tater runtime configuration." },
 ];
 const allowedViews = new Set(viewSpecs.map((view) => view.id));
+const viewIcons: Record<AppView, string> = { dashboard: "dashboard", chat: "chat", verbas: "verbas", portals: "portals", cores: "cores", integrations: "plug", spudex: "terminal", settings: "sliders" };
 const components = markRaw({
   dashboard: DashboardApp,
   chat: ChatApp,
@@ -41,6 +45,7 @@ const components = markRaw({
 
 const initialBranding = props.options.initialBranding || {};
 const activeView = ref<AppView>(normalizeView(props.options.initialView));
+const lastWorkspaceView = ref<AppView>(activeView.value === "settings" ? "dashboard" : activeView.value);
 const loadedViews = shallowReactive<Partial<Record<AppView, ShellViewDescriptor>>>({});
 const loadingView = ref<AppView | "">("");
 const viewError = ref("");
@@ -64,7 +69,7 @@ let sidebarTimer = 0;
 let requestSequence = 0;
 let toastSequence = 0;
 const toastTimers = new Map<number, number>();
-const toasts = ref<Array<{ id: number; message: string; tone: "success" | "error"; visible: boolean; closing: boolean }>>([]);
+const toasts = ref<Array<{ id: number; message: string; tone: "success" | "error"; closing: boolean }>>([]);
 const startupModelOpen = ref(false);
 const startupModelWarmup = ref<ShellJson>({});
 const startupModelPollError = ref("");
@@ -72,16 +77,22 @@ let startupModelTimer = 0;
 let startupModelCompleteTimer = 0;
 let startupModelDismissed = false;
 let startupModelObserved = false;
+let startupModelRequest: AbortController | null = null;
+let startupModelDisposed = false;
 
 const activeSpec = computed(() => viewSpecs.find((view) => view.id === activeView.value) || viewSpecs[0]);
 const activeDescriptor = computed(() => loadedViews[activeView.value] || null);
 const activeViewComponent = computed(() => components[activeView.value]);
 const activeState = computed<any>(() => activeDescriptor.value?.state || {});
-const activeOptions = computed<any>(() => activeDescriptor.value?.options || {});
+const activeOptions = computed<any>(() => {
+  const options = activeDescriptor.value?.options || {};
+  return activeView.value === "settings" ? { ...options, onExitSettings: () => navigate(lastWorkspaceView.value) } : options;
+});
 const shellClasses = computed(() => ({
   "sidebar-collapsed": sidebarCollapsed.value,
   "sidebar-collapsing": sidebarPhase.value === "collapsing",
   "sidebar-expanding": sidebarPhase.value === "expanding",
+  "settings-layout": activeView.value === "settings",
 }));
 const versionText = computed(() => {
   const assistantName = branding.firstName || "Tater";
@@ -146,6 +157,7 @@ async function navigate(viewInput: AppView, options: { history?: "push" | "repla
   const changed = activeView.value !== view;
   if (!changed && loadedViews[view] && !options.refresh) return;
   activeView.value = view;
+  if (view !== "settings") lastWorkspaceView.value = view;
   document.body.dataset.view = view;
   props.options.onViewChange?.(view);
   syncHistory(view, changed ? options.history || "push" : options.history === "none" ? "none" : "replace");
@@ -218,33 +230,29 @@ async function openRuntime() { await runtimeComponent.value?.open?.(); }
 function dismissToast(id: number) {
   const row = toasts.value.find((item) => item.id === id);
   if (!row || row.closing) return;
-  row.visible = false;
   row.closing = true;
   const prior = toastTimers.get(id);
   if (prior) window.clearTimeout(prior);
-  toastTimers.set(id, window.setTimeout(() => {
-    toasts.value = toasts.value.filter((item) => item.id !== id);
-    toastTimers.delete(id);
-  }, 420));
+  toastTimers.delete(id);
+}
+function removeToast(id: number) {
+  toasts.value = toasts.value.filter((item) => item.id !== id);
 }
 function toast(message: string, tone = "success", timeoutMs = 2600) {
   const value = String(message || "").trim();
   if (!value) return;
   const id = ++toastSequence;
-  toasts.value.push({ id, message: value, tone: tone === "error" ? "error" : "success", visible: false, closing: false });
-  requestAnimationFrame(() => { const row = toasts.value.find((item) => item.id === id); if (row) row.visible = true; });
+  toasts.value.push({ id, message: value, tone: tone === "error" ? "error" : "success", closing: false });
   toastTimers.set(id, window.setTimeout(() => dismissToast(id), Math.max(1200, Number(timeoutMs) || 2600)));
 }
-function sidebarDuration(direction: "collapse" | "expand") {
-  const style = String(document.body.dataset.popupEffect || "flame");
-  const durations: Record<string, [number, number]> = { disabled: [120, 140], flame: [460, 480], dust: [500, 520], glitch: [340, 360], portal: [500, 520], melt: [480, 500] };
-  return (durations[style] || durations.flame)[direction === "collapse" ? 0 : 1];
+function sidebarDuration() {
+  return prefersReducedMotion() || normalizePopupEffect(document.body.dataset.popupEffect) === "disabled" ? 0 : 220;
 }
 function setSidebarCollapsed(collapsed: boolean) {
   const next = Boolean(collapsed);
   if (sidebarTimer) window.clearTimeout(sidebarTimer);
   const desktop = window.matchMedia?.("(min-width: 981px)").matches ?? window.innerWidth > 980;
-  if (!desktop) {
+  if (!desktop || sidebarDuration() === 0) {
     sidebarCollapsed.value = next;
     sidebarPhase.value = "";
     props.options.onSidebarChange?.(next);
@@ -257,7 +265,7 @@ function setSidebarCollapsed(collapsed: boolean) {
     sidebarPhase.value = "";
     sidebarTimer = 0;
     props.options.onSidebarChange?.(next);
-  }, sidebarDuration(next ? "collapse" : "expand"));
+  }, sidebarDuration());
 }
 function handlePopState() {
   const view = viewFromLocation();
@@ -269,9 +277,11 @@ function clearStartupModelTimers() {
   if (startupModelCompleteTimer) window.clearTimeout(startupModelCompleteTimer);
   startupModelTimer = 0;
   startupModelCompleteTimer = 0;
+  startupModelRequest?.abort();
 }
 
 function scheduleStartupModelPoll(delay = 700) {
+  if (startupModelDisposed || authState.required) return;
   if (startupModelTimer) window.clearTimeout(startupModelTimer);
   startupModelTimer = window.setTimeout(pollStartupModelWarmup, delay);
 }
@@ -284,9 +294,13 @@ function closeStartupModelProgress() {
 async function pollStartupModelWarmup() {
   startupModelTimer = 0;
   const endpoint = String(props.options.modelWarmupEndpoint || "").trim();
-  if (!endpoint || authState.required) return;
+  if (!endpoint || authState.required || startupModelDisposed || startupModelRequest) return;
+  const request = new AbortController();
+  startupModelRequest = request;
+  const timeout = window.setTimeout(() => request.abort(), 4000);
   try {
-    const snapshot = await getJson<ShellJson>(endpoint);
+    const snapshot = await getJson<ShellJson>(endpoint, { signal: request.signal });
+    if (startupModelDisposed || authState.required) return;
     startupModelWarmup.value = snapshot;
     startupModelPollError.value = "";
     const bootstrapPending = Boolean(snapshot.startup_bootstrap_pending);
@@ -312,8 +326,12 @@ async function pollStartupModelWarmup() {
       }, 1400);
     }
   } catch (error) {
+    if (startupModelDisposed || authState.required) return;
     startupModelPollError.value = error instanceof Error ? error.message : "Live startup model progress is temporarily unavailable.";
-    if (startupModelObserved) scheduleStartupModelPoll(1600);
+    scheduleStartupModelPoll(1600);
+  } finally {
+    window.clearTimeout(timeout);
+    startupModelRequest = null;
   }
 }
 
@@ -326,6 +344,7 @@ onMounted(() => {
   void pollStartupModelWarmup();
 });
 onBeforeUnmount(() => {
+  startupModelDisposed = true;
   window.removeEventListener("popstate", handlePopState);
   if (sidebarTimer) window.clearTimeout(sidebarTimer);
   clearStartupModelTimers();
@@ -338,15 +357,20 @@ onBeforeUnmount(() => {
   <div class="bg-shape bg-shape-a" aria-hidden="true"></div>
   <div class="bg-shape bg-shape-b" aria-hidden="true"></div>
   <div id="app-shell" class="app-shell tater-vue-shell" :class="shellClasses">
+    <header class="topbar workspace-topbar">
+      <div class="workspace-brand"><h1 id="brand-name">{{ branding.firstName }}</h1><span aria-hidden="true">/</span><span class="workspace-current-view">{{ activeSpec.label }}</span></div>
+      <div id="runtime-summary" class="runtime-summary runtime-summary-vue-host"><RuntimeStatus ref="runtimeComponent" :state="runtimeState" :options="options.runtimeOptions" :assistant-name="branding.firstName" compact /></div>
+    </header>
     <aside id="app-sidebar" class="sidebar">
-      <div class="sidebar-controls"><button id="sidebar-collapse-btn" class="inline-btn sidebar-toggle-btn" type="button" :disabled="Boolean(sidebarPhase)" :aria-label="sidebarCollapsed ? 'Show menu' : 'Hide menu'" @click="setSidebarCollapsed(!sidebarCollapsed)">{{ sidebarPhase ? '⋯' : sidebarCollapsed ? '☰' : '✕' }}</button></div>
-      <div class="brand-wrap"><div><h1 id="brand-name">{{ branding.firstName }}</h1><p id="brand-subtitle">{{ branding.firstName }}OS Control Surface</p></div></div>
-      <nav class="nav-stack" aria-label="Primary"><button v-for="view in viewSpecs" :key="view.id" class="nav-btn" :class="{ active: activeView === view.id }" :data-view="view.id" type="button" @click="navigate(view.id)">{{ view.label }}</button></nav>
+      <div class="sidebar-controls"><span id="brand-subtitle" class="workspace-nav-label">Workspace</span><button id="sidebar-collapse-btn" class="inline-btn sidebar-toggle-btn" type="button" :disabled="Boolean(sidebarPhase)" :aria-label="sidebarCollapsed ? 'Show menu' : 'Hide menu'" @click="setSidebarCollapsed(!sidebarCollapsed)"><UiIcon :name="sidebarCollapsed ? 'plus' : 'close'" /></button></div>
+      <nav class="nav-stack" aria-label="Primary"><button v-for="view in viewSpecs" :key="view.id" class="nav-btn" :class="{ active: activeView === view.id }" :aria-current="activeView === view.id ? 'page' : undefined" :data-view="view.id" type="button" @click="navigate(view.id)"><UiIcon :name="viewIcons[view.id]" /><span>{{ view.label }}</span></button></nav>
+      <div id="terminal-task-sidebar" v-show="activeView === 'spudex'" />
+      <button type="button" class="workspace-services" :class="runtimeState.tone" @click="openRuntime"><UiIcon name="check" /><span>{{ runtimeState.tone === 'offline' ? 'Backend offline' : runtimeState.tone === 'degraded' ? 'Services need attention' : runtimeState.health ? 'Services connected' : 'Checking services…' }}</span></button>
       <div v-if="versionText" id="tater-build-version" class="sidebar-build-version" :aria-label="`Current ${branding.firstName || 'Tater'} version`" aria-live="polite">{{ versionText }}</div>
     </aside>
 
     <main class="main-pane">
-      <header class="topbar"><div><h2 id="view-title">{{ activeSpec.label }}</h2><p id="view-subtitle">{{ subtitle }}</p></div><div id="runtime-summary" class="runtime-summary runtime-summary-vue-host"><RuntimeStatus ref="runtimeComponent" :state="runtimeState" :options="options.runtimeOptions" :assistant-name="branding.firstName" /></div></header>
+      <header v-if="activeView === 'chat'" class="workspace-page-heading"><h2 id="view-title">{{ activeSpec.label }}</h2><p id="view-subtitle">{{ subtitle }}</p></header>
       <section id="view-root" class="view-root tater-shell-view-root" :data-view="activeView">
         <div v-if="viewError && !activeDescriptor" class="tv-notice error">Failed to load {{ activeSpec.label }}: {{ viewError }} <button class="inline-btn" type="button" @click="ensureView(activeView, true)">Try again</button></div>
         <div v-else-if="!activeDescriptor" class="tv-empty">Loading {{ activeSpec.label }}…</div>
@@ -358,7 +382,7 @@ onBeforeUnmount(() => {
     </main>
   </div>
   <button id="sidebar-expand-btn" class="sidebar-expand-fab" type="button" aria-label="Show menu" title="Show menu" :disabled="Boolean(sidebarPhase)" @click="setSidebarCollapsed(false)">{{ sidebarPhase ? '⋯' : '☰' }}</button>
-  <div id="toast-root" class="toast-root" aria-live="polite" aria-atomic="true"><button v-for="item in toasts" :key="item.id" type="button" class="toast-item" :class="[item.tone, { show: item.visible, 'flame-out': item.closing }]" @click="dismissToast(item.id)">{{ item.message }}</button></div>
-  <LocalModelApplyProgress v-if="!authState.required" :open="startupModelOpen" :snapshot="startupModelWarmup" :poll-error="startupModelPollError" startup @close="closeStartupModelProgress" />
+  <div id="toast-root" class="toast-root" aria-live="polite" aria-atomic="false"><PopupToast v-for="item in toasts" :key="item.id" :open="!item.closing" :message="item.message" :tone="item.tone" @close="dismissToast(item.id)" @dismissed="removeToast(item.id)" /></div>
+  <LocalModelApplyProgress v-if="!authState.required" :open="startupModelOpen" :snapshot="startupModelWarmup" :poll-error="startupModelPollError" startup @close="closeStartupModelProgress" @reopen="startupModelOpen = true" />
   <AuthGate :state="authState" :authenticate="options.authenticate" @authenticated="handleAuthenticated" />
 </template>

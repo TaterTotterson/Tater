@@ -21,6 +21,7 @@ DEVICE_SETTINGS_HASH_PREFIX = f"{SETTINGS_HASH_KEY}:device:"
 WAKE_FAMILY_SETTINGS_HASH_PREFIX = f"{SETTINGS_HASH_KEY}:wake-family:"
 GLOBAL_VOICE_SETTINGS_HASH_KEY = "voice_core_settings"
 GLOBAL_WAKE_VERIFIER_MODE_KEY = "VOICE_WAKE_VERIFIER_MODE"
+GLOBAL_WAKE_VERIFIER_THRESHOLD_KEY = "VOICE_WAKE_VERIFIER_THRESHOLD"
 GLOBAL_SATELLITE_SETTINGS_MIGRATION_KEY = "_global_satellite_voice_settings_v1"
 WAKE_FAMILY_SETTINGS_MIGRATION_KEY = "_wake_family_settings_v1"
 UNIFIED_WAKE_SETTINGS_MIGRATION_KEY = "_unified_wake_settings_v1"
@@ -117,6 +118,7 @@ DEFAULTS: Dict[str, Any] = {
     "screen_night_end": "07:00",
     "screen_night_display": "red_clock",
     "screen_clock_format": "12h",
+    "screen_text_style": "smooth",
     "display_theme": "tater",
     "display_wallpaper_interval_minutes": 1440,
     "display_edge_glow": True,
@@ -125,7 +127,7 @@ DEFAULTS: Dict[str, Any] = {
     "led_listening_animation": "directional",
     "led_thinking_animation": "sparkle",
     "led_tool_call_animation": "ping_pong",
-    "led_replying_animation": "audio_glow",
+    "led_replying_animation": "voice_ring",
     "led_music_animation": "music_bars",
     "logging_level": "info",
     "ssh_enabled": False,
@@ -180,6 +182,7 @@ FIRMWARE_SETTING_KEYS = (
     "screen_night_end",
     "screen_night_display",
     "screen_clock_format",
+    "screen_text_style",
     "display_theme",
     "display_wallpaper_interval_minutes",
     "display_edge_glow",
@@ -577,7 +580,7 @@ LED_TOOL_CALL_ANIMATIONS = _with_no_animation([
     if row[0] != "audio_glow"
 ])
 LED_REPLYING_ANIMATIONS = _with_no_animation(
-    _animation_rows("audio_glow", "voice_ring", "wave", "ripple", "equalizer")
+    _animation_rows("voice_ring", "audio_glow", "wave", "ripple", "equalizer")
 )
 LED_MUSIC_ANIMATIONS = [
     ("off", "No Animation"),
@@ -1523,6 +1526,22 @@ def _global_wake_verifier_mode() -> str:
     return mode if mode in WAKE_VERIFIER_MODES else "off"
 
 
+def _global_wake_verifier_threshold() -> float:
+    try:
+        value = redis_client.hget(
+            GLOBAL_VOICE_SETTINGS_HASH_KEY,
+            GLOBAL_WAKE_VERIFIER_THRESHOLD_KEY,
+        )
+    except Exception:
+        value = None
+    return _as_float(
+        value,
+        float(DEFAULTS["wake_verifier_threshold"]),
+        minimum=0.5,
+        maximum=1.0,
+    )
+
+
 def _is_sat1_board(board: Any = "") -> bool:
     token = _lower(board).replace("_", "-").replace(" ", "-")
     compact = token.replace("-", "")
@@ -1542,6 +1561,11 @@ def _is_sat1_board(board: Any = "") -> bool:
 
 
 def _board_default_overrides(board: Any = "") -> Dict[str, Any]:
+    if _is_s420_board(board):
+        # The S420 has one top status light and does not implement voice_ring.
+        # Keep its established replying effect while ring devices use the
+        # shared voice_ring default.
+        return {"led_replying_animation": "audio_glow"}
     if _is_sat1_board(board):
         return {
             "wake_sensitivity": "high",
@@ -1618,6 +1642,7 @@ _DISPLAY_THEME_FIELD_KEYS = _DISPLAY_THEME_SETTING_KEYS | {
 }
 _DISPLAY_EDGE_SETTING_KEYS = {"display_edge_glow"}
 _DISPLAY_EDGE_FIELD_KEYS = _DISPLAY_EDGE_SETTING_KEYS
+_TEXT_STYLE_SETTING_KEYS = {"screen_text_style"}
 
 _AUDIO_OUTPUT_SETTING_KEYS = {"audio_output_mode"}
 _AUDIO_OUTPUT_FIELD_KEYS = _AUDIO_OUTPUT_SETTING_KEYS | {"audio_output_section"}
@@ -1909,6 +1934,14 @@ def _screen_night_display_value(value: Any) -> str:
     aliases = {"clock": "red_clock", "red": "red_clock", "screen_off": "off"}
     token = aliases.get(token, token)
     return token if token in {"dim", "red_clock", "off"} else str(DEFAULTS["screen_night_display"])
+
+
+def _supports_screen_text_style(board: Any = "", capabilities: Dict[str, Any] | None = None) -> bool:
+    return _board_is_echo_screen(board) and (capabilities or {}).get("screen_text_style") is True
+
+
+def _screen_text_style_value(value: Any) -> str:
+    return "matrix" if _lower(value) == "matrix" else "smooth"
 
 
 def _screen_clock_format_value(value: Any) -> str:
@@ -2307,6 +2340,7 @@ def normalize_settings(values: Dict[str, Any], *, base: Dict[str, Any] | None = 
         ),
         "screen_night_display": _screen_night_display_value(source.get("screen_night_display")),
         "screen_clock_format": _screen_clock_format_value(source.get("screen_clock_format")),
+        "screen_text_style": _screen_text_style_value(source.get("screen_text_style")),
         "display_theme": _display_theme_value(source.get("display_theme")),
         "display_wallpaper_interval_minutes": _display_wallpaper_interval_value(
             source.get("display_wallpaper_interval_minutes")
@@ -2330,6 +2364,8 @@ def settings_snapshot(selector: Any = "", *, board: Any = "") -> Dict[str, Any]:
     base = normalize_settings(board_defaults) if board_defaults else None
     global_raw = _global_settings_with_migration()
     global_settings = normalize_settings(global_raw, base=base)
+    # This presentation choice is always owned by one satellite, not voice defaults.
+    global_settings["screen_text_style"] = DEFAULTS["screen_text_style"]
     if not token:
         current = global_settings
     else:
@@ -2347,6 +2383,7 @@ def settings_snapshot(selector: Any = "", *, board: Any = "") -> Dict[str, Any]:
             if key not in device_raw:
                 current[key] = value
     current["wake_verifier_mode"] = _global_wake_verifier_mode()
+    current["wake_verifier_threshold"] = _global_wake_verifier_threshold()
     if _is_s420_board(board):
         for key in S420_LED_DEFAULTS:
             current[key] = _s420_led_animation(current.get(key), key)
@@ -2408,6 +2445,8 @@ def shared_wake_settings_snapshot() -> Dict[str, Any]:
     current["wake_mww_enabled"] = mww_enabled
     current["wake_oww_enabled"] = oww_enabled
     current["wake_nww_enabled"] = nww_enabled
+    current["wake_verifier_mode"] = _global_wake_verifier_mode()
+    current["wake_verifier_threshold"] = _global_wake_verifier_threshold()
     return current
 
 
@@ -2557,6 +2596,8 @@ def firmware_settings_snapshot(
     if not _board_supports_display_photos(board):
         for key in _DISPLAY_EDGE_SETTING_KEYS:
             output.pop(key, None)
+    if not _selector_token(selector) or not _supports_screen_text_style(board, capabilities):
+        output.pop("screen_text_style", None)
     if not _is_sat1_board(board):
         for key in _AUDIO_OUTPUT_SETTING_KEYS:
             output.pop(key, None)
@@ -3601,6 +3642,18 @@ def settings_fields(
             "description": "Choose how often this satellite advances to the next bundled or uploaded photo. A single uploaded photo always remains fixed.",
         },
         {
+            "key": "screen_text_style",
+            "label": "Conversation Text",
+            "type": "select",
+            "value": current["screen_text_style"],
+            "default": DEFAULTS["screen_text_style"],
+            "options": [
+                {"value": "smooth", "label": "Smooth (default)"},
+                {"value": "matrix", "label": "Matrix"},
+            ],
+            "description": "Animate recognized speech and replies on this satellite. Smooth slides and fades; Matrix cycles symbols before letters settle in a shuffled order. Requires the GPU UI; software rendering keeps text readable without the effect.",
+        },
+        {
             "key": "display_edge_glow",
             "label": "Voice State Edge Glow",
             "type": "checkbox",
@@ -3794,6 +3847,8 @@ def settings_fields(
         fields = [field for field in fields if _text(field.get("key")) not in _DISPLAY_THEME_FIELD_KEYS]
     if not (_selector_token(selector) and _board_supports_display_photos(board)):
         fields = [field for field in fields if _text(field.get("key")) not in _DISPLAY_EDGE_FIELD_KEYS]
+    if not (_selector_token(selector) and _supports_screen_text_style(board, capabilities)):
+        fields = [field for field in fields if _text(field.get("key")) not in _TEXT_STYLE_SETTING_KEYS]
     if not (_selector_token(selector) and _is_sat1_board(board)):
         fields = [field for field in fields if _text(field.get("key")) not in _AUDIO_OUTPUT_FIELD_KEYS]
     if not (_selector_token(selector) and _supports_output_chain(capabilities)):
@@ -4135,6 +4190,8 @@ def save_shared_wake_settings(values: Dict[str, Any]) -> Dict[str, Any]:
 def save_settings(values: Dict[str, Any], *, selector: Any = "", board: Any = "") -> Dict[str, Any]:
     token = _selector_token(selector)
     incoming = dict(values or {})
+    if not token:
+        incoming.pop("screen_text_style", None)
     ssh_password_changed = False
     if token and _as_bool(incoming.get("ssh_enabled"), False):
         password = _text(incoming.get("ssh_password"))
@@ -4198,6 +4255,7 @@ def save_settings(values: Dict[str, Any], *, selector: Any = "", board: Any = ""
         profile = _profile_for_save(incoming, current_raw)
         oww_profile = _oww_profile_for_save(incoming, current_raw)
     current_base = normalize_settings(current_raw, base=board_base)
+    current_base["screen_text_style"] = current["screen_text_style"]
     if token:
         # A partial save must not replace the board's speaker default with the
         # global value; only an explicit value from this satellite does.
@@ -4208,7 +4266,7 @@ def save_settings(values: Dict[str, Any], *, selector: Any = "", board: Any = ""
     changed = [key for key, value in normalized.items() if current.get(key) != value]
     if ssh_password_changed:
         changed.append("ssh_password")
-    persisted = normalized
+    persisted = {key: value for key, value in normalized.items() if key != "screen_text_style"}
     if token:
         persisted = {
             key: value
@@ -4254,6 +4312,21 @@ def adopt_reported_device_volume(
             settings_hash_key(token),
             mapping={"volume_percent": str(volume)},
         )
+    except Exception:
+        return False
+    return True
+
+
+def adopt_reported_device_text_style(value: Any, *, selector: Any = "", board: Any = "") -> bool:
+    """Keep the satellite's local presentation choice in its own host override."""
+    token = _selector_token(selector)
+    style = _lower(value)
+    if not token or not _board_is_echo_screen(board) or style not in {"smooth", "matrix"}:
+        return False
+    try:
+        if _raw_settings(token).get("screen_text_style") == style:
+            return False
+        redis_client.hset(settings_hash_key(token), mapping={"screen_text_style": style})
     except Exception:
         return False
     return True

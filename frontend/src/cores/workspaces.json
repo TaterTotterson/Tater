@@ -1,0 +1,490 @@
+{
+  "ai_task_core": {
+    "schema": 1,
+    "icon": "calendar",
+    "description": "Scheduled tasks, with clear prompts and delivery.",
+    "default_tab": "items",
+    "primary_tab": "create",
+    "tab_labels": {
+      "items": "Tasks",
+      "create": "Create task"
+    },
+    "views": {
+      "items": "list"
+    },
+    "field_groups": [
+      {
+        "label": "Task",
+        "terms": [
+          "title",
+          "task_prompt",
+          "message",
+          "enabled",
+          "type"
+        ]
+      },
+      {
+        "label": "Schedule",
+        "terms": [
+          "schedule",
+          "repeat",
+          "interval",
+          "due",
+          "date",
+          "time",
+          "cron"
+        ]
+      },
+      {
+        "label": "Delivery",
+        "terms": [
+          "platform",
+          "destination",
+          "room",
+          "broadcast",
+          "voice",
+          "speech",
+          "tts",
+          "portal",
+          "target"
+        ]
+      },
+      {
+        "label": "Audio",
+        "terms": [
+          "background",
+          "duck",
+          "fade",
+          "music",
+          "lead_in",
+          "audio_scene",
+          "broadcast_audio",
+          "ducking",
+          "tts_start_delay"
+        ],
+        "description": "Choose an announcement destination in Delivery to enable background audio."
+      }
+    ]
+  },
+  "automation_core": {
+    "schema": 1,
+    "icon": "workflow",
+    "description": "See what triggers a rule and what happens next.",
+    "default_tab": "rules",
+    "primary_tab": "create",
+    "views": {
+      "rules": "list",
+      "history": "timeline"
+    }
+  },
+  "awareness_core": {
+    "schema": 1,
+    "icon": "eye",
+    "description": "A readable history of cameras, sensors, and events.",
+    "default_tab": "events",
+    "primary_tab": "add",
+    "views": {
+      "events": "timeline",
+      "monitors": "list"
+    },
+    "field_groups": [
+      {
+        "label": "Source",
+        "terms": [
+          "kind",
+          "provider",
+          "integration",
+          "device",
+          "camera",
+          "source",
+          "name",
+          "area"
+        ]
+      },
+      {
+        "label": "Events",
+        "terms": [
+          "event",
+          "trigger",
+          "cooldown",
+          "enabled",
+          "description"
+        ]
+      },
+      {
+        "label": "People & delivery",
+        "terms": [
+          "face",
+          "person",
+          "notify",
+          "notification",
+          "destination"
+        ]
+      }
+    ]
+  },
+  "environment_core": {
+    "schema": 1,
+    "icon": "weather",
+    "description": "Weather, forecasts, sensors, and Tater Trends.",
+    "default_tab": "overview",
+    "primary_tab": "add_source",
+    "views": {
+      "overview": "overview",
+      "forecast": "overview",
+      "trends": "overview",
+      "sources": "list",
+      "settings": "stack"
+    }
+  },
+  "guardian_core": {
+    "schema": 1,
+    "icon": "shield",
+    "description": "Review your network and the changes that matter.",
+    "default_tab": "ai_overview",
+    "primary_tab": "confirm",
+    "views": {
+      "ai_overview": "overview",
+      "overview": "overview",
+      "confirm": "list",
+      "devices": "list",
+      "events": "timeline",
+      "settings": "stack"
+    }
+  },
+  "memory_core": {
+    "schema": 1,
+    "icon": "brain",
+    "description": "Browse, correct, and manage what Tater remembers.",
+    "default_tab": "knows",
+    "primary_tab": "tools",
+    "views": {
+      "overview": "overview",
+      "data": "list",
+      "people": "list",
+      "knows": "list",
+      "manage": "list"
+    },
+    "field_groups": [
+      {
+        "label": "Memory",
+        "terms": [
+          "fact",
+          "memory",
+          "person",
+          "user",
+          "room",
+          "alias",
+          "name",
+          "category"
+        ]
+      },
+      {
+        "label": "Recall",
+        "terms": [
+          "recall",
+          "query",
+          "search",
+          "limit",
+          "history",
+          "changed"
+        ]
+      },
+      {
+        "label": "Backup & privacy",
+        "terms": [
+          "backup",
+          "restore",
+          "import",
+          "export",
+          "wipe",
+          "delete",
+          "privacy",
+          "confirm"
+        ]
+      }
+    ]
+  },
+  "meshtastic_core": {
+    "schema": 1,
+    "icon": "radio",
+    "description": "Channels, radio messages, nodes, and pairing.",
+    "default_tab": "chat",
+    "primary_tab": "bluetooth",
+    "tab_labels": {
+      "chat": "Messages"
+    },
+    "views": {
+      "nodes": "list"
+    },
+    "field_groups": [
+      {
+        "label": "Radio",
+        "terms": [
+          "transport",
+          "echo",
+          "satellite",
+          "device",
+          "address",
+          "name"
+        ]
+      },
+      {
+        "label": "Pairing",
+        "terms": [
+          "pin",
+          "pairing",
+          "bond",
+          "security"
+        ]
+      }
+    ]
+  },
+  "music_core": {
+    "schema": 1,
+    "icon": "music",
+    "description": "Browse music and keep your speakers in sync.",
+    "default_tab": "library",
+    "tab_order": [
+      "library",
+      "playlist",
+      "recommendations",
+      "providers",
+      "settings"
+    ],
+    "tab_labels": {
+      "library": "Library"
+    },
+    "views": {
+      "settings": "stack",
+      "providers": "stack"
+    }
+  },
+  "personal_core": {
+    "schema": 1,
+    "icon": "calendar",
+    "description": "Your agenda, accounts, deliveries, and reminders.",
+    "default_tab": "calendar",
+    "tab_labels": {
+      "calendar": "Agenda"
+    },
+    "views": {
+      "calendar": "agenda",
+      "overview": "overview",
+      "accounts": "list",
+      "cleanup": "list",
+      "settings": "stack",
+      "notifications": "stack",
+      "prompt": "stack"
+    },
+    "agenda_fields": [
+      "calendar_today_table",
+      "calendar_week_table"
+    ],
+    "field_groups": [
+      {
+        "label": "Account",
+        "terms": [
+          "account",
+          "email",
+          "host",
+          "username",
+          "password",
+          "port",
+          "ssl",
+          "tls",
+          "calendar",
+          "person"
+        ]
+      },
+      {
+        "label": "Notifications",
+        "terms": [
+          "notify",
+          "notification",
+          "destination",
+          "route",
+          "portal",
+          "speech",
+          "voice"
+        ]
+      },
+      {
+        "label": "Options",
+        "terms": [
+          "interval",
+          "scan",
+          "enabled",
+          "prompt"
+        ]
+      }
+    ]
+  },
+  "reachy_core": {
+    "schema": 1,
+    "icon": "robot",
+    "description": "Tracking, motion, vision, greetings, and Idle Life.",
+    "views": {},
+    "field_groups": [
+      {
+        "label": "Behavior",
+        "terms": [
+          "enabled",
+          "behavior",
+          "motion",
+          "strength",
+          "level",
+          "pitch",
+          "yaw",
+          "roll"
+        ]
+      },
+      {
+        "label": "Tracking & vision",
+        "terms": [
+          "track",
+          "watch",
+          "vision",
+          "camera",
+          "follow",
+          "focus"
+        ]
+      },
+      {
+        "label": "People & greetings",
+        "terms": [
+          "person",
+          "face",
+          "greeting",
+          "recognition"
+        ]
+      },
+      {
+        "label": "Idle & music",
+        "terms": [
+          "idle",
+          "ambient",
+          "music",
+          "dance",
+          "reaction"
+        ]
+      }
+    ]
+  },
+  "rss_core": {
+    "schema": 1,
+    "icon": "rss",
+    "description": "Keep feeds and their destinations easy to manage.",
+    "default_tab": "feeds",
+    "primary_tab": "create",
+    "tab_labels": {
+      "feeds": "Feeds",
+      "create": "Add feed"
+    },
+    "views": {
+      "feeds": "list"
+    },
+    "field_groups": [
+      {
+        "label": "Feed",
+        "terms": [
+          "feed",
+          "url",
+          "name",
+          "title",
+          "enabled",
+          "summary",
+          "prompt",
+          "poll"
+        ]
+      },
+      {
+        "label": "Destinations",
+        "terms": [
+          "route",
+          "platform",
+          "channel",
+          "room",
+          "destination",
+          "webui",
+          "telegram",
+          "matrix",
+          "irc",
+          "wordpress",
+          "ntfy",
+          "homeassistant"
+        ]
+      },
+      {
+        "label": "Connection options",
+        "terms": [
+          "password",
+          "token",
+          "username",
+          "bearer",
+          "service",
+          "priority",
+          "tag",
+          "category",
+          "status"
+        ]
+      }
+    ]
+  },
+  "tater_tube_core": {
+    "schema": 1,
+    "icon": "film",
+    "description": "Picks, viewing context, and screens in one place.",
+    "default_tab": "overview",
+    "primary_tab": "connect",
+    "tab_order": [
+      "overview",
+      "picks",
+      "main_menu",
+      "history",
+      "settings",
+      "connect"
+    ],
+    "views": {
+      "overview": "overview",
+      "picks": "list",
+      "main_menu": "stack",
+      "history": "timeline",
+      "settings": "stack"
+    },
+    "field_groups": [
+      {
+        "label": "Connection",
+        "terms": [
+          "server",
+          "url",
+          "pin",
+          "name",
+          "profile"
+        ]
+      },
+      {
+        "label": "Picks & context",
+        "terms": [
+          "recommendation",
+          "pick",
+          "context",
+          "candidate",
+          "prompt",
+          "shortlist"
+        ]
+      },
+      {
+        "label": "Voice & timing",
+        "terms": [
+          "voice",
+          "speech",
+          "poll",
+          "interval",
+          "sync",
+          "tts"
+        ]
+      }
+    ]
+  }
+}

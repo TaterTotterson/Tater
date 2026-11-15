@@ -60,17 +60,18 @@ const state = {
   dashboardPayload: null,
   dashboardShowMetrics: String(safeStorageGet("tater_dashboard_show_metrics", "true")).trim().toLowerCase() !== "false",
   dashboardShowMedia: String(safeStorageGet("tater_dashboard_show_media", "true")).trim().toLowerCase() !== "false",
+  spudexProjectId: safeStorageGet("tater_spudex_project_id", ""),
   spudexSelectedSessionId: safeStorageGet("tater_spudex_selected_session_id", ""),
   spudexManualSessionId: safeStorageGet("tater_spudex_manual_session_id", ""),
   spudexTab: normalizeSpudexTab(safeStorageGet("tater_spudex_tab", "")),
   spudLinkTab: normalizeSpudLinkTab(safeStorageGet("tater_spud_link_tab", "pair")),
   modelsTab: normalizeModelsTab(safeStorageGet("tater_models_tab", "huggingface")),
-  coreTopTab: safeStorageGet("tater_tateros_core_tab", "") || "manage",
+  coreTopTab: safeStorageGet("tater_tateros_core_tab", "") || "workspaces",
   coreVueModulePromise: null,
   appShellController: null,
   sidebarCollapsed: String(safeStorageGet("tater_tateros_sidebar_collapsed", "false")).trim().toLowerCase() === "true",
   settingsLogAutoScroll: String(safeStorageGet("tater_settings_log_auto_scroll", "true")).trim().toLowerCase() !== "false",
-  popupEffectStyle: String(safeStorageGet("tater_tateros_popup_effect_style", "flame")).trim().toLowerCase() || "flame",
+  popupEffectStyle: String(safeStorageGet("tater_tateros_popup_effect_style", "scale")).trim().toLowerCase() || "scale",
   webuiTheme: String(safeStorageGet("tater_tateros_theme", "tater")).trim().toLowerCase() || "tater",
   activeChatJobs: {},
   redisStatus: {
@@ -138,7 +139,8 @@ function withBasePath(path) {
 
 const SETTINGS_TAB_KEYS = ["general", "people", "models", "hydra", "esphome", "redis", "spudhub", "misc", "advanced", "system", "logs"];
 
-const POPUP_EFFECT_STYLE_CHOICES = ["disabled", "flame", "dust", "glitch", "portal", "melt"];
+const POPUP_EFFECT_STYLE_CHOICES = ["disabled", "fade", "scale", "slide", "tilt", "fold"];
+const POPUP_EFFECT_STYLE_ALIASES = { flame: "scale", dust: "fade", glitch: "tilt", portal: "fold", melt: "slide" };
 const WEBUI_THEME_CHOICES = ["tater", "tater-light", "blueberry", "mint", "grape", "strawberry"];
 
 function normalizeWebuiTheme(value) {
@@ -160,7 +162,7 @@ function normalizePopupEffectStyle(value) {
   if (POPUP_EFFECT_STYLE_CHOICES.includes(normalized)) {
     return normalized;
   }
-  return "flame";
+  return Object.prototype.hasOwnProperty.call(POPUP_EFFECT_STYLE_ALIASES, normalized) ? POPUP_EFFECT_STYLE_ALIASES[normalized] : "scale";
 }
 
 function applyPopupEffectStyle(value) {
@@ -512,7 +514,7 @@ async function refreshBranding() {
 }
 
 function persistCoreTopTab(tabName) {
-  const normalized = String(tabName || "manage").trim() || "manage";
+  const normalized = String(tabName || "workspaces").trim() || "workspaces";
   state.coreTopTab = normalized;
   safeStorageSet("tater_tateros_core_tab", normalized);
 }
@@ -760,7 +762,7 @@ function createCoresVueDescriptor(runtimeData, shopData, tabsData) {
     state: { payload },
     options: {
       initialPayload: payload,
-      initialTab: state.coreTopTab || "manage",
+      initialTab: state.coreTopTab || "workspaces",
       endpoints: {
         runtime: withBasePath("/api/cores"),
         shop: withBasePath("/api/shop/cores"),
@@ -782,6 +784,9 @@ function createSpudexVueDescriptor(payload) {
       initialTab: state.spudexTab || "workbench",
       initialSessionId: state.spudexSelectedSessionId || "",
       initialManualSessionId: state.spudexManualSessionId || "",
+      initialProjectId: state.spudexProjectId || "",
+      onProjectChange: (id) => { state.spudexProjectId = String(id || ""); safeStorageSet("tater_spudex_project_id", state.spudexProjectId); },
+      onOpenModelSettings: async () => { await state.appShellController?.navigate("settings"); state.appShellController?.selectSettings("routing"); },
       profile: {
         username: state.chatProfile.username || "User",
         user_avatar: state.chatProfile.userAvatar || "",
@@ -797,6 +802,8 @@ function createSpudexVueDescriptor(payload) {
         run: withBasePath("/api/spudex/run"),
         chat: withBasePath("/api/spudex/chat"),
         chatSession: withBasePath("/api/spudex/chat/session"),
+        projects: withBasePath("/api/spudex/projects"),
+        terminal: withBasePath("/api/spudex/terminal"),
         sessions: withBasePath("/api/spudex/sessions"),
         chatFiles: withBasePath("/api/chat/files"),
       },
@@ -825,6 +832,8 @@ function createSettingsVueDescriptor(settings, redisStatus, redisEncryptionStatu
   };
   const viewOptions = {
     initialTab: !redisStatus?.connected ? "redis" : normalizeSettingsTab(state.settingsTab || "general"),
+    initialPage: !redisStatus?.connected ? "redis" : safeStorageGet("tater_settings_page", ""),
+    onPageChange: (page) => safeStorageSet("tater_settings_page", String(page || "")),
     initialSummary: summary,
     initialGeneral: {
       username: settings?.username || "User",
@@ -854,7 +863,8 @@ function createSettingsVueDescriptor(settings, redisStatus, redisEncryptionStatu
       },
     },
     initialPeople: settings?.people && typeof settings.people === "object" ? settings.people : {},
-    initialPeopleTab: safeStorageGet("tater_people_tab", "people"),
+    // The directory always opens on People; Faces and Identities are explicit views.
+    initialPeopleTab: "people",
     initialPeopleSort: safeStorageGet("tater_people_sort", "recent"),
     initialSpudLink: settings?.spud_link && typeof settings.spud_link === "object" ? settings.spud_link : {},
     initialModels: settings && typeof settings === "object" ? settings : {},
@@ -865,7 +875,7 @@ function createSettingsVueDescriptor(settings, redisStatus, redisEncryptionStatu
     initialRedisEncryptionStatus:
       redisEncryptionStatus && typeof redisEncryptionStatus === "object" ? redisEncryptionStatus : {},
     initialMisc: {
-      popup_effect_style: settings?.popup_effect_style || "flame",
+      popup_effect_style: settings?.popup_effect_style || "scale",
       emoji_enable_on_reaction_add: settings?.emoji_enable_on_reaction_add !== false,
       emoji_enable_auto_reaction_on_reply: settings?.emoji_enable_auto_reaction_on_reply !== false,
       emoji_reaction_chain_chance_percent: Number(settings?.emoji_reaction_chain_chance_percent ?? 100),
@@ -1033,7 +1043,7 @@ function createSettingsShellHooks(settings) {
     },
     onMiscChange: (nextSettings) => {
       Object.assign(settings, nextSettings || {});
-      applyPopupEffectStyle(nextSettings?.popup_effect_style || "flame");
+      applyPopupEffectStyle(nextSettings?.popup_effect_style || "scale");
     },
     onHydraChange: (nextSettings) => Object.assign(settings, nextSettings || {}),
     onAdvancedChange: (nextSettings) => Object.assign(settings, nextSettings || {}),
@@ -1134,7 +1144,15 @@ async function mountVueAppShell() {
     onAuthenticated: () => finishAuthenticatedBootstrap(),
   });
   state.appShellController = controller;
+  markTaterUiReady();
   return true;
+}
+
+function markTaterUiReady() {
+  // The native launcher keeps its setup screen until the mounted UI has painted.
+  window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
+    document.documentElement.dataset.taterUiReady = "true";
+  }));
 }
 
 async function authenticateWebui(request = {}) {
@@ -1198,8 +1216,10 @@ function normalizeRedisEncryptionStatusPayload(raw) {
 
 async function init() {
   state.settingsTab = normalizeSettingsTab(state.settingsTab || "general");
-  await ensureRedisSetup();
-  await fetchWebuiAuthStatus();
+  // Redis health does not gate rendering. Fetch auth and the bundle together,
+  // while still checking auth before mounting any application views.
+  void ensureRedisSetup();
+  await Promise.all([fetchWebuiAuthStatus(), loadCoreVueModule()]);
   if (!(await mountVueAppShell())) {
     throw new Error("The Vue application bundle did not provide the application shell.");
   }
@@ -1224,5 +1244,6 @@ init().catch((error) => {
   if (root) {
     root.className = "tater-startup-error";
     root.textContent = `Failed to initialize Tater UI: ${error?.message || "unknown error"}`;
+    markTaterUiReady();
   }
 });

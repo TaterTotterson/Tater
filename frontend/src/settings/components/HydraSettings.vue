@@ -223,6 +223,7 @@ watch(
 onMounted(() => {
   void Promise.allSettled([loadMetrics(), loadData()]);
 });
+defineExpose({ hasUnsavedChanges: () => dirty.value });
 </script>
 
 <template>

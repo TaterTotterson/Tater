@@ -612,8 +612,11 @@ async def _generic_integration_poll_loop(stop_event: asyncio.Event, client: Any)
         now = time.time()
         next_wake = now + 30.0
         try:
-            for integration_id in integration_store_module.get_enabled_integration_ids():
-                module = _integration_module(integration_id)
+            # Discovery can read Redis and rescan integration directories.
+            # Keep that blocking work off the loop shared with live media.
+            enabled_ids = await run_background(integration_store_module.get_enabled_integration_ids)
+            for integration_id in enabled_ids:
+                module = await run_background(_integration_module, integration_id)
                 if module is None:
                     continue
                 poller = _runtime_poller(module)

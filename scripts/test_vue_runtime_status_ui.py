@@ -53,21 +53,28 @@ class VueRuntimeStatusTests(unittest.TestCase):
         source = (REPO_ROOT / "frontend" / "src" / "runtime" / "RuntimeStatus.vue").read_text(encoding="utf-8")
 
         for heading in (
-            "Loaded Runtime Models",
-            "GPU Devices",
-            "Hydra Jobs",
-            "LLM Calls",
-            "Vision Calls",
-            "Estimated Chat Context Window",
-            "Prompt Composition",
+            "Loaded models",
+            "GPU devices",
+            "Hydra tasks",
+            "Language model calls",
+            "Vision calls",
+            "Chat context",
+            "Prompt breakdown",
+            "Budget &amp; technical details",
+            "Model details",
         ):
             self.assertIn(heading, source)
 
-        self.assertIn('class="tr-tab-mark"', source)
+        self.assertIn('role="tablist"', source)
+        self.assertIn('role="tabpanel"', source)
+        self.assertIn('aria-selected="activeTab === tab.id"', source)
+        self.assertIn('modelMeta(model)', source)
+        self.assertIn('modelDetails(model)', source)
+        self.assertIn('gpuMeta(device)', source)
         self.assertNotIn('class="tr-modal-badge"', source)
         self.assertNotIn('class="tr-overview-mark"', source)
         self.assertNotIn('class="tr-pill-orb"', source)
-        for view in ("tr-activity-view", "tr-models-view", "tr-context-view", "tr-view-hero"):
+        for view in ("trc-activity-view", "trc-models-view", "trc-context-view", "trc-overview"):
             self.assertIn(view, source)
 
     def test_llm_calls_show_queued_and_running_states(self) -> None:
@@ -105,6 +112,7 @@ class VueRuntimeStatusTests(unittest.TestCase):
 
     def test_runtime_styles_cover_pill_modal_and_responsive_layouts(self) -> None:
         styles = (REPO_ROOT / "frontend" / "src" / "tater-ui.css").read_text(encoding="utf-8")
+        monitor_styles = (REPO_ROOT / "frontend" / "src" / "runtime" / "runtime.css").read_text(encoding="utf-8")
 
         for selector in (
             ".runtime-summary.runtime-summary-vue-host",
@@ -113,7 +121,6 @@ class VueRuntimeStatusTests(unittest.TestCase):
             ".tr-modal {",
             ".tr-live-state {",
             ".tr-tabs {",
-            ".tr-overview-hero {",
             ".tr-grid {",
             ".tr-meter-grid {",
             ".tr-turns {",
@@ -121,6 +128,9 @@ class VueRuntimeStatusTests(unittest.TestCase):
             self.assertIn(selector, styles)
         self.assertIn("@media (max-width: 860px)", styles)
         self.assertIn("@media (max-width: 620px)", styles)
+        for selector in (".tr-modal.tr-clear-tabs", ".trc-tabs", ".trc-model-entry", ".trc-context-details"):
+            self.assertIn(selector, monitor_styles)
+        self.assertIn("@media (max-width: 420px)", monitor_styles)
 
     def test_runtime_telemetry_backend_streams_fast_cpu_ram_and_cached_gpu(self) -> None:
         source = (REPO_ROOT / "tateros_app.py").read_text(encoding="utf-8")

@@ -1,6 +1,8 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from "vue";
 import { fetchMusicState, runMusicAction } from "./api";
+import {coreWorkspace,workspaceTabs,initialWorkspaceTab} from "../cores/workspace";
+import {provideCoreDrafts} from "../cores/drafts";
 import LibraryBrowser from "./components/LibraryBrowser.vue";
 import MusicPlayer from "./components/MusicPlayer.vue";
 import RecommendationsBrowser from "./components/RecommendationsBrowser.vue";
@@ -13,6 +15,8 @@ const props = defineProps<{
   options: MusicCoreMountOptions;
 }>();
 
+provideCoreDrafts();
+const metadata=computed(()=>coreWorkspace(props.options.coreKey,ui.value.workspace));
 const selectedTab = ref("");
 const busyKeys = ref(new Set<string>());
 const errorMessage = ref("");
@@ -20,12 +24,13 @@ const successMessage = ref("");
 const eventStatus = ref<"connecting" | "live" | "offline">("connecting");
 let eventSource: EventSource | null = null;
 let reconnectTimer = 0;
+let suspended=false;let disposed=false;
 
 const payload = computed(() => props.state.payload || {});
 const ui = computed(() => payload.value.ui || {});
 const items = computed(() => ui.value.item_forms || []);
 const player = computed(() => items.value.find((item) => item.group === "player"));
-const managerTabs = computed(() => ui.value.manager_tabs || []);
+const managerTabs = computed(()=>workspaceTabs(ui.value.manager_tabs,metadata.value));
 const activeManagerTab = computed(() =>
   managerTabs.value.find((tab) => tab.key === selectedTab.value) || managerTabs.value[0],
 );
@@ -43,8 +48,7 @@ watch(
   managerTabs,
   (tabs) => {
     if (!tabs.some((tab) => tab.key === selectedTab.value)) {
-      const preferred = String(ui.value.default_tab || "");
-      selectedTab.value = tabs.some((tab) => tab.key === preferred) ? preferred : tabs[0]?.key || "";
+      selectedTab.value=initialWorkspaceTab(tabs,metadata.value,ui.value.default_tab);
     }
   },
   { immediate: true, deep: true },
@@ -53,7 +57,7 @@ watch(
 watch(
   activeLibraryGroups,
   (groups) => {
-    if (!groups.some((group) => group.key === selectedLibraryGroup.value)) {
+    if (!groups.some((group: {key:string}) => group.key === selectedLibraryGroup.value)) {
       selectedLibraryGroup.value = groups[0]?.key || "";
     }
   },
@@ -72,7 +76,7 @@ function setBusy(key: string, active: boolean): void {
 }
 
 async function refreshState(): Promise<void> {
-  props.state.payload = await fetchMusicState(props.options.tabEndpoint);
+  const result=await fetchMusicState(props.options.tabEndpoint);if(!disposed)props.state.payload=result;
 }
 
 async function run(
@@ -107,9 +111,11 @@ async function run(
 function connectEvents(): void {
   if (eventSource) eventSource.close();
   if (reconnectTimer) window.clearTimeout(reconnectTimer);
+  if(suspended||disposed)return;
   eventStatus.value = "connecting";
-  eventSource = new EventSource(props.options.eventsEndpoint);
-  eventSource.addEventListener("core-tab", (event) => {
+  const source=new EventSource(props.options.eventsEndpoint);eventSource=source;
+  source.addEventListener("core-tab", (event) => {
+    if(suspended||disposed||eventSource!==source)return;
     try {
       props.state.payload = JSON.parse((event as MessageEvent<string>).data) as CoreTabPayload;
       eventStatus.value = "live";
@@ -117,10 +123,11 @@ function connectEvents(): void {
       // Ignore one malformed event and keep the current player state.
     }
   });
-  eventSource.addEventListener("open", () => {
-    eventStatus.value = "live";
+  source.addEventListener("open", () => {
+    if(eventSource===source)eventStatus.value = "live";
   });
-  eventSource.addEventListener("error", () => {
+  source.addEventListener("error", () => {
+    if(eventSource!==source)return;
     eventStatus.value = "offline";
     eventSource?.close();
     eventSource = null;
@@ -128,8 +135,12 @@ function connectEvents(): void {
   });
 }
 
+function disconnectEvents(){if(reconnectTimer)window.clearTimeout(reconnectTimer);reconnectTimer=0;eventSource?.close();eventSource=null;}
+onDeactivated(()=>{suspended=true;disconnectEvents();});
+onActivated(()=>{if(!suspended)return;suspended=false;void refreshState().catch(()=>{});connectEvents();});
 onMounted(connectEvents);
 onBeforeUnmount(() => {
+  disposed=true;
   if (reconnectTimer) window.clearTimeout(reconnectTimer);
   eventSource?.close();
   eventSource = null;
@@ -137,11 +148,11 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <main class="tater-music-core">
+  <main class="tater-music-core" :class="{'cw-music-embedded':options.embedded}">
     <div v-if="payload.error" class="tm-error">{{ payload.error }}</div>
     <template v-else>
       <header class="tm-page-heading">
-        <div>
+        <div v-if="!options.embedded">
           <div class="tm-eyebrow">Tater Music</div>
           <h1>{{ ui.title || 'Music Core' }}</h1>
           <p>{{ payload.summary }}</p>
@@ -158,8 +169,7 @@ onBeforeUnmount(() => {
         </div>
       </section>
 
-      <section class="tm-playback-dock" :class="{ 'has-player': player }" aria-label="Playback and navigation">
-        <MusicPlayer v-if="player" :item="player" :busy="isBusy" :run="run" />
+      <section class="workspace-music-navigation" aria-label="Music navigation">
 
         <nav class="tm-tabs" aria-label="Music Core sections">
           <button
@@ -224,6 +234,8 @@ onBeforeUnmount(() => {
           {{ activeManagerTab?.empty_message || payload.empty_message || 'Nothing is available here yet.' }}
         </div>
       </section>
+
+      <section v-if="player" class="tm-playback-dock workspace-music-player" aria-label="Playback"><MusicPlayer :item="player" :busy="isBusy" :run="run" /></section>
 
       <div v-if="errorMessage" class="tm-error-toast" role="alert">
         <span>{{ errorMessage }}</span>

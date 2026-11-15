@@ -13,6 +13,15 @@
 
 ---
 
+## New in Tater 3
+
+A redesigned charcoal workspace, focused model/satellite settings, richer Core
+editors, an interactive Spudex terminal, smoother popup effects and improved
+Sat Chat/firmware handling. See the [release notes](macos/Tater/RELEASE_NOTES.md).
+
+Echo 5 requires its own one-time full USB installation; upgrading Tater alone
+does not migrate satellite kernels or hardware runtimes.
+
 ## Little Spud Companion App
 
 Little Spud connects to your Tater Spud Hub for chat, TTS, STT, and notifications from your iOS or Android device.
@@ -314,6 +323,14 @@ Hydra model settings are saved by TaterOS and used at runtime. Base, Terminal, B
 - Vision can use an OpenAI-compatible API, the loaded Base model, or a dedicated local vision model.
 - If Base is already loaded and vision-capable, Tater reuses it instead of loading the same model twice.
 - Dedicated vision models are managed separately from Base.
+
+### Satellite Displays
+
+Updated Echo GPU screens expose **Conversation Text** under each satellite's
+**Display → Appearance & Photos** settings: **Smooth** (default) or **Matrix**
+symbol cycling for recognized speech and replies. This is a per-satellite
+choice, including changes made on its touchscreen, not a shared voice default.
+The selector appears only when the satellite advertises support for it.
 
 ### Advanced Notes
 

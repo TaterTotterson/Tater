@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { getJson, postJson } from "../shared/api";
+import CatalogToolbar from "../shared/CatalogToolbar.vue";
+import UiIcon from "../shared/UiIcon.vue";
+import { catalogMatches } from "../shared/catalogSearch";
 import PopupTransition from "../shared/PopupTransition.vue";
 import type { IntegrationSettingsPayload, IntegrationsMountOptions, JsonRow } from "./types";
 
@@ -9,6 +12,8 @@ const props = defineProps<{
   options: IntegrationsMountOptions;
 }>();
 
+const shopTabs = [{ id: "installed", label: "Installed" }, { id: "store", label: "Store" }, { id: "manage", label: "Manage" }, { id: "repos", label: "Repositories" }];
+const searchQuery = ref("");
 const validTabs = ["manager", "devices", "rooms", "runtime"];
 const activeTab = ref(validTabs.includes(props.options.initialTab || "") ? String(props.options.initialTab) : "manager");
 const shopTab = ref("installed");
@@ -58,8 +63,14 @@ const installedRuntimeRows = computed(() => {
   });
   return rows.sort((a, b) => text(a.integration?.name || a.shop?.name || a.id).localeCompare(text(b.integration?.name || b.shop?.name || b.id)));
 });
+const filteredInstalledRows = computed(() => installedRuntimeRows.value.filter((row) => catalogMatches(searchQuery.value, row.id, row.integration?.name, row.shop?.name, row.integration?.description, row.shop?.description, row.integration?.capabilities || [])));
+const filteredAvailable = computed(() => available.value.filter((row: JsonRow) => catalogMatches(searchQuery.value, row.id, row.name, row.description, row.source_label)));
+const filteredManaged = computed(() => installed.value.filter((row: JsonRow) => catalogMatches(searchQuery.value, row.id, row.name, row.description, row.source_label)));
 const categories = computed(() => (Array.isArray(registry.value.categories) ? registry.value.categories.filter((row: JsonRow) => Number(row.device_count || 0) > 0) : []));
 const selectedCategory = computed(() => categories.value.find((row: JsonRow) => text(row.id) === activeCategory.value) || categories.value[0] || null);
+const deviceQuery = ref("");
+const filteredDeviceRooms = computed(() => (selectedCategory.value?.rooms || []).map((room: JsonRow) => ({ ...room, devices: (room.devices || []).filter((device: JsonRow) => catalogMatches(deviceQuery.value, displayName(device), device.integration_name, device.integration_id, device.type, device.ref, device.id, room.name, device.features || [])) })).filter((room: JsonRow) => room.devices.length || !deviceQuery.value.trim()));
+const matchingDeviceCount = computed(() => filteredDeviceRooms.value.reduce((count: number, room: JsonRow) => count + room.devices.length, 0));
 const settingsSteps = computed<JsonRow[]>(() => {
   const integration = settingsIntegration.value;
   if (!integration) return [];
@@ -374,32 +385,32 @@ draftRepos.value = Array.isArray(shop.value.repos?.additional) ? shop.value.repo
       <div><span class="tv-eyebrow">Connected home</span><h1>Integrations</h1><p>Services, devices, rooms, live state, and Tater Shop updates in one place.</p></div>
       <div class="tv-heading-actions"><span class="tv-live-pill" :class="{ busy: Boolean(busy) }"><i />{{ busy || "Live" }}</span><button class="tv-button" type="button" @click="refreshSettings()">Refresh</button></div>
     </header>
-    <div class="tv-metrics ti-summary">
+    <div class="tv-metrics ti-summary workspace-library-summary">
       <div><span>Installed</span><strong>{{ installed.length || integrations.length }}</strong></div><div><span>Enabled</span><strong>{{ enabledCount }}</strong></div><div><span>Devices</span><strong>{{ Number(registry.total || 0) }}</strong></div><div><span>Updates</span><strong>{{ Number(shop.updates_available || updates.length) }}</strong></div>
     </div>
     <div v-if="status || error" class="tv-notice" :class="{ error: Boolean(error) }">{{ error || status }}</div>
     <nav class="tv-tabs" aria-label="Integration sections"><button v-for="tab in [{id:'manager',label:'Manager'},{id:'devices',label:'Devices'},{id:'rooms',label:'Organize'},{id:'runtime',label:'Activity'}]" :key="tab.id" type="button" :class="{ active: activeTab === tab.id }" @click="selectTab(tab.id)">{{ tab.label }}</button></nav>
 
     <section v-if="activeTab === 'manager'" class="ti-manager">
-      <nav class="tv-mini-tabs"><button v-for="tab in [{id:'installed',label:'Installed'},{id:'store',label:'Store'},{id:'manage',label:'Manage'},{id:'repos',label:'Repositories'}]" :key="tab.id" :class="{ active: shopTab === tab.id }" type="button" @click="shopTab = tab.id">{{ tab.label }}<span v-if="tab.id === 'manage' && updates.length">{{ updates.length }}</span></button></nav>
+      <div class="workspace-manager-toolbar"><CatalogToolbar v-if="shopTab !== 'repos'" v-model="searchQuery" label="Search integrations" :count="shopTab === 'installed' ? filteredInstalledRows.length : shopTab === 'store' ? filteredAvailable.length : filteredManaged.length" /><label class="workspace-view-picker"><span>View</span><select v-model="shopTab" aria-label="Integration management view"><option v-for="tab in shopTabs" :key="tab.id" :value="tab.id">{{ tab.label }}{{ tab.id === 'manage' && updates.length ? ` (${updates.length})` : '' }}</option></select></label></div>
       <div v-if="shop.errors?.length" class="tv-notice error">{{ shop.errors.join(' • ') }}</div>
       <div v-if="shopTab === 'installed'" class="ti-card-grid">
-        <article v-for="row in installedRuntimeRows" :key="row.id" class="tv-panel ti-integration-card">
+        <article v-for="row in filteredInstalledRows" :key="row.id" class="tv-panel ti-integration-card"><span class="workspace-item-icon"><UiIcon name="plug" /></span>
           <header><div><span class="tv-eyebrow">{{ row.id }}</span><h2>{{ row.integration?.name || row.shop?.name || row.id }}</h2></div><span class="tv-state" :class="{ good: row.shop?.enabled !== false }">{{ row.shop?.enabled === false ? 'Disabled' : 'Enabled' }}</span></header>
           <p>{{ row.integration?.description || row.shop?.description || 'Connected integration.' }}</p>
-          <div class="ti-version" v-if="row.shop">Installed {{ row.shop.installed_ver || '0.0.0' }} <span>Store {{ row.shop.store_ver || '-' }}</span></div>
-          <div v-if="row.integration?.capabilities?.length" class="ti-tags"><span v-for="capability in row.integration.capabilities" :key="capability">{{ capability }}</span></div>
+          <details class="workspace-item-details"><summary>Version & details</summary><code class="workspace-item-id">{{ row.id }}</code><div class="ti-version" v-if="row.shop">Installed {{ row.shop.installed_ver || '0.0.0' }} <span>Store {{ row.shop.store_ver || '-' }}</span></div>
+          <div v-if="row.integration?.capabilities?.length" class="ti-tags"><span v-for="capability in row.integration.capabilities" :key="capability">{{ capability }}</span></div></details>
           <footer><button v-if="row.integration && (row.integration.fields?.length || row.integration.actions?.length)" class="tv-button" type="button" @click="openSettings(row.integration)">Settings</button><span v-else>No configurable settings</span><button v-if="row.shop && !row.shop.required" class="tv-button" type="button" @click="shopAction(row.shop.enabled ? 'disable' : 'enable', row.id)">{{ row.shop.enabled ? 'Disable' : 'Enable' }}</button></footer>
         </article>
-        <div v-if="!installedRuntimeRows.length" class="tv-empty">No installed integrations found.</div>
+        <div v-if="!filteredInstalledRows.length" class="tv-empty">No installed integrations found.</div>
       </div>
       <div v-else-if="shopTab === 'store'" class="ti-card-grid">
-        <article v-for="row in available" :key="row.id" class="tv-panel ti-integration-card"><header><div><span class="tv-eyebrow">{{ row.id }}</span><h2>{{ row.name || row.id }}</h2></div><span class="tv-state">v{{ row.version || '-' }}</span></header><p>{{ row.description }}</p><footer><span>{{ row.source_label || 'Tater Shop' }}</span><button class="tv-button primary" type="button" @click="shopAction('install', row.id)">Download</button></footer></article>
-        <div v-if="!available.length" class="tv-empty">No additional integrations are available.</div>
+        <article v-for="row in filteredAvailable" :key="row.id" class="tv-panel ti-integration-card"><span class="workspace-item-icon"><UiIcon name="plug" /></span><header><div><span class="tv-eyebrow">{{ row.id }}</span><h2>{{ row.name || row.id }}</h2></div><span class="tv-state">v{{ row.version || '-' }}</span></header><p>{{ row.description }}</p><details class="workspace-item-details"><summary>Package details</summary><code>{{ row.id }}</code></details><footer><span>{{ row.source_label || 'Tater Shop' }}</span><button class="tv-button primary" type="button" @click="shopAction('install', row.id)">Download</button></footer></article>
+        <div v-if="!filteredAvailable.length" class="tv-empty">No additional integrations are available.</div>
       </div>
       <div v-else-if="shopTab === 'manage'" class="ti-manage-list">
         <div class="ti-manage-toolbar"><div><h2>Manage installed integrations</h2><p>{{ updates.length }} update{{ updates.length === 1 ? '' : 's' }} available.</p></div><button class="tv-button primary" type="button" :disabled="!updates.length" @click="shopAction('update-all')">Update all</button></div>
-        <article v-for="row in installed" :key="row.id" class="tv-panel ti-manage-row"><div><strong>{{ row.name || row.id }}</strong><span>{{ row.installed_ver || '0.0.0' }} → {{ row.store_ver || '-' }}</span></div><div class="ti-row-actions"><button class="tv-button" type="button" :disabled="!row.update_available" @click="shopAction('update', row.id)">{{ row.update_available ? 'Update' : 'Current' }}</button><button v-if="!row.required" class="tv-button" type="button" @click="shopAction(row.enabled ? 'disable' : 'enable', row.id)">{{ row.enabled ? 'Disable' : 'Enable' }}</button><label v-if="!row.required" class="ti-purge"><input v-model="purgeIds[row.id]" type="checkbox" /> Delete data</label><button v-if="!row.required" class="tv-button danger" type="button" @click="shopAction('remove', row.id)">Remove</button><span v-else class="tv-state good">Required</span></div></article>
+        <article v-for="row in filteredManaged" :key="row.id" class="tv-panel ti-manage-row"><div><strong>{{ row.name || row.id }}</strong><span>{{ row.installed_ver || '0.0.0' }} → {{ row.store_ver || '-' }}</span></div><div class="ti-row-actions"><button class="tv-button" type="button" :disabled="!row.update_available" @click="shopAction('update', row.id)">{{ row.update_available ? 'Update' : 'Current' }}</button><button v-if="!row.required" class="tv-button" type="button" @click="shopAction(row.enabled ? 'disable' : 'enable', row.id)">{{ row.enabled ? 'Disable' : 'Enable' }}</button><label v-if="!row.required" class="ti-purge"><input v-model="purgeIds[row.id]" type="checkbox" /> Delete data</label><button v-if="!row.required" class="tv-button danger" type="button" @click="shopAction('remove', row.id)">Remove</button><span v-else class="tv-state good">Required</span></div></article>
       </div>
       <div v-else class="tv-panel ti-repos">
         <header><div><span class="tv-eyebrow">Sources</span><h2>Integration repositories</h2><p>The built-in repository stays available; add trusted sources below.</p></div></header>
@@ -411,7 +422,8 @@ draftRepos.value = Array.isArray(shop.value.repos?.additional) ? shop.value.repo
 
     <section v-else-if="activeTab === 'devices'" class="tv-panel ti-browser">
       <header class="tv-panel-head"><div><span class="tv-eyebrow">Device registry</span><h2>Browse devices</h2><p>Grouped by category, room, and integration.</p></div><button class="tv-button" type="button" @click="refreshRegistry(false)">Refresh devices</button></header>
-      <div v-if="categories.length" class="ti-browser-layout"><aside><button v-for="category in categories" :key="category.id" type="button" :class="{ active: selectedCategory?.id === category.id }" @click="activeCategory = text(category.id)"><strong>{{ category.name }}</strong><span>{{ category.device_count }} devices · {{ category.room_count }} rooms</span></button></aside><div class="ti-device-content"><header><div><span class="tv-eyebrow">{{ selectedCategory?.id }}</span><h2>{{ selectedCategory?.name }}</h2><p>{{ selectedCategory?.description }}</p></div></header><div v-for="room in selectedCategory?.rooms || []" :key="room.id" class="ti-device-room"><div><strong>{{ room.name }}</strong><span>{{ room.devices?.length || 0 }} devices</span></div><article v-for="device in room.devices || []" :key="deviceId(device)" class="ti-device-row"><div><strong>{{ displayName(device) }}</strong><span>{{ [device.integration_name || device.integration_id, device.type, device.ref || device.id].filter(Boolean).join(' / ') }}</span></div><div><span class="tv-state">{{ device.state || device.status || 'unknown' }}</span><small>{{ device.room || device.area || 'Unassigned' }}</small></div><div class="ti-tags"><span v-for="tag in (device.features?.length ? device.features : device.actions || device.capabilities || []).slice(0, 6)" :key="tag">{{ text(tag).replaceAll('_', ' ') }}</span></div></article></div></div></div>
+      <CatalogToolbar v-model="deviceQuery" label="Search devices" :count="matchingDeviceCount" />
+      <div v-if="categories.length" class="ti-browser-layout"><aside><button v-for="category in categories" :key="category.id" type="button" :class="{ active: selectedCategory?.id === category.id }" @click="activeCategory = text(category.id)"><strong>{{ category.name }}</strong><span>{{ category.device_count }} devices · {{ category.room_count }} rooms</span></button></aside><div class="ti-device-content"><header><div><span class="tv-eyebrow">{{ selectedCategory?.id }}</span><h2>{{ selectedCategory?.name }}</h2><p>{{ selectedCategory?.description }}</p></div></header><div v-for="room in filteredDeviceRooms" :key="room.id" class="ti-device-room"><div><strong>{{ room.name }}</strong><span>{{ room.devices?.length || 0 }} devices</span></div><article v-for="device in room.devices || []" :key="deviceId(device)" class="ti-device-row"><div><strong>{{ displayName(device) }}</strong><span>{{ [device.integration_name || device.integration_id, device.type, device.ref || device.id].filter(Boolean).join(' / ') }}</span></div><div><span class="tv-state">{{ device.state || device.status || 'unknown' }}</span><small>{{ device.room || device.area || 'Unassigned' }}</small></div><div class="ti-tags"><span v-for="tag in (device.features?.length ? device.features : device.actions || device.capabilities || []).slice(0, 6)" :key="tag">{{ text(tag).replaceAll('_', ' ') }}</span></div></article></div></div></div>
       <div v-else class="tv-empty">No devices are available from enabled integrations yet.</div>
     </section>
 

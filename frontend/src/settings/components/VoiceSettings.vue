@@ -17,6 +17,7 @@ const props = defineProps<{
   presenceEventsEndpoint: string;
   initialTab?: string;
   onTabChange?: (tab: string) => void;
+  embedded?: boolean;
 }>();
 
 const emit = defineEmits<{ notify: [message: string, tone?: string] }>();
@@ -41,6 +42,7 @@ const payload = ref<JsonRow>({});
 const loading = ref(false);
 const refreshing = ref(false);
 const error = ref("");
+const satellitePanel = ref<{ hasUnsavedChanges: () => boolean } | null>(null);
 let refreshTimer: number | null = null;
 let requestSequence = 0;
 
@@ -80,7 +82,7 @@ function notify(message: string, tone = "success") {
   emit("notify", message, tone);
 }
 
-defineExpose({ select });
+defineExpose({ select, hasUnsavedChanges: () => Boolean(satellitePanel.value?.hasUnsavedChanges()) });
 
 watch(() => props.initialTab, (next) => {
   const normalized = normalize(next);
@@ -103,7 +105,7 @@ onBeforeUnmount(() => {
 
 <template>
   <section class="tset-resource tvoice-resource">
-    <section class="tv-panel tvoice-hero">
+    <section v-if="!embedded" class="tv-panel tvoice-hero">
       <div class="tvoice-hero-copy">
         <span class="tv-eyebrow">Tater satellite control center</span>
         <h2>Your voice hardware, in one friendly workspace</h2>
@@ -112,24 +114,24 @@ onBeforeUnmount(() => {
       <div class="tvoice-hero-signal" :class="{ warning: error }"><span class="tvoice-signal-orbit"><i /><i /><i /></span><div><strong>{{ refreshing ? "Refreshing devices" : `${activeSpec.label} ready` }}</strong><small>{{ error ? "Runtime needs attention" : "Live satellite state" }}</small></div></div>
     </section>
 
-    <nav class="tv-tabs tvoice-tabs" aria-label="Satellite settings sections">
+    <nav v-if="!embedded" class="tv-tabs tvoice-tabs" aria-label="Satellite settings sections">
       <button v-for="tab in tabs" :key="tab.id" type="button" :class="{ active: activeTab === tab.id }" @click="select(tab.id)">{{ tab.label }}</button>
     </nav>
 
-    <div class="tset-context"><span>{{ activeSpec.label }}</span><p>{{ activeSpec.description }}</p></div>
+    <div v-if="!embedded" class="tset-context"><span>{{ activeSpec.label }}</span><p>{{ activeSpec.description }}</p></div>
     <div v-if="error" class="tv-notice error" aria-live="polite">{{ error }}</div>
     <div v-if="loading" class="tv-notice">Loading {{ activeSpec.label }}…</div>
 
-    <div v-if="headerStats.length && activeTab !== 'stats'" class="tm-metrics tvoice-metrics">
-      <article v-for="metric in headerStats" :key="String(metric.label)"><span>{{ metric.label }}</span><strong>{{ metric.value }}</strong></article>
-    </div>
-
-    <VoiceSatellites v-if="activeTab === 'satellites' && !loading" :payload="payload" :action-endpoint="actionEndpoint" @refresh="refresh(true)" @notify="notify" />
+    <VoiceSatellites v-if="activeTab === 'satellites' && !loading" ref="satellitePanel" :payload="payload" :action-endpoint="actionEndpoint" @refresh="refresh(true)" @notify="notify" />
     <VoicePresence v-else-if="activeTab === 'presence' && !loading" :snapshot-endpoint="presenceEndpoint" :events-endpoint="presenceEventsEndpoint" @notify="notify" />
     <VoiceFirmware v-else-if="activeTab === 'firmware' && !loading" :payload="payload" :action-endpoint="actionEndpoint" @refresh="refresh(true)" @notify="notify" />
     <VoiceStereo v-else-if="activeTab === 'stereo' && !loading" :payload="payload" :action-endpoint="actionEndpoint" @refresh="refresh(true)" @notify="notify" />
     <VoiceAirPlay v-else-if="activeTab === 'airplay' && !loading" :payload="payload" :action-endpoint="actionEndpoint" @refresh="refresh(true)" @notify="notify" />
     <VoiceStats v-else-if="activeTab === 'stats' && !loading" :payload="payload" :action-endpoint="actionEndpoint" @refresh="refresh(true)" @notify="notify" />
     <VoicePlatform v-else-if="activeTab === 'platform' && !loading" :payload="payload" :action-endpoint="actionEndpoint" @refresh="refresh(true)" @notify="notify" />
+    <details v-if="headerStats.length && activeTab !== 'stats'" class="tset-runtime-details">
+      <summary>Satellite runtime details</summary>
+      <div class="tm-metrics tvoice-metrics"><article v-for="metric in headerStats" :key="String(metric.label)"><span>{{ metric.label }}</span><strong>{{ metric.value }}</strong></article></div>
+    </details>
   </section>
 </template>
