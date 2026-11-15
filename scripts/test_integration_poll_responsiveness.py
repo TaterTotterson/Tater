@@ -12,7 +12,7 @@ from typing import Any
 
 
 def poll_namespace(enabled, module):
-    path = Path(__file__).resolve().parents[1] / "integration_runtime.py"
+    path = Path(__file__).resolve().parents[1] / 'tater/extensions/integration_runtime.py'
     tree = ast.parse(path.read_text(), filename=str(path))
     function = next(node for node in tree.body if isinstance(node, ast.AsyncFunctionDef) and node.name == "_generic_integration_poll_loop")
 

@@ -20,7 +20,7 @@ class VoiceSatelliteLoadPerformanceTests(unittest.TestCase):
 
     def test_device_images_are_small_cacheable_urls_instead_of_json_data(self) -> None:
         helpers = (REPO_ROOT / "tater_voice" / "ui_helpers.py").read_text(encoding="utf-8")
-        app_source = (REPO_ROOT / "tateros_app.py").read_text(encoding="utf-8")
+        app_source = (REPO_ROOT / 'tater/web/application.py').read_text(encoding="utf-8")
 
         self.assertIn('./static/device-images/{filename}', helpers)
         self.assertNotIn("base64.b64encode", helpers)

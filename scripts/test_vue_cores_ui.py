@@ -151,7 +151,7 @@ class VueCoresTests(unittest.TestCase):
         self.assertIn("props.allValues[sourceKey]", source)
 
     def test_core_media_route_supports_browser_metadata_and_range_requests(self) -> None:
-        source = (REPO_ROOT / "tateros_app.py").read_text(encoding="utf-8")
+        source = (REPO_ROOT / 'tater/web/application.py').read_text(encoding="utf-8")
 
         self.assertIn('@app.head("/api/cores/{core_key}/media/{media_id}")', source)
         self.assertIn('if request.method.upper() == "HEAD":', source)
@@ -192,7 +192,7 @@ class VueCoresTests(unittest.TestCase):
 
     def test_webui_assets_are_cache_busted_by_the_current_build(self) -> None:
         app_js = (REPO_ROOT / "tateros_static" / "app.js").read_text(encoding="utf-8")
-        backend = (REPO_ROOT / "tateros_app.py").read_text(encoding="utf-8")
+        backend = (REPO_ROOT / 'tater/web/application.py').read_text(encoding="utf-8")
         native = (
             REPO_ROOT / "macos" / "Tater" / "Sources" / "TaterAssistant" / "main.swift"
         ).read_text(encoding="utf-8")

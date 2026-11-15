@@ -57,7 +57,7 @@ class CoreMusicLibraryRendererTests(unittest.TestCase):
 
     def test_music_library_uses_component_frontend_and_event_stream(self) -> None:
         app_js = (REPO_ROOT / "tateros_static" / "app.js").read_text(encoding="utf-8")
-        app_py = (REPO_ROOT / "tateros_app.py").read_text(encoding="utf-8")
+        app_py = (REPO_ROOT / 'tater/web/application.py').read_text(encoding="utf-8")
         index_html = (REPO_ROOT / "tateros_static" / "index.html").read_text(encoding="utf-8")
         cores_app = (REPO_ROOT / "frontend" / "src" / "cores" / "CoresApp.vue").read_text(encoding="utf-8")
         entry = (REPO_ROOT / "frontend" / "src" / "entry.ts").read_text(encoding="utf-8")

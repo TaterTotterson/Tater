@@ -60,7 +60,7 @@ class VueAppShellTests(unittest.TestCase):
         entry = (REPO_ROOT / "frontend" / "src" / "entry.ts").read_text(encoding="utf-8")
         shell = (REPO_ROOT / "frontend" / "src" / "shell" / "AppShell.vue").read_text(encoding="utf-8")
         index = (REPO_ROOT / "tateros_static" / "index.html").read_text(encoding="utf-8")
-        backend = (REPO_ROOT / "tateros_app.py").read_text(encoding="utf-8")
+        backend = (REPO_ROOT / 'tater/web/application.py').read_text(encoding="utf-8")
         bundle = (REPO_ROOT / "tateros_static" / "ui" / "tater-ui.css").read_text(encoding="utf-8")
 
         self.assertIn('import "./base.css";', entry)
@@ -96,7 +96,7 @@ class VueAppShellTests(unittest.TestCase):
             REPO_ROOT / "frontend" / "src" / "settings" / "components" / "models" / "LocalModelApplyProgress.vue"
         ).read_text(encoding="utf-8")
         app_js = (REPO_ROOT / "tateros_static" / "app.js").read_text(encoding="utf-8")
-        backend = (REPO_ROOT / "tateros_app.py").read_text(encoding="utf-8")
+        backend = (REPO_ROOT / 'tater/web/application.py').read_text(encoding="utf-8")
 
         self.assertIn('import LocalModelApplyProgress from "../settings/components/models/LocalModelApplyProgress.vue"', shell)
         self.assertIn("pollStartupModelWarmup", shell)

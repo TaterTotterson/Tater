@@ -62,7 +62,7 @@ class VueSettingsTests(unittest.TestCase):
             REPO_ROOT / "frontend" / "src" / "settings" / "components" / "GeneralSettings.vue"
         ).read_text(encoding="utf-8")
         app_js = (REPO_ROOT / "tateros_static" / "app.js").read_text(encoding="utf-8")
-        backend = (REPO_ROOT / "tateros_app.py").read_text(encoding="utf-8")
+        backend = (REPO_ROOT / 'tater/web/application.py').read_text(encoding="utf-8")
         styles = (REPO_ROOT / "frontend" / "src" / "tater-ui.css").read_text(encoding="utf-8")
         base_styles = (REPO_ROOT / "frontend" / "src" / "base.css").read_text(encoding="utf-8")
 
@@ -107,7 +107,7 @@ class VueSettingsTests(unittest.TestCase):
             REPO_ROOT / "frontend" / "src" / "settings" / "components" / "AdvancedSettings.vue"
         ).read_text(encoding="utf-8")
         app_js = (REPO_ROOT / "tateros_static" / "app.js").read_text(encoding="utf-8")
-        backend = (REPO_ROOT / "tateros_app.py").read_text(encoding="utf-8")
+        backend = (REPO_ROOT / 'tater/web/application.py').read_text(encoding="utf-8")
         styles = (REPO_ROOT / "frontend" / "src" / "tater-ui.css").read_text(encoding="utf-8")
 
         self.assertIn("MiscSettingsPanel", source)
@@ -137,7 +137,7 @@ class VueSettingsTests(unittest.TestCase):
             REPO_ROOT / "frontend" / "src" / "settings" / "components" / "HydraSettings.vue"
         ).read_text(encoding="utf-8")
         app_js = (REPO_ROOT / "tateros_static" / "app.js").read_text(encoding="utf-8")
-        backend = (REPO_ROOT / "tateros_app.py").read_text(encoding="utf-8")
+        backend = (REPO_ROOT / 'tater/web/application.py').read_text(encoding="utf-8")
         styles = (REPO_ROOT / "frontend" / "src" / "tater-ui.css").read_text(encoding="utf-8")
 
         self.assertIn("HydraSettingsPanel", source)
@@ -211,7 +211,7 @@ class VueSettingsTests(unittest.TestCase):
         logs = (
             REPO_ROOT / "frontend" / "src" / "settings" / "components" / "LogsSettings.vue"
         ).read_text(encoding="utf-8")
-        backend = (REPO_ROOT / "tateros_app.py").read_text(encoding="utf-8")
+        backend = (REPO_ROOT / 'tater/web/application.py').read_text(encoding="utf-8")
         styles = (REPO_ROOT / "frontend" / "src" / "tater-ui.css").read_text(encoding="utf-8")
 
         self.assertIn("LogsSettingsPanel", settings_app)
@@ -232,7 +232,7 @@ class VueSettingsTests(unittest.TestCase):
         people = (
             REPO_ROOT / "frontend" / "src" / "settings" / "components" / "PeopleSettings.vue"
         ).read_text(encoding="utf-8")
-        backend = (REPO_ROOT / "tateros_app.py").read_text(encoding="utf-8")
+        backend = (REPO_ROOT / 'tater/web/application.py').read_text(encoding="utf-8")
         styles = (REPO_ROOT / "frontend" / "src" / "tater-ui.css").read_text(encoding="utf-8")
 
         self.assertIn("PeopleSettingsPanel", settings_app)
@@ -279,7 +279,7 @@ class VueSettingsTests(unittest.TestCase):
         spud_link = (
             REPO_ROOT / "frontend" / "src" / "settings" / "components" / "SpudLinkSettings.vue"
         ).read_text(encoding="utf-8")
-        backend = (REPO_ROOT / "tateros_app.py").read_text(encoding="utf-8")
+        backend = (REPO_ROOT / 'tater/web/application.py').read_text(encoding="utf-8")
         styles = (REPO_ROOT / "frontend" / "src" / "tater-ui.css").read_text(encoding="utf-8")
 
         self.assertIn("SpudLinkSettingsPanel", settings_app)
@@ -403,7 +403,7 @@ class VueSettingsTests(unittest.TestCase):
             self.assertNotIn(retired_label, llm)
 
     def test_llm_settings_accept_numeric_vue_ports_and_explain_validation_errors(self) -> None:
-        backend = (REPO_ROOT / "tateros_app.py").read_text(encoding="utf-8")
+        backend = (REPO_ROOT / 'tater/web/schemas.py').read_text(encoding="utf-8")
         api = (REPO_ROOT / "frontend" / "src" / "shared" / "api.ts").read_text(encoding="utf-8")
 
         self.assertIn("@field_validator(", backend)
@@ -428,7 +428,7 @@ class VueSettingsTests(unittest.TestCase):
         progress = (
             REPO_ROOT / "frontend" / "src" / "settings" / "components" / "models" / "LocalModelApplyProgress.vue"
         ).read_text(encoding="utf-8")
-        backend = (REPO_ROOT / "tateros_app.py").read_text(encoding="utf-8")
+        backend = (REPO_ROOT / 'tater/web/application.py').read_text(encoding="utf-8")
         styles = (REPO_ROOT / "frontend" / "src" / "tater-ui.css").read_text(encoding="utf-8")
 
         self.assertIn('import LocalModelApplyProgress from "./models/LocalModelApplyProgress.vue"', models)
@@ -687,7 +687,7 @@ class VueSettingsTests(unittest.TestCase):
         redis = (
             REPO_ROOT / "frontend" / "src" / "settings" / "components" / "RedisSettings.vue"
         ).read_text(encoding="utf-8")
-        backend = (REPO_ROOT / "tateros_app.py").read_text(encoding="utf-8")
+        backend = (REPO_ROOT / 'tater/web/application.py').read_text(encoding="utf-8")
         styles = (REPO_ROOT / "frontend" / "src" / "tater-ui.css").read_text(encoding="utf-8")
 
         self.assertIn("RedisSettingsPanel", settings_app)

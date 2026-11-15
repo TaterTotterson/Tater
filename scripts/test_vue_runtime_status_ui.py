@@ -133,7 +133,7 @@ class VueRuntimeStatusTests(unittest.TestCase):
         self.assertIn("@media (max-width: 420px)", monitor_styles)
 
     def test_runtime_telemetry_backend_streams_fast_cpu_ram_and_cached_gpu(self) -> None:
-        source = (REPO_ROOT / "tateros_app.py").read_text(encoding="utf-8")
+        source = (REPO_ROOT / 'tater/web/application.py').read_text(encoding="utf-8")
 
         for contract in (
             "RUNTIME_HARDWARE_TELEMETRY_INTERVAL_SECONDS = 5",
@@ -148,7 +148,7 @@ class VueRuntimeStatusTests(unittest.TestCase):
             self.assertIn(contract, source)
 
     def test_local_face_id_is_included_in_runtime_model_inventory(self) -> None:
-        source = (REPO_ROOT / "tateros_app.py").read_text(encoding="utf-8")
+        source = (REPO_ROOT / 'tater/web/application.py').read_text(encoding="utf-8")
 
         for contract in (
             "def _runtime_face_id_model_rows()",
@@ -193,7 +193,7 @@ class VueRuntimeStatusTests(unittest.TestCase):
             "loaded_at": 123.0,
         }
         namespace["face_identity"] = types.SimpleNamespace(runtime_status=lambda _client: status)
-        exec(compile(ast.Module(body=functions, type_ignores=[]), "tateros_app.py", "exec"), namespace)
+        exec(compile(ast.Module(body=functions, type_ignores=[]), 'tater/web/application.py', "exec"), namespace)
 
         rows = namespace["_runtime_face_id_model_rows"]()
         self.assertEqual(len(rows), 1)

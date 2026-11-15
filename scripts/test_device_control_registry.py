@@ -21,7 +21,7 @@ def _load_integration_registry():
     tateros_stub = types.ModuleType("tateros")
     tateros_stub.integration_store = integration_store_stub
 
-    path = ROOT / "integration_registry.py"
+    path = ROOT / 'tater/extensions/integrations.py'
     spec = importlib.util.spec_from_file_location("test_integration_registry", path)
     if spec is None or spec.loader is None:
         raise RuntimeError("Could not load integration_registry.py")

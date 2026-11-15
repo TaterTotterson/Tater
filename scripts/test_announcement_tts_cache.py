@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def _load_cache_helpers(cache_root: Path):
-    source = (ROOT / "speech_tts.py").read_text(encoding="utf-8")
+    source = (ROOT / 'tater/audio/speech.py').read_text(encoding="utf-8")
     tree = ast.parse(source)
     names = {
         "_text",

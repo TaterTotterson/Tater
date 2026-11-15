@@ -162,7 +162,7 @@ class CoreTaskRunManagerTests(unittest.IsolatedAsyncioTestCase):
 
 class SystemTaskIntegrationContractTests(unittest.TestCase):
     def test_backend_registers_cached_satellite_and_dashboard_tasks(self) -> None:
-        source = (REPO_ROOT / "tateros_app.py").read_text(encoding="utf-8")
+        source = (REPO_ROOT / 'tater/web/application.py').read_text(encoding="utf-8")
 
         for task_id in (
             "hardware_telemetry",
@@ -180,7 +180,7 @@ class SystemTaskIntegrationContractTests(unittest.TestCase):
         self.assertIn('@app.post("/api/settings/system-tasks/{task_id}/run")', source)
 
     def test_backend_discovers_core_owned_tasks_and_exposes_run_endpoint(self) -> None:
-        source = (REPO_ROOT / "tateros_app.py").read_text(encoding="utf-8")
+        source = (REPO_ROOT / 'tater/web/application.py').read_text(encoding="utf-8")
 
         self.assertIn('getattr(module, "get_core_system_tasks", None)', source)
         self.assertIn('getattr(module, "run_core_system_task", None)', source)
@@ -188,7 +188,7 @@ class SystemTaskIntegrationContractTests(unittest.TestCase):
         self.assertIn('payload.update(_core_tasks_snapshot())', source)
 
     def test_core_task_contract_supports_automatic_event_driven_jobs(self) -> None:
-        app_source = (REPO_ROOT / "tateros_app.py").read_text(encoding="utf-8")
+        app_source = (REPO_ROOT / 'tater/web/application.py').read_text(encoding="utf-8")
         ui_source = (REPO_ROOT / "frontend" / "src" / "settings" / "components" / "SystemTaskCard.vue").read_text(encoding="utf-8")
 
         self.assertIn('raw_task.get("manual")', app_source)
@@ -201,7 +201,7 @@ class SystemTaskIntegrationContractTests(unittest.TestCase):
         self.assertIn(">Automatic</button>", ui_source)
 
     def test_satellite_snapshot_is_event_driven_with_five_minute_fallback(self) -> None:
-        app_source = (REPO_ROOT / "tateros_app.py").read_text(encoding="utf-8")
+        app_source = (REPO_ROOT / 'tater/web/application.py').read_text(encoding="utf-8")
         native_source = (REPO_ROOT / "tater_voice" / "native_satellite.py").read_text(encoding="utf-8")
 
         self.assertIn("VOICE_SATELLITE_SNAPSHOT_INTERVAL_SECONDS = 60 * 5", app_source)
@@ -212,7 +212,7 @@ class SystemTaskIntegrationContractTests(unittest.TestCase):
             self.assertIn(f'_notify_state_change("{event}"', native_source)
 
     def test_satellites_endpoint_serves_cache_and_refreshes_in_background(self) -> None:
-        source = (REPO_ROOT / "tateros_app.py").read_text(encoding="utf-8")
+        source = (REPO_ROOT / 'tater/web/application.py').read_text(encoding="utf-8")
         start = source.index("def get_voice_runtime_payload")
         end = source.index("\n\n@app.post(\"/api/settings/voice/runtime/action\")", start)
         endpoint_source = source[start:end]
@@ -224,7 +224,7 @@ class SystemTaskIntegrationContractTests(unittest.TestCase):
         self.assertNotIn("_voice_satellite_snapshot_build()", endpoint_source)
 
     def test_satellite_snapshot_invalidation_keeps_stale_payload_until_rebuilt(self) -> None:
-        source = (REPO_ROOT / "tateros_app.py").read_text(encoding="utf-8")
+        source = (REPO_ROOT / 'tater/web/application.py').read_text(encoding="utf-8")
         start = source.index("def _voice_satellite_snapshot_invalidate")
         end = source.index("\n\ndef _voice_satellite_snapshot_load", start)
         invalidate_source = source[start:end]
@@ -233,7 +233,7 @@ class SystemTaskIntegrationContractTests(unittest.TestCase):
         self.assertNotIn("redis_client.delete", invalidate_source)
 
     def test_stereo_pair_changes_refresh_satellite_playback_options(self) -> None:
-        source = (REPO_ROOT / "tateros_app.py").read_text(encoding="utf-8")
+        source = (REPO_ROOT / 'tater/web/application.py').read_text(encoding="utf-8")
         start = source.index("def run_voice_runtime_action")
         end = source.index("\n\n@app.get(\"/api/settings/voice/firmware-web", start)
         action_source = source[start:end]
@@ -243,8 +243,8 @@ class SystemTaskIntegrationContractTests(unittest.TestCase):
         self.assertIn("_voice_satellite_snapshot_invalidate()", action_source)
 
     def test_integration_registry_uses_events_and_five_minute_fallback(self) -> None:
-        app_source = (REPO_ROOT / "tateros_app.py").read_text(encoding="utf-8")
-        runtime_source = (REPO_ROOT / "integration_runtime.py").read_text(encoding="utf-8")
+        app_source = (REPO_ROOT / 'tater/web/application.py').read_text(encoding="utf-8")
+        runtime_source = (REPO_ROOT / 'tater/extensions/integration_runtime.py').read_text(encoding="utf-8")
 
         self.assertIn("INTEGRATION_DEVICE_REGISTRY_INTERVAL_SECONDS = 60 * 5", app_source)
         self.assertIn("INTEGRATION_DEVICE_REGISTRY_DEBOUNCE_SECONDS = 2.0", app_source)
@@ -253,7 +253,7 @@ class SystemTaskIntegrationContractTests(unittest.TestCase):
         self.assertIn('_notify_device_registry_change("device-discovered"', runtime_source)
 
     def test_integration_tabs_serve_cached_registry_and_cached_playback_options(self) -> None:
-        source = (REPO_ROOT / "tateros_app.py").read_text(encoding="utf-8")
+        source = (REPO_ROOT / 'tater/web/application.py').read_text(encoding="utf-8")
 
         self.assertIn("def _settings_cached_integration_device_registry()", source)
         self.assertIn("get_cached_integration_device_registry(redis_client)", source)
@@ -261,10 +261,8 @@ class SystemTaskIntegrationContractTests(unittest.TestCase):
         self.assertIn('INTEGRATION_ROOM_MEDIA_PLAYER_OPTIONS_KEY = "tater:integration_runtime:room-media-player-options:v1"', source)
 
     def test_runtime_stats_and_context_settings_use_background_snapshots(self) -> None:
-        app_source = (REPO_ROOT / "tateros_app.py").read_text(encoding="utf-8")
+        app_source = (REPO_ROOT / 'tater/web/application.py').read_text(encoding="utf-8")
         ui_source = (REPO_ROOT / "frontend" / "src" / "runtime" / "RuntimeStatus.vue").read_text(encoding="utf-8")
-        helpers_source = (REPO_ROOT / "helpers.py").read_text(encoding="utf-8")
-
         self.assertIn("RUNTIME_HARDWARE_TELEMETRY_INTERVAL_SECONDS = 5", app_source)
         self.assertIn("RUNTIME_TELEMETRY_STREAM_INTERVAL_SECONDS = 1.0", app_source)
         self.assertIn('@app.get("/api/runtime/telemetry")', app_source)
@@ -276,7 +274,8 @@ class SystemTaskIntegrationContractTests(unittest.TestCase):
         self.assertIn("breakdown", ui_source)
         self.assertNotIn("Open the top stats bubble to refresh", ui_source)
         self.assertIn("enable_apple_ioreg_probe=True", app_source)
-        self.assertIn("enable_ioreg_probe: Optional[bool] = None", helpers_source)
+        hardware_source = (REPO_ROOT / 'tater/runtime/hardware.py').read_text(encoding="utf-8")
+        self.assertIn("enable_ioreg_probe: Optional[bool] = None", hardware_source)
 
 
 if __name__ == "__main__":

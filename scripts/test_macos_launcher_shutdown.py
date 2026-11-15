@@ -10,7 +10,7 @@ LAUNCHER_SOURCE = ROOT / "macos" / "Tater" / "Sources" / "TaterAssistant" / "mai
 RUN_UI_SOURCE = ROOT / "run_ui.sh"
 REQUIREMENTS = ROOT / "requirements.txt"
 SETUP_SOURCE = ROOT / "setup_tater.sh"
-HELPERS_SOURCE = ROOT / "helpers.py"
+HELPERS_SOURCE = ROOT / 'tater/llm/runtime.py'
 FIRMWARE_SOURCE = ROOT / "tater_voice" / "firmware.py"
 
 
@@ -178,7 +178,7 @@ class MacOSLauncherShutdownTests(unittest.TestCase):
         self.assertNotIn("DispatchQueue.main.async {", implementation)
 
     def test_backend_cleans_stale_tater_llama_servers_before_redis_bootstrap(self) -> None:
-        app_source = (ROOT / "tateros_app.py").read_text(encoding="utf-8")
+        app_source = (ROOT / 'tater/web/application.py').read_text(encoding="utf-8")
         startup = app_source[
             app_source.index("async def _complete_startup_bootstrap()") :
             app_source.index("async def _run_background_startup_bootstrap()")

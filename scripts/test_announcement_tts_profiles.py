@@ -21,7 +21,7 @@ import speech_settings  # noqa: E402
 
 
 def _load_speak_announcement_targets():
-    source = (ROOT / "speech_tts.py").read_text(encoding="utf-8")
+    source = (ROOT / 'tater/audio/speech.py').read_text(encoding="utf-8")
     tree = ast.parse(source)
     function = next(
         node
@@ -142,7 +142,7 @@ class AnnouncementTtsProfileTests(unittest.TestCase):
         models_source = (ROOT / "frontend" / "src" / "settings" / "components" / "ModelsSettings.vue").read_text(encoding="utf-8")
         speech_source = (ROOT / "frontend" / "src" / "settings" / "components" / "models" / "SpeechModels.vue").read_text(encoding="utf-8")
         profile_source = (ROOT / "frontend" / "src" / "settings" / "components" / "models" / "TtsProfile.vue").read_text(encoding="utf-8")
-        settings_source = (ROOT / "speech_settings.py").read_text(encoding="utf-8")
+        settings_source = (ROOT / 'tater/audio/settings.py').read_text(encoding="utf-8")
 
         self.assertIn('"label": "Same as Direct Reply TTS"', settings_source)
         self.assertIn('scope="announcement"', speech_source)

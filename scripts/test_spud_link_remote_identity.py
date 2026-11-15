@@ -47,7 +47,7 @@ class SpudLinkRemoteIdentityTests(unittest.TestCase):
         )
 
     def test_face_id_remote_status_is_effectively_enabled(self):
-        source = (ROOT / "face_id_runtime.py").read_text(encoding="utf-8")
+        source = (ROOT / 'tater/identity/runtime.py').read_text(encoding="utf-8")
         status_source = source[source.index("def status(") : source.index("def settings_payload(")]
 
         self.assertLess(

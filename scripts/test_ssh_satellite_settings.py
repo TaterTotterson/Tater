@@ -151,7 +151,10 @@ class SSHSatelliteSettingsTests(unittest.TestCase):
         self.assertIn("tater-${groups.join", component)
         self.assertIn('field.get("key")) == "ssh_login"', helpers)
         self.assertIn("root@{host}", helpers)
-        self.assertIn("Satellite Settings", satellites)
+        self.assertIn('@click="openSettings(item)">Device settings', satellites)
+        self.assertIn('<FocusedWorkspace :open="Boolean(settingsItem)"', satellites)
+        self.assertIn('aria-label="Satellite settings sections"', satellites)
+        self.assertIn('saveDeviceSettings(settingsItem)', satellites)
         self.assertIn("tm-field-input-actions", bundle)
 
 

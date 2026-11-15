@@ -170,7 +170,7 @@ class ExternalAudioTests(unittest.TestCase):
         )
         self.assertIn("Preserve a non-zero port", patch)
 
-        app_source = (root / "tateros_app.py").read_text(encoding="utf-8")
+        app_source = (root / 'tater/web/application.py').read_text(encoding="utf-8")
         self.assertIn(
             'path.startswith("/api/external-audio/v1/streams/")',
             app_source,
@@ -328,8 +328,12 @@ class ExternalAudioTests(unittest.TestCase):
         def stop_targets(targets, **kwargs):
             stopped.extend(targets)
             stopped_sessions.extend(kwargs.get("expected_sessions") or [])
-            stopped_event.set()
             return []
+
+        def stop_airplay_group(group_id):
+            stopped_airplay_groups.append(group_id)
+            stopped_event.set()
+            return {"ok": True, "sent_count": 1}
 
         media_module = types.ModuleType("media_playback")
         media_module.play_media_url_targets = lambda **kwargs: calls.append(kwargs) or {
@@ -346,10 +350,7 @@ class ExternalAudioTests(unittest.TestCase):
         }
         media_module._voice_core_stop_media_sync = stop_targets
         airplay_module = types.ModuleType("airplay_bridge")
-        airplay_module.stop_airplay_group_sync = (
-            lambda group_id: stopped_airplay_groups.append(group_id)
-            or {"ok": True, "sent_count": 1}
-        )
+        airplay_module.stop_airplay_group_sync = stop_airplay_group
         speech_module = types.ModuleType("speech_tts")
         speech_module._service_base_url_for_peer = lambda: "http://10.0.0.20:8501"
         old_media = sys.modules.get("media_playback")
@@ -379,9 +380,14 @@ class ExternalAudioTests(unittest.TestCase):
                 }
             )
             frame_count = int(0.2 * external_audio.SAMPLE_RATE)
-            runtime.ingest_pcm((b"\x00\x01\x00\x02") * frame_count)
-            self.assertIsNotNone(runtime._route_thread)
-            runtime._route_thread.join(timeout=3)
+            # Volume propagation has its own tests. Keep this mocked route from
+            # starting a real satellite/speech runtime in a background thread.
+            with mock.patch.object(runtime, "_schedule_volume_update_locked") as schedule_volume:
+                runtime.ingest_pcm((b"\x00\x01\x00\x02") * frame_count)
+                self.assertIsNotNone(runtime._route_thread)
+                runtime._route_thread.join(timeout=3)
+                self.assertFalse(runtime._route_thread.is_alive())
+            schedule_volume.assert_called_once_with(80)
 
             self.assertEqual(len(calls), 1)
             call = calls[0]

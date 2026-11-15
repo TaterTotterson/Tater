@@ -61,7 +61,7 @@ class VuePortalsTests(unittest.TestCase):
 
     def test_portal_overview_lazy_loads_dynamic_settings(self) -> None:
         portal = (REPO_ROOT / "frontend" / "src" / "portals" / "PortalsApp.vue").read_text(encoding="utf-8")
-        backend = (REPO_ROOT / "tateros_app.py").read_text(encoding="utf-8")
+        backend = (REPO_ROOT / 'tater/web/application.py').read_text(encoding="utf-8")
         overview_handler = backend.split('@app.get("/api/portals")', 1)[1].split('@app.get("/api/portals/{portal_key}/settings")', 1)[0]
 
         self.assertIn('"settings": _setting_fields(portal.get("required", {}), current_settings)', backend)

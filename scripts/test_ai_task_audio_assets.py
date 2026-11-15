@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse
 
 
 def _load_audio_response_helper(root: Path):
-    source_path = Path(__file__).resolve().parents[1] / "tateros_app.py"
+    source_path = Path(__file__).resolve().parents[1] / 'tater/web/application.py'
     tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
     selected = [
         node

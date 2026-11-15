@@ -15,7 +15,7 @@ def functions(filename,names,namespace):
 
 class CoreWorkspaceBackendTests(unittest.TestCase):
     def setUp(self):
-        self.registry=functions('core_registry.py',{'_load_workspace_metadata','_load_webui_tab_config','_coerce_bool'},{'json':json})
+        self.registry=functions('tater/extensions/cores.py',{'_load_workspace_metadata','_load_webui_tab_config','_coerce_bool'},{'json':json})
     def test_metadata_is_optional_bounded_data(self):
         load=self.registry['_load_workspace_metadata'];self.assertEqual(load(None),{});self.assertEqual(load({'schema':2}),{})
         self.assertEqual(load({'schema':1,'invalid':object()}),{});self.assertEqual(load({'schema':1,'large':'x'*32768}),{})
@@ -25,7 +25,7 @@ class CoreWorkspaceBackendTests(unittest.TestCase):
         new=load(SimpleNamespace(CORE_WEBUI_TAB={'label':'Test'},CORE_WORKSPACE={'schema':1,'default_tab':'items'}));self.assertEqual(new['workspace']['default_tab'],'items')
     def app(self,provider=None):
         runtime=SimpleNamespace(is_running=lambda key:False,_import_module=lambda *a,**k:SimpleNamespace(get_htmlui_tab_data=provider))
-        return functions('tateros_app.py',{'_discover_runtime_webui_tabs','_discover_core_webui_tabs','_load_surface_htmlui_tab_payload'},{'core_registry_module':SimpleNamespace(_load_workspace_metadata=self.registry['_load_workspace_metadata']),'redis_client':SimpleNamespace(get=lambda key:'false'),'core_runtime':runtime,'_as_bool_flag':lambda value,default:default if value is None else bool(value),'time':time})
+        return functions('tater/web/application.py',{'_discover_runtime_webui_tabs','_discover_core_webui_tabs','_load_surface_htmlui_tab_payload'},{'core_registry_module':SimpleNamespace(_load_workspace_metadata=self.registry['_load_workspace_metadata']),'redis_client':SimpleNamespace(get=lambda key:'false'),'core_runtime':runtime,'_as_bool_flag':lambda value,default:default if value is None else bool(value),'time':time})
     def test_stopped_cores_remain_in_workspace_directory(self):
         ns=self.app();tabs=ns['_discover_core_webui_tabs']([{'key':'example_core','has_webui_tab_renderer':True,'webui_tab':{'label':'Example','requires_running':True,'workspace':{'schema':1,'icon':'calendar'}}}]);self.assertEqual(len(tabs),1);self.assertFalse(tabs[0]['running']);self.assertEqual(tabs[0]['workspace']['icon'],'calendar')
     def test_presentation_does_not_replace_dynamic_fields_actions_or_provider_ui(self):

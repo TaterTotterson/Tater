@@ -156,7 +156,7 @@ class MediaUnderstandingTests(unittest.TestCase):
         self.assertIn('@click="select(tab.id)"', source)
 
     def test_runtime_source_routes_modalities_and_reuses_cache(self):
-        source = (ROOT / "helpers.py").read_text(encoding="utf-8")
+        source = (ROOT / 'tater/llm/runtime.py').read_text(encoding="utf-8")
         self.assertIn('supports_audio = bool(modalities.get("audio"))', source)
         self.assertIn('supports_video = bool(modalities.get("video"))', source)
         self.assertIn('media_kind or _multimodal_payload_kind(messages)', source)
@@ -165,7 +165,7 @@ class MediaUnderstandingTests(unittest.TestCase):
         self.assertIn('"supports_video": bool((bundle or {}).get("supports_video"))', source)
 
     def test_active_dedicated_media_models_are_part_of_startup_warmup(self):
-        source = (ROOT / "tateros_app.py").read_text(encoding="utf-8")
+        source = (ROOT / 'tater/web/application.py').read_text(encoding="utf-8")
         self.assertIn("def _active_local_llm_startup_targets", source)
         self.assertIn('*_current_media_local_warmup_targets("audio")', source)
         self.assertIn('*_current_media_local_warmup_targets("video")', source)
@@ -180,14 +180,14 @@ class MediaUnderstandingTests(unittest.TestCase):
         self.assertIn('["roles", "media_kinds"].forEach', source)
 
     def test_runtime_stats_include_selected_model_roles(self):
-        source = (ROOT / "tateros_app.py").read_text(encoding="utf-8")
+        source = (ROOT / 'tater/web/application.py').read_text(encoding="utf-8")
         self.assertIn("def _runtime_local_llm_roles", source)
         self.assertIn("def _runtime_managed_tts_worker_rows", source)
         self.assertIn("managed_tts_workers_snapshot()", source)
         self.assertIn('role_detail = f"Roles {\', \'.join(roles)}"', source)
 
     def test_kernel_tools_are_registered_with_llm_guidance(self):
-        source = (ROOT / "tool_runtime.py").read_text(encoding="utf-8")
+        source = (ROOT / 'tater/extensions/runtime.py').read_text(encoding="utf-8")
         self.assertIn('"audio_analyze"', source)
         self.assertIn('"video_analyze"', source)
         self.assertIn("use STT for plain transcription", source)

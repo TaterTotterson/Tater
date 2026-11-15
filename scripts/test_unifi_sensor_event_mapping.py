@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def _load_mapping_helpers():
-    source = (ROOT / "integration_runtime.py").read_text(encoding="utf-8")
+    source = (ROOT / 'tater/extensions/integration_runtime.py').read_text(encoding="utf-8")
     tree = ast.parse(source)
     names = {
         "_unifi_sensor_event_state",

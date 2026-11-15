@@ -276,13 +276,23 @@ class DecisionUiTests(unittest.TestCase):
         self.assertIn("Recent live decisions", llm_ui)
         self.assertIn("modelsDecisionResults", settings_ui)
         self.assertIn('{ value: "decision", label: "Decision routing" }', models_ui)
-        self.assertLess(llm_ui.index("Base model pool"), llm_ui.index("Beast mode</button>"))
-        self.assertLess(llm_ui.index("Base model pool</button>"), llm_ui.index("Decision Router</button>"))
-        self.assertLess(llm_ui.index("Decision Router</button>"), llm_ui.index("Beast mode</button>"))
-        self.assertLess(llm_ui.index("Beast mode</button>"), llm_ui.index("Tater Open WebUI</button>"))
+        navigation = llm_ui.split('aria-label="LLM model areas">', 1)[1].split("</nav>", 1)[0]
+        buttons = (
+            ("base", "Base"),
+            ("decision", "Decision Router"),
+            ("tater-open-webui", "WebUI"),
+            ("spudex", "Terminal"),
+            ("beast", "Beast roles"),
+        )
+        positions = []
+        for area, label in buttons:
+            button = f'@click="area = \'{area}\'">{label}</button>'
+            self.assertIn(button, navigation)
+            positions.append(navigation.index(button))
+        self.assertEqual(positions, sorted(positions))
 
     def test_decision_results_endpoint_reads_live_ledger_scores(self):
-        app_source = (ROOT / "tateros_app.py").read_text(encoding="utf-8")
+        app_source = (ROOT / 'tater/web/application.py').read_text(encoding="utf-8")
         self.assertIn('@app.get("/api/settings/decision-router/results")', app_source)
         self.assertIn('astraeus_debug.get("decision_router")', app_source)
         self.assertIn('"probability": round(probability, 4)', app_source)
@@ -290,7 +300,7 @@ class DecisionUiTests(unittest.TestCase):
         self.assertIn('"route_effect": route_effect', app_source)
 
     def test_decision_search_uses_hub_tag_without_a_hardcoded_pick(self):
-        app_source = (ROOT / "tateros_app.py").read_text(encoding="utf-8")
+        app_source = (ROOT / 'tater/web/application.py').read_text(encoding="utf-8")
         picks_source = app_source.split("HF_BROWSER_TATER_PICKS:", 1)[1].split(
             "def _hf_browser_tater_pick_owner", 1
         )[0]
@@ -308,7 +318,7 @@ class DecisionUiTests(unittest.TestCase):
         self.assertIn("is not a native llama.cpp System One decision model", app_source)
 
     def test_installed_decision_models_use_native_gguf_metadata_and_refresh(self):
-        app_source = (ROOT / "tateros_app.py").read_text(encoding="utf-8")
+        app_source = (ROOT / 'tater/web/application.py').read_text(encoding="utf-8")
         models_source = (ROOT / "frontend/src/settings/components/ModelsSettings.vue").read_text(encoding="utf-8")
         browser_source = (ROOT / "frontend/src/settings/components/models/HuggingFaceModels.vue").read_text(encoding="utf-8")
 

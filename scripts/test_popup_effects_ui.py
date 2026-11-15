@@ -44,7 +44,7 @@ class PopupEffectsUiTests(unittest.TestCase):
             self.assertIn(field + ':', text)
 
     def test_backend_accepts_old_preferences_and_returns_supported_effects(self):
-        tree = ast.parse(source('tateros_app.py'))
+        tree = ast.parse(source('tater/web/application.py'))
         names = {'DEFAULT_WEBUI_POPUP_EFFECT_STYLE', 'WEBUI_POPUP_EFFECT_STYLE_CHOICES', 'WEBUI_POPUP_EFFECT_STYLE_ALIASES'}
         nodes = [n for n in tree.body if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id in names for t in n.targets)]
         nodes += [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == '_normalize_popup_effect_style']
@@ -58,7 +58,7 @@ class PopupEffectsUiTests(unittest.TestCase):
             self.assertEqual(normalize(effect), effect)
         self.assertEqual(normalize(None), 'scale')
         self.assertEqual(normalize('unknown', 'invalid'), 'scale')
-        self.assertIn('raw_style not in WEBUI_POPUP_EFFECT_STYLE_ALIASES', source('tateros_app.py'))
+        self.assertIn('raw_style not in WEBUI_POPUP_EFFECT_STYLE_ALIASES', source('tater/web/application.py'))
 
 if __name__ == '__main__':
     unittest.main()

@@ -13,7 +13,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 CORE_STORE_PATH = ROOT / "tateros" / "core_store.py"
-APP_PATH = ROOT / "tateros_app.py"
+APP_PATH = ROOT / 'tater/web/application.py'
 
 
 class _FakeRedis:

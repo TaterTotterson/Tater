@@ -54,25 +54,32 @@ class SpudLinkVadOptionTests(unittest.TestCase):
         self.assertIn('"VOICE_VAD_BACKEND"', model_groups)
 
         speech_panel = (ROOT / "frontend" / "src" / "settings" / "components" / "models" / "SpeechModels.vue").read_text(encoding="utf-8")
+        listening_panel = (ROOT / "frontend" / "src" / "settings" / "components" / "models" / "ListeningModels.vue").read_text(encoding="utf-8")
+        model_settings = (ROOT / "frontend" / "src" / "settings" / "components" / "ModelsSettings.vue").read_text(encoding="utf-8")
+        presentation = (ROOT / "frontend" / "src" / "settings" / "components" / "models" / "modelPresentation.ts").read_text(encoding="utf-8")
         route_ui = (ROOT / "frontend" / "src" / "settings" / "components" / "SpudLinkSettings.vue").read_text(encoding="utf-8")
-        for tab in ("listening", "replies", "announcements", "playback"):
+        for tab in ("replies", "announcements", "playback"):
             self.assertIn(f"area === '{tab}'", speech_panel)
-        self.assertIn('<ModelFields :sections="visibleVoiceSections"', speech_panel)
-        self.assertLess(speech_panel.index("Speech recognition"), speech_panel.index("<ModelFields"))
+        self.assertIn('<ListeningModels v-else-if="activeTab === \'listening\'"', model_settings)
+        self.assertIn('splitListeningSections(visibleVoiceSections.value)', listening_panel)
+        self.assertIn('=== "VOICE_VAD_BACKEND"', presentation)
+        self.assertIn('<ModelFields :sections="listeningSections.basic" :values="voiceValues" @change="updateVoice"', listening_panel)
+        self.assertIn('<ModelFields :sections="listeningSections.advanced" :values="voiceValues" @change="updateVoice"', listening_panel)
+        self.assertLess(listening_panel.index("Speech recognition"), listening_panel.index("<ModelFields"))
         self.assertIn('id: "vad"', route_ui)
         self.assertIn('label: "Speech-End Detection (VAD)"', route_ui)
         self.assertIn("function routeUsesHub", route_ui)
         self.assertIn("The Hub detects when speech ends; this Tater keeps a local fallback", route_ui)
 
     def test_vad_spud_link_route_controls_effective_backend(self) -> None:
-        model_source = (ROOT / "spud_link_models.py").read_text(encoding="utf-8")
+        model_source = (ROOT / 'tater/spudlink/models.py').read_text(encoding="utf-8")
         self.assertIn('"vad",', model_source[model_source.index("MODEL_KINDS = (") : model_source.index("ROUTE_CHOICES")])
         self.assertIn('spud_link_should_use_hub("vad"', PIPELINE_SOURCE)
         self.assertIn('spud_link_route_for("vad"', PIPELINE_SOURCE)
         self.assertIn('"local_backend": local_vad_backend', PIPELINE_SOURCE)
 
     def test_hub_stream_can_run_endpointing_without_duplicate_stt(self) -> None:
-        source = (ROOT / "tateros_app.py").read_text(encoding="utf-8")
+        source = (ROOT / 'tater/web/application.py').read_text(encoding="utf-8")
         self.assertIn('transcribe_stream = _ws_query_bool("transcribe", True)', source)
         self.assertIn('"endpointing_only": True', source)
 

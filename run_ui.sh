@@ -61,7 +61,7 @@ fi
 printf '%s\n' "Tater WebSocket transport: wsproto"
 
 set -- \
-  "${TATER_PYTHON}" -m uvicorn tateros_app:app \
+  "${TATER_PYTHON}" -m uvicorn tater.web.application:app \
   --host "${HTMLUI_HOST}" \
   --port "${HTMLUI_PORT}" \
   --ws wsproto \

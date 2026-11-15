@@ -319,6 +319,14 @@ The selector appears only when the satellite advertises support for it.
 - Thinking suppression is enabled by default for local providers when supported.
 - `run_ui.sh` starts Uvicorn with `--no-access-log` to suppress per-request log spam. Shutdown waits at most eight seconds for long-lived WebSocket and event-stream connections before cancelling them, so a stale satellite or browser connection cannot block a restart. Set `HTMLUI_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS` to override that connection-drain deadline.
 
+## Development layout
+
+Python implementations are grouped by feature under `tater/`, alongside the
+existing Hydra, voice, notification, and Spudex packages. Small root forwarding
+modules preserve the import names used by installed Cores, Portals, and Verbas.
+See [Python application layout](docs/python_layout.md) for the package map,
+compatibility rules, and validation commands.
+
 ## License and trademarks
 
 This project is licensed under the [GNU Affero General Public License v3.0](LICENSE).

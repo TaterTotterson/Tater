@@ -17,13 +17,15 @@ import httpx
 from pydantic import BaseModel, Field
 from scripts import test_spudex_runtime as fixtures
 from spudex import runner, settings, workspace, terminal
+from tater.web import schemas
 
 
 def route_app(redis, llm_factory):
     app = FastAPI()
     scope = dict(globals(), app=app, redis_client=redis, get_llm_client_from_env=llm_factory,
                  logger=logging.getLogger(__name__), _spudex_platform_options=lambda *_: [])
-    tree = ast.parse((Path(__file__).resolve().parents[1] / 'tateros_app.py').read_text())
+    scope.update({name: value for name, value in vars(schemas).items() if name.startswith('Spudex') and name.endswith('Request')})
+    tree = ast.parse((Path(__file__).resolve().parents[1] / 'tater/web/application.py').read_text())
     nodes = []
     for node in tree.body:
         if isinstance(node, ast.ClassDef) and node.name.startswith('Spudex') and node.name.endswith('Request'):

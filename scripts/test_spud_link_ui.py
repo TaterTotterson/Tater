@@ -8,7 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 class SpudLinkUiTests(unittest.TestCase):
     def test_pairing_flows_are_separate_and_role_bound(self):
         app = (ROOT / "frontend" / "src" / "settings" / "components" / "SpudLinkSettings.vue").read_text(encoding="utf-8")
-        backend = (ROOT / "tateros_app.py").read_text(encoding="utf-8")
+        backend = (ROOT / 'tater/web/application.py').read_text(encoding="utf-8")
 
         self.assertIn("startPairing('little_spud')", app)
         self.assertIn("startPairing('spudlet')", app)
@@ -28,7 +28,7 @@ class SpudLinkUiTests(unittest.TestCase):
 
     def test_tater_open_webui_has_a_scoped_spudlink_role(self):
         app = (ROOT / "frontend" / "src" / "settings" / "components" / "SpudLinkSettings.vue").read_text(encoding="utf-8")
-        backend = (ROOT / "tateros_app.py").read_text(encoding="utf-8")
+        backend = (ROOT / 'tater/web/application.py').read_text(encoding="utf-8")
 
         self.assertIn('SPUD_LINK_MODE_TATER_OPEN_WEBUI = "tater_open_webui"', backend)
         self.assertIn('"tater_open_webui": "Tater Open WebUI"', backend)
@@ -36,7 +36,7 @@ class SpudLinkUiTests(unittest.TestCase):
         self.assertIn('@app.get("/api/spudlink/v1/tater-open-webui/status")', backend)
         self.assertIn('@app.get("/api/spudlink/v1/tater-open-webui/identity")', backend)
         self.assertIn('@app.post("/api/spudlink/v1/tater-open-webui/identity")', backend)
-        self.assertIn('"tater_open_webui"', (ROOT / "people.py").read_text(encoding="utf-8"))
+        self.assertIn('"tater_open_webui"', (ROOT / 'tater/identity/people.py').read_text(encoding="utf-8"))
         self.assertIn('"hydra_tools_enabled": True', backend)
         self.assertIn('role == SPUD_LINK_MODE_TATER_OPEN_WEBUI', backend)
         self.assertIn('This Tater Open WebUI link is not authorized', backend)
@@ -49,7 +49,7 @@ class SpudLinkUiTests(unittest.TestCase):
 
     def test_spud_link_has_clear_subsections_and_hub_route_feedback(self):
         app = (ROOT / "frontend" / "src" / "settings" / "components" / "SpudLinkSettings.vue").read_text(encoding="utf-8")
-        backend = (ROOT / "tateros_app.py").read_text(encoding="utf-8")
+        backend = (ROOT / 'tater/web/application.py').read_text(encoding="utf-8")
 
         for tab in ("pair", "spudlet", "settings"):
             self.assertIn(f"activeTab === '{tab}'", app)

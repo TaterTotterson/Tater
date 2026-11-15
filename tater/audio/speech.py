@@ -1,0 +1,3094 @@
+from __future__ import annotations
+
+from tater._compat import expose_legacy as _expose_legacy
+_expose_legacy(__name__)
+
+
+import asyncio
+import base64
+import contextlib
+import hashlib
+import importlib
+import io
+import json
+import logging
+import os
+import re
+import socket
+import threading
+import time
+import uuid
+import wave
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import quote, urlparse
+
+import requests
+
+from announcement_targets import split_announcement_targets
+from helpers import redis_client
+from runtime_executors import run_background, run_tts
+from tater_paths import agent_lab_path
+from managed_tts import clear_managed_tts_workers, synthesize_managed_tts_pcm
+from spud_link_models import allow_local_fallback as spud_link_allow_local_fallback
+from spud_link_models import request_tts_wav_async as spud_link_request_tts_wav_async
+from spud_link_models import should_use_hub as spud_link_should_use_hub
+from tateros import integration_store as integration_store_module
+from speech_settings import (
+    ANNOUNCEMENT_TTS_DIRECT_BACKEND,
+    DEFAULT_ANNOUNCEMENT_TTS_BACKEND,
+    DEFAULT_OPENAI_COMPATIBLE_TTS_API_KEY,
+    DEFAULT_OPENAI_COMPATIBLE_TTS_BASE_URL,
+    DEFAULT_OPENAI_COMPATIBLE_TTS_MODEL,
+    DEFAULT_OPENAI_COMPATIBLE_TTS_VOICE,
+    DEFAULT_POCKET_TTS_MODEL,
+    DEFAULT_TTS_BACKEND,
+    DEFAULT_WYOMING_TTS_HOST,
+    DEFAULT_WYOMING_TTS_PORT,
+    DEFAULT_WYOMING_TTS_VOICE,
+    get_speech_settings,
+    normalize_announcement_tts_backend,
+    normalize_speech_acceleration,
+)
+
+SONOS_DEFAULT_PLAY_TIMEOUT_SECONDS = 30.0
+DEFAULT_UNIFI_PROTECT_AUDIO_TIMEOUT_SECONDS = 90.0
+
+
+def _integration_function(integration_id: str, function_name: str):
+    return integration_store_module.integration_function(integration_id, function_name)
+
+
+def ha_call_service_sync(*args, **kwargs):
+    fn = _integration_function("homeassistant", "call_service_sync")
+    if not fn:
+        raise RuntimeError("Home Assistant integration is not enabled.")
+    return fn(*args, **kwargs)
+
+
+def ha_remove_local_media_source_sync(*args, **kwargs):
+    fn = _integration_function("homeassistant", "remove_local_media_source_sync")
+    if not fn:
+        return None
+    return fn(*args, **kwargs)
+
+
+def ha_upload_local_media_source_file_sync(*args, **kwargs):
+    fn = _integration_function("homeassistant", "upload_local_media_source_file_sync")
+    if not fn:
+        raise RuntimeError("Home Assistant integration is not enabled.")
+    return fn(*args, **kwargs)
+
+
+def huggingface_environment(overrides: Optional[Dict[str, Any]] = None, client: Any = None) -> Dict[str, Any]:
+    return integration_store_module.huggingface_environment(overrides, client)
+
+
+def sonos_play_media_sync(*args, **kwargs):
+    fn = _integration_function("sonos", "sonos_play_media_sync")
+    if not fn:
+        raise RuntimeError("Sonos integration is not enabled.")
+    return fn(*args, **kwargs)
+
+
+def play_unifi_protect_audio_sync(*args, **kwargs):
+    fn = _integration_function("unifi_protect", "play_unifi_protect_audio_sync")
+    if not fn:
+        raise RuntimeError("UniFi Protect integration is not enabled.")
+    return fn(*args, **kwargs)
+
+try:
+    from wyoming.client import AsyncTcpClient
+    from wyoming.tts import Synthesize
+    from wyoming.audio import AudioStart as WyomingAudioStart, AudioChunk as WyomingAudioChunk, AudioStop as WyomingAudioStop
+    from wyoming.error import Error as WyomingError
+    from wyoming.info import Describe, Info
+    try:
+        from wyoming.tts import SynthesizeVoice
+    except Exception:
+        SynthesizeVoice = None
+    WYOMING_IMPORT_ERROR: Optional[str] = None
+except Exception as exc:  # pragma: no cover - runtime dependency guard
+    AsyncTcpClient = None
+    Synthesize = None
+    SynthesizeVoice = None
+    WyomingAudioStart = None
+    WyomingAudioChunk = None
+    WyomingAudioStop = None
+    WyomingError = None
+    Describe = None
+    Info = None
+    WYOMING_IMPORT_ERROR = str(exc)
+
+try:
+    from pocket_tts import TTSModel as PocketTTSModel
+    POCKET_TTS_IMPORT_ERROR: Optional[str] = None
+except Exception as exc:  # pragma: no cover - runtime dependency guard
+    PocketTTSModel = None
+    POCKET_TTS_IMPORT_ERROR = str(exc)
+
+DEFAULT_TTS_MODEL_ROOT = str(agent_lab_path("models", "tts"))
+DEFAULT_KOKORO_MODEL = "removed"
+DEFAULT_KOKORO_VOICE = ""
+DEFAULT_PIPER_MODEL = "removed"
+DEFAULT_POCKET_TTS_VOICE = ""
+build_kokoro_pipeline = None
+KokoroPipelineConfig = None
+KokoroTokenizerConfig = None
+KokoroTorchPipeline = None
+KOKORO_IMPORT_ERROR = "Kokoro support has been removed."
+KOKORO_TORCH_IMPORT_ERROR = KOKORO_IMPORT_ERROR
+PiperVoice = None
+PiperSynthesisConfig = None
+piper_download_voice = None
+PIPER_IMPORT_ERROR = "Piper support has been removed."
+DEFAULT_KOKORO_ENGINE = "auto"
+DEFAULT_KOKORO_PROVIDER = "cpu"
+DEFAULT_KOKORO_OUTPUT_GAIN = 1.5
+DEFAULT_POCKET_TTS_OUTPUT_GAIN = 1.5
+DEFAULT_KOKORO_TORCH_REPO_ID = "hexgrad/Kokoro-82M"
+DEFAULT_KOKORO_TORCH_ZH_REPO_ID = "hexgrad/Kokoro-82M-v1.1-zh"
+DEFAULT_OPENAI_COMPATIBLE_TTS_TIMEOUT_SECONDS = 90.0
+DEFAULT_WYOMING_TIMEOUT_SECONDS = 45.0
+DEFAULT_PIPER_SENTENCE_PAUSE_SECONDS = 0.24
+DEFAULT_PIPER_PARAGRAPH_PAUSE_SECONDS = 0.46
+DEFAULT_PIPER_TAIL_PAD_SECONDS = 0.18
+DEFAULT_VOICE_CORE_PLAY_TIMEOUT_SECONDS = 180.0
+_PIPER_ABBREVIATIONS = {
+    "dr",
+    "mr",
+    "mrs",
+    "ms",
+    "prof",
+    "sr",
+    "jr",
+    "st",
+    "vs",
+    "etc",
+    "e.g",
+    "i.e",
+}
+
+_kokoro_pipeline_cache: Dict[Tuple[str, ...], Any] = {}
+_kokoro_pipeline_lock = threading.Lock()
+_pocket_tts_model_cache: Dict[str, Any] = {}
+_pocket_tts_model_lock = threading.Lock()
+_pocket_tts_voice_state_cache: Dict[Tuple[str, str], Any] = {}
+_pocket_tts_runtime_lock = threading.Lock()
+_POCKET_TTS_VOICE_STATE_CACHE_LIMIT = 8
+_piper_voice_cache: Dict[str, Any] = {}
+_piper_voice_lock = threading.Lock()
+_kokoro_ssmd_patch_applied = False
+_runtime_tts_assets: Dict[str, Dict[str, Any]] = {}
+_runtime_tts_assets_lock = threading.Lock()
+logger = logging.getLogger("speech_tts")
+RUNTIME_TTS_ASSET_TTL_SECONDS = 15 * 60.0
+ANNOUNCEMENT_TTS_CACHE_SCHEMA = 1
+ANNOUNCEMENT_TTS_CACHE_MAX_ITEMS = 256
+ANNOUNCEMENT_TTS_CACHE_MAX_BYTES = 256 * 1024 * 1024
+ANNOUNCEMENT_TTS_CACHE_MAX_AGE_SECONDS = 30 * 24 * 60 * 60
+ANNOUNCEMENT_TTS_CACHE_ROOT = agent_lab_path("cache", "announcement_tts")
+_announcement_tts_cache_lock = threading.RLock()
+_announcement_tts_clone_digest_cache: Dict[Tuple[str, int, int], str] = {}
+
+
+def clear_tts_model_caches(*, include_piper: bool = True) -> Dict[str, int]:
+    cleared: Dict[str, int] = {}
+    with _kokoro_pipeline_lock:
+        cleared["kokoro"] = len(_kokoro_pipeline_cache)
+        _kokoro_pipeline_cache.clear()
+    with _pocket_tts_model_lock:
+        cleared["pocket_tts"] = len(_pocket_tts_model_cache)
+        _pocket_tts_model_cache.clear()
+        _pocket_tts_voice_state_cache.clear()
+    if include_piper:
+        with _piper_voice_lock:
+            cleared["piper"] = len(_piper_voice_cache)
+            _piper_voice_cache.clear()
+    cleared.update(clear_managed_tts_workers())
+    return cleared
+
+
+def _cuda_runtime_available() -> bool:
+    with contextlib.suppress(Exception):
+        ctranslate2_mod = importlib.import_module("ctranslate2")
+        if int(getattr(ctranslate2_mod, "get_cuda_device_count")()) > 0:
+            return True
+    with contextlib.suppress(Exception):
+        torch_mod = importlib.import_module("torch")
+        cuda_mod = getattr(torch_mod, "cuda", None)
+        if cuda_mod is not None and bool(cuda_mod.is_available()) and not _torch_has_rocm(torch_mod):
+            return True
+    return False
+
+
+def _torch_has_rocm(torch_mod: Any) -> bool:
+    version = getattr(torch_mod, "version", None)
+    return bool(getattr(version, "hip", None))
+
+
+def _onnx_cuda_available() -> bool:
+    with contextlib.suppress(Exception):
+        ort_mod = importlib.import_module("onnxruntime")
+        providers = set(getattr(ort_mod, "get_available_providers")() or [])
+        return "CUDAExecutionProvider" in providers
+    return False
+
+
+def _torch_cuda_available() -> bool:
+    with contextlib.suppress(Exception):
+        torch_mod = importlib.import_module("torch")
+        cuda_mod = getattr(torch_mod, "cuda", None)
+        return cuda_mod is not None and bool(cuda_mod.is_available()) and not _torch_has_rocm(torch_mod)
+    return False
+
+
+def _torch_rocm_available() -> bool:
+    with contextlib.suppress(Exception):
+        torch_mod = importlib.import_module("torch")
+        cuda_mod = getattr(torch_mod, "cuda", None)
+        return cuda_mod is not None and bool(cuda_mod.is_available()) and _torch_has_rocm(torch_mod)
+    return False
+
+
+def _mps_runtime_available() -> bool:
+    with contextlib.suppress(Exception):
+        torch_mod = importlib.import_module("torch")
+        backends = getattr(torch_mod, "backends", None)
+        mps = getattr(backends, "mps", None)
+        if mps is not None and bool(mps.is_available()):
+            return True
+    return False
+
+
+def _effective_speech_acceleration(override: Any = None) -> str:
+    selected = normalize_speech_acceleration(override)
+    if selected == "auto" and override in (None, ""):
+        with contextlib.suppress(Exception):
+            selected = normalize_speech_acceleration(get_speech_settings().get("acceleration"))
+    if selected != "auto":
+        if selected == "cuda":
+            return "cuda" if _cuda_runtime_available() else "cpu"
+        if selected == "rocm":
+            return "rocm" if _torch_rocm_available() else "cpu"
+        if selected == "mps":
+            return "mps" if _mps_runtime_available() else "cpu"
+        return selected
+
+    env_selected = normalize_speech_acceleration(
+        os.getenv("TATER_SPEECH_ACCELERATION") or os.getenv("TATER_VOICE_ACCELERATION")
+    )
+    if env_selected != "auto":
+        if env_selected == "cuda":
+            return "cuda" if _cuda_runtime_available() else "cpu"
+        if env_selected == "rocm":
+            return "rocm" if _torch_rocm_available() else "cpu"
+        if env_selected == "mps":
+            return "mps" if _mps_runtime_available() else "cpu"
+        return env_selected
+    if _cuda_runtime_available():
+        return "cuda"
+    if _torch_rocm_available():
+        return "rocm"
+    if _mps_runtime_available():
+        return "mps"
+    return "cpu"
+
+
+def _kokoro_engine(acceleration: Any = None) -> str:
+    env_engine = _text(os.getenv("TATER_KOKORO_ENGINE") or os.getenv("TATER_KOKORO_RUNTIME")).lower().replace("-", "_")
+    env_provider = _text(os.getenv("TATER_KOKORO_PROVIDER")).lower().replace("-", "_")
+    token = env_engine or env_provider
+    if token in {"torch", "pytorch"}:
+        return "torch"
+    if token in {"rocm", "amd", "amd_rocm"}:
+        return "torch"
+    if token in {"onnx", "pykokoro", "onnxruntime", "cpu", "cuda", "gpu", "nvidia", "nvidia_cuda"}:
+        return "onnx"
+
+    effective = _effective_speech_acceleration(acceleration)
+    if effective in {"mps", "rocm"} and KokoroTorchPipeline is not None:
+        return "torch"
+    return "onnx"
+
+
+def _kokoro_torch_device(acceleration: Any = None) -> str:
+    effective = _effective_speech_acceleration(acceleration)
+    if effective == "cuda" and _torch_cuda_available():
+        return "cuda"
+    if effective == "rocm" and _torch_rocm_available():
+        return "cuda"
+    if effective == "mps" and _mps_runtime_available():
+        return "mps"
+    return "cpu"
+
+
+def _kokoro_provider(acceleration: Any = None) -> str:
+    if _kokoro_engine(acceleration) == "torch":
+        return f"torch:{_kokoro_torch_device(acceleration)}"
+    env_provider = _text(os.getenv("TATER_KOKORO_PROVIDER")).lower().replace("-", "_")
+    if env_provider in {"cuda", "gpu", "nvidia", "nvidia_cuda"}:
+        return "cuda"
+    if env_provider in {"cpu", "none", "off"}:
+        return "cpu"
+    return "cuda" if _effective_speech_acceleration(acceleration) == "cuda" and _onnx_cuda_available() else DEFAULT_KOKORO_PROVIDER
+
+
+HOMEASSISTANT_MEDIA_SOURCE_TARGET = "media-source://media_source/local/tater_announcements"
+HOMEASSISTANT_MEDIA_SOURCE_CLEANUP_SECONDS = 15 * 60.0
+
+
+def _text(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _main_app_port() -> int:
+    raw = _text(os.getenv("HTMLUI_PORT") or "8501") or "8501"
+    try:
+        port = int(raw)
+    except Exception:
+        port = 8501
+    if port < 1 or port > 65535:
+        port = 8501
+    return int(port)
+
+
+def _cleanup_runtime_tts_assets_locked(*, now_ts: Optional[float] = None) -> int:
+    now = float(now_ts if isinstance(now_ts, (int, float)) else time.time())
+    removed = 0
+    for asset_id, row in list(_runtime_tts_assets.items()):
+        if not isinstance(row, dict):
+            _runtime_tts_assets.pop(asset_id, None)
+            removed += 1
+            continue
+        expires_ts = _as_float(row.get("expires_ts"), 0.0)
+        if expires_ts > 0 and now >= expires_ts:
+            _runtime_tts_assets.pop(asset_id, None)
+            removed += 1
+    return removed
+
+
+def store_runtime_tts_wav(
+    wav_bytes: bytes,
+    *,
+    content_type: str = "audio/wav",
+    ttl_s: float = RUNTIME_TTS_ASSET_TTL_SECONDS,
+) -> str:
+    payload = bytes(wav_bytes or b"")
+    if not payload:
+        return ""
+
+    asset_id = uuid.uuid4().hex
+    expires_ts = time.time() + max(30.0, float(ttl_s))
+    with _runtime_tts_assets_lock:
+        _cleanup_runtime_tts_assets_locked()
+        _runtime_tts_assets[asset_id] = {
+            "bytes": payload,
+            "content_type": _text(content_type) or "audio/wav",
+            "expires_ts": expires_ts,
+        }
+    return asset_id
+
+
+def get_runtime_tts_wav(asset_id: Any) -> Optional[Dict[str, Any]]:
+    token = _text(asset_id)
+    if not token:
+        return None
+
+    with _runtime_tts_assets_lock:
+        _cleanup_runtime_tts_assets_locked()
+        row = _runtime_tts_assets.get(token)
+        if not isinstance(row, dict):
+            return None
+        return {
+            "bytes": bytes(row.get("bytes") or b""),
+            "content_type": _text(row.get("content_type") or "audio/wav"),
+            "expires_ts": _as_float(row.get("expires_ts"), 0.0),
+        }
+
+
+def _service_base_url_for_peer(peer_base: Any = "") -> str:
+    preferred = _text(os.getenv("VOICE_CORE_PUBLIC_HOST")).rstrip("/")
+    if preferred:
+        if preferred.startswith(("http://", "https://")):
+            return preferred
+        return f"http://{preferred}:{_main_app_port()}"
+
+    htmlui_host = _text(os.getenv("HTMLUI_HOST", "0.0.0.0"))
+    if htmlui_host and htmlui_host not in {"0.0.0.0", "::", "127.0.0.1", "localhost"}:
+        return f"http://{htmlui_host}:{_main_app_port()}"
+
+    parsed = urlparse(_text(peer_base))
+    peer_host = _text(parsed.hostname)
+    targets = [peer_host] if peer_host and not peer_host.startswith("127.") else []
+    targets.append("8.8.8.8")
+
+    for target in targets:
+        with contextlib.suppress(Exception):
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+                probe.connect((target, 80))
+                host = _text(probe.getsockname()[0])
+                if host and not host.startswith("127."):
+                    return f"http://{host}:{_main_app_port()}"
+
+    with contextlib.suppress(Exception):
+        host = _text(socket.gethostbyname(socket.gethostname()))
+        if host and not host.startswith("127."):
+            return f"http://{host}:{_main_app_port()}"
+
+    return f"http://127.0.0.1:{_main_app_port()}"
+
+
+def build_runtime_tts_asset_url(asset_id: Any, *, peer_base: Any = "", filename: Any = "") -> str:
+    token = _text(asset_id)
+    if not token:
+        raise RuntimeError("Runtime TTS asset id is required.")
+    base = _service_base_url_for_peer(peer_base).rstrip("/")
+    safe_filename = Path(_text(filename)).name
+    if safe_filename:
+        return f"{base}/api/speech/tts/runtime/{token}/{quote(safe_filename)}"
+    return f"{base}/api/speech/tts/runtime/{token}.wav"
+
+
+def _schedule_homeassistant_media_cleanup(
+    *,
+    base_url: str,
+    token: str,
+    media_content_id: str,
+    delay_s: float = HOMEASSISTANT_MEDIA_SOURCE_CLEANUP_SECONDS,
+) -> None:
+    clean_base = _text(base_url).rstrip("/")
+    bearer = _text(token)
+    media_id = _text(media_content_id)
+    if not clean_base or not bearer or not media_id:
+        return
+
+    def _cleanup() -> None:
+        try:
+            ha_remove_local_media_source_sync(
+                clean_base,
+                bearer,
+                media_content_id=media_id,
+                timeout_s=20.0,
+            )
+            logger.info("[speech_tts] HA media cleanup removed media_content_id=%s", media_id)
+        except Exception as exc:
+            logger.warning("[speech_tts] HA media cleanup failed media_content_id=%s error=%s", media_id, exc)
+
+    timer = threading.Timer(max(30.0, float(delay_s or 0.0)), _cleanup)
+    timer.daemon = True
+    timer.start()
+
+
+def normalize_tts_backend(value: Any) -> str:
+    token = _text(value).lower().replace("-", "_").replace(" ", "_")
+    if token in {"", "default"}:
+        return DEFAULT_TTS_BACKEND
+    if token == "wyoming":
+        return "wyoming"
+    if token in {"openai_compatible", "openai", "openai_api"}:
+        return "openai_compatible"
+    if token in {"kokoro", "piper"}:
+        return "pocket_tts"
+    if token in {"pocket_tts", "pockettts", "pocket"}:
+        return "pocket_tts"
+    if token in {"qwen", "qwen_tts", "qwen3", "qwen3tts", "qwen3_tts"}:
+        return "qwen3_tts"
+    if token in {"omni", "omni_voice", "omnivoice", "omnivoice_tts"}:
+        return "omnivoice"
+    return DEFAULT_TTS_BACKEND
+
+
+def _as_int(value: Any, default: int, *, minimum: Optional[int] = None, maximum: Optional[int] = None) -> int:
+    try:
+        out = int(float(value))
+    except Exception:
+        out = int(default)
+    if minimum is not None:
+        out = max(minimum, out)
+    if maximum is not None:
+        out = min(maximum, out)
+    return out
+
+
+def _as_float(value: Any, default: float, *, minimum: Optional[float] = None) -> float:
+    try:
+        out = float(value)
+    except Exception:
+        out = float(default)
+    if minimum is not None:
+        out = max(float(minimum), out)
+    return out
+
+
+def _announcement_tts_clone_audio_identity(value: Any) -> str:
+    token = _text(value)
+    if not token:
+        return ""
+    path = Path(token).expanduser()
+    if path.is_file():
+        try:
+            stat = path.stat()
+            cache_identity = (str(path.resolve()), int(stat.st_size), int(stat.st_mtime_ns))
+            with _announcement_tts_cache_lock:
+                cached_digest = _announcement_tts_clone_digest_cache.get(cache_identity)
+            if cached_digest:
+                return cached_digest
+            digest = hashlib.sha256()
+            with path.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            digest_value = digest.hexdigest()
+            with _announcement_tts_cache_lock:
+                _announcement_tts_clone_digest_cache[cache_identity] = digest_value
+                while len(_announcement_tts_clone_digest_cache) > 16:
+                    _announcement_tts_clone_digest_cache.pop(next(iter(_announcement_tts_clone_digest_cache)), None)
+            return digest_value
+        except Exception:
+            pass
+    return hashlib.sha256(token.encode("utf-8", errors="replace")).hexdigest()
+
+
+def _announcement_tts_cache_key(*, text: Any, **voice_settings: Any) -> str:
+    profile = dict(voice_settings)
+    api_key = _text(profile.pop("openai_api_key", ""))
+    clone_audio = profile.pop("clone_audio", None)
+    profile["openai_api_key_sha256"] = (
+        hashlib.sha256(api_key.encode("utf-8", errors="replace")).hexdigest() if api_key else ""
+    )
+    profile["clone_audio_sha256"] = _announcement_tts_clone_audio_identity(clone_audio)
+    payload = {
+        "schema": ANNOUNCEMENT_TTS_CACHE_SCHEMA,
+        "text": _text(text),
+        "voice": {
+            str(key): value
+            if value is None or isinstance(value, (str, int, float, bool))
+            else _text(value)
+            for key, value in sorted(profile.items())
+        },
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _announcement_tts_cache_path(cache_key: Any) -> Path:
+    token = re.sub(r"[^a-f0-9]", "", _text(cache_key).lower())[:64]
+    return Path(ANNOUNCEMENT_TTS_CACHE_ROOT) / f"{token}.wav"
+
+
+def _is_wav_bytes(payload: Any) -> bool:
+    data = bytes(payload or b"")
+    return len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WAVE"
+
+
+def _announcement_tts_cache_read(cache_key: Any) -> Optional[bytes]:
+    path = _announcement_tts_cache_path(cache_key)
+    if not path.is_file():
+        return None
+    with _announcement_tts_cache_lock:
+        try:
+            if time.time() - path.stat().st_mtime > ANNOUNCEMENT_TTS_CACHE_MAX_AGE_SECONDS:
+                path.unlink(missing_ok=True)
+                return None
+            payload = path.read_bytes()
+            if not _is_wav_bytes(payload):
+                path.unlink(missing_ok=True)
+                return None
+            os.utime(path, None)
+            return payload
+        except Exception:
+            return None
+
+
+def _cleanup_announcement_tts_cache_locked() -> Dict[str, int]:
+    root = Path(ANNOUNCEMENT_TTS_CACHE_ROOT)
+    if not root.is_dir():
+        return {"removed": 0, "items": 0, "bytes": 0}
+
+    now = time.time()
+    rows: list[Tuple[Path, float, int]] = []
+    removed = 0
+    for path in root.glob("*.wav"):
+        try:
+            stat = path.stat()
+            if now - stat.st_mtime > ANNOUNCEMENT_TTS_CACHE_MAX_AGE_SECONDS:
+                path.unlink(missing_ok=True)
+                removed += 1
+                continue
+            rows.append((path, float(stat.st_mtime), int(stat.st_size)))
+        except Exception:
+            continue
+
+    rows.sort(key=lambda row: row[1], reverse=True)
+    keep = rows[:ANNOUNCEMENT_TTS_CACHE_MAX_ITEMS]
+    for row in rows[ANNOUNCEMENT_TTS_CACHE_MAX_ITEMS:]:
+        try:
+            row[0].unlink(missing_ok=True)
+            removed += 1
+        except Exception:
+            keep.append(row)
+
+    total_bytes = sum(row[2] for row in keep)
+    while keep and total_bytes > ANNOUNCEMENT_TTS_CACHE_MAX_BYTES:
+        row = keep.pop()
+        try:
+            row[0].unlink(missing_ok=True)
+            total_bytes -= row[2]
+            removed += 1
+        except Exception:
+            keep.append(row)
+            break
+    return {"removed": removed, "items": len(keep), "bytes": max(0, total_bytes)}
+
+
+def _announcement_tts_cache_write(cache_key: Any, wav_bytes: bytes) -> bool:
+    payload = bytes(wav_bytes or b"")
+    if not _is_wav_bytes(payload):
+        return False
+    path = _announcement_tts_cache_path(cache_key)
+    with _announcement_tts_cache_lock:
+        temp_path: Optional[Path] = None
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temp_path = path.parent / f".{path.stem}.{uuid.uuid4().hex}.tmp"
+            temp_path.write_bytes(payload)
+            os.replace(temp_path, path)
+            _cleanup_announcement_tts_cache_locked()
+            return True
+        except Exception as exc:
+            logger.debug("[speech_tts] announcement cache write skipped: %s", exc)
+            if temp_path is not None:
+                with contextlib.suppress(Exception):
+                    temp_path.unlink(missing_ok=True)
+            return False
+
+
+def _tts_output_gain(env_name: str, settings_key: str, default: float, override: Any = None) -> float:
+    env_value = os.getenv(env_name)
+    if env_value is not None and _text(env_value):
+        return min(4.0, _as_float(env_value, default, minimum=0.1))
+    if override is not None and _text(override):
+        return min(4.0, _as_float(override, default, minimum=0.1))
+    with contextlib.suppress(Exception):
+        settings = get_speech_settings() or {}
+        return min(4.0, _as_float(settings.get(settings_key), default, minimum=0.1))
+    return min(4.0, _as_float(default, default, minimum=0.1))
+
+
+def _kokoro_output_gain(override: Any = None) -> float:
+    return _tts_output_gain("TATER_KOKORO_OUTPUT_GAIN", "kokoro_output_gain", DEFAULT_KOKORO_OUTPUT_GAIN, override)
+
+
+def _pocket_tts_output_gain(override: Any = None) -> float:
+    return _tts_output_gain(
+        "TATER_POCKET_TTS_OUTPUT_GAIN",
+        "pocket_tts_output_gain",
+        DEFAULT_POCKET_TTS_OUTPUT_GAIN,
+        override,
+    )
+
+
+def _append_pcm_silence(audio_bytes: bytes, audio_format: Dict[str, Any], *, seconds: float) -> bytes:
+    pcm = bytes(audio_bytes or b"")
+    if seconds <= 0:
+        return pcm
+    rate = _as_int(audio_format.get("rate"), 24000, minimum=1)
+    width = _as_int(audio_format.get("width"), 2, minimum=1, maximum=4)
+    channels = _as_int(audio_format.get("channels"), 1, minimum=1, maximum=8)
+    frame_bytes = max(1, width * channels)
+    silence_frames = max(1, int(round(rate * float(seconds))))
+    return pcm + (b"\x00" * (silence_frames * frame_bytes))
+
+
+def _split_piper_sentences(text: str) -> list[str]:
+    prompt = _text(text)
+    if not prompt:
+        return []
+    parts: list[str] = []
+    start = 0
+    length = len(prompt)
+    i = 0
+    while i < length:
+        ch = prompt[i]
+        if ch not in ".!?":
+            i += 1
+            continue
+        if i + 1 < length and prompt[i + 1] in ".!?":
+            i += 1
+            continue
+        if ch == "." and i > 0 and i + 1 < length and prompt[i - 1].isdigit() and prompt[i + 1].isdigit():
+            i += 1
+            continue
+        j = i - 1
+        while j >= start and (prompt[j].isalnum() or prompt[j] in "_-"):
+            j -= 1
+        token = prompt[j + 1 : i].lower()
+        if ch == "." and (token in _PIPER_ABBREVIATIONS or (len(token) == 1 and token.isalpha())):
+            i += 1
+            continue
+        k = i + 1
+        while k < length and prompt[k] in "\"'”’)]}":
+            k += 1
+        if k < length and not prompt[k].isspace():
+            i += 1
+            continue
+        segment = prompt[start:k].strip()
+        if segment:
+            parts.append(segment)
+        while k < length and prompt[k].isspace():
+            k += 1
+        start = k
+        i = k
+    tail = prompt[start:].strip()
+    if tail:
+        parts.append(tail)
+    return parts
+
+
+def _build_piper_segment_plan(text: str) -> list[tuple[str, float]]:
+    normalized = re.sub(r"\r\n?", "\n", _text(text))
+    paragraphs = [part.strip() for part in re.split(r"\n\s*\n+", normalized) if _text(part)]
+    if not paragraphs:
+        return []
+    plan: list[tuple[str, float]] = []
+    for paragraph_index, paragraph in enumerate(paragraphs):
+        sentences = _split_piper_sentences(paragraph)
+        if not sentences:
+            continue
+        last_sentence_index = len(sentences) - 1
+        last_paragraph_index = len(paragraphs) - 1
+        for sentence_index, sentence in enumerate(sentences):
+            pause_seconds = 0.0
+            if sentence_index < last_sentence_index:
+                pause_seconds = DEFAULT_PIPER_SENTENCE_PAUSE_SECONDS
+            elif paragraph_index < last_paragraph_index:
+                pause_seconds = DEFAULT_PIPER_PARAGRAPH_PAUSE_SECONDS
+            plan.append((sentence, pause_seconds))
+    return plan
+
+
+def _synthesize_piper_segment_sync(voice: Any, prompt: str) -> Tuple[bytes, Dict[str, Any]]:
+    audio_out = bytearray()
+    sample_rate = 22050
+    sample_width = 2
+    sample_channels = 1
+    syn_config = PiperSynthesisConfig()
+    for chunk in voice.synthesize(prompt, syn_config=syn_config):
+        audio_out.extend(chunk.audio_int16_bytes)
+        sample_rate = int(getattr(chunk, "sample_rate", sample_rate) or sample_rate)
+        sample_width = int(getattr(chunk, "sample_width", sample_width) or sample_width)
+        sample_channels = int(getattr(chunk, "sample_channels", sample_channels) or sample_channels)
+    return bytes(audio_out), {"rate": sample_rate, "width": sample_width, "channels": sample_channels}
+
+
+def _tts_model_root() -> str:
+    return os.path.expanduser(DEFAULT_TTS_MODEL_ROOT)
+
+
+def _ensure_tts_model_root() -> str:
+    root = _tts_model_root()
+    with contextlib.suppress(Exception):
+        os.makedirs(root, exist_ok=True)
+    return root
+
+
+def _tts_backend_model_root(backend: str) -> str:
+    base = _ensure_tts_model_root()
+    token = normalize_tts_backend(backend)
+    dirname_map = {
+        "kokoro": "kokoro",
+        "pocket_tts": "pocket-tts",
+        "piper": "piper",
+        "openai_compatible": "openai-compatible",
+        "wyoming": "wyoming",
+    }
+    dirname = dirname_map.get(token, token or DEFAULT_TTS_BACKEND)
+    return os.path.join(base, dirname)
+
+
+def _ensure_tts_backend_model_root(backend: str) -> str:
+    root = _tts_backend_model_root(backend)
+    with contextlib.suppress(Exception):
+        os.makedirs(root, exist_ok=True)
+    return root
+
+
+def _voice_core_base_url() -> str:
+    return f"http://127.0.0.1:{_main_app_port()}"
+
+
+def _voice_core_auth_headers() -> Dict[str, str]:
+    with contextlib.suppress(Exception):
+        settings = redis_client.hgetall("voice_core_settings") or {}
+        if isinstance(settings, dict):
+            enabled = str(settings.get("API_AUTH_ENABLED") or "").strip().lower()
+            token = _text(settings.get("API_AUTH_KEY"))
+            auth_enabled = enabled in {"1", "true", "yes", "on"} or (bool(token) and enabled == "")
+            if auth_enabled and token:
+                return {"X-Tater-Token": token}
+    return {}
+
+
+def _patch_kokoro_ssmd_parser() -> None:
+    global _kokoro_ssmd_patch_applied
+    if _kokoro_ssmd_patch_applied:
+        return
+    try:
+        ssmd_parser_mod = importlib.import_module("pykokoro.ssmd_parser")
+        ssmd_doc_parser_mod = importlib.import_module("pykokoro.stages.doc_parsers.ssmd")
+    except Exception:
+        return
+
+    original = getattr(ssmd_parser_mod, "parse_ssmd_to_segments", None)
+    if not callable(original):
+        return
+    if getattr(original, "_tater_forces_no_spacy", False):
+        _kokoro_ssmd_patch_applied = True
+        return
+
+    def _wrapped_parse_ssmd_to_segments(*args, **kwargs):
+        wrapped_kwargs = dict(kwargs or {})
+        wrapped_kwargs["use_spacy"] = False
+        wrapped_kwargs.setdefault("model_size", "sm")
+        return original(*args, **wrapped_kwargs)
+
+    setattr(_wrapped_parse_ssmd_to_segments, "_tater_forces_no_spacy", True)
+    setattr(ssmd_parser_mod, "parse_ssmd_to_segments", _wrapped_parse_ssmd_to_segments)
+    setattr(ssmd_doc_parser_mod, "parse_ssmd_to_segments", _wrapped_parse_ssmd_to_segments)
+    _kokoro_ssmd_patch_applied = True
+
+
+def _float_audio_to_pcm16_bytes(audio: Any, *, gain: float = 1.0) -> bytes:
+    np_mod = importlib.import_module("numpy")
+    array = np_mod.asarray(audio, dtype=np_mod.float32)
+    if array.ndim > 1:
+        array = np_mod.squeeze(array)
+    if array.ndim > 1:
+        array = array.reshape(-1)
+    if not array.size:
+        return b""
+    array = np_mod.nan_to_num(array, nan=0.0, posinf=1.0, neginf=-1.0)
+    factor = min(4.0, _as_float(gain, 1.0, minimum=0.0))
+    if factor != 1.0:
+        array = array * factor
+    array = np_mod.clip(array, -0.98, 0.98)
+    return (array * 32767.0).astype(np_mod.int16).tobytes()
+
+
+@contextlib.contextmanager
+def _temporary_env(overrides: Dict[str, Any]):
+    previous: Dict[str, Optional[str]] = {}
+    try:
+        for key, value in overrides.items():
+            previous[key] = os.environ.get(key)
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = _text(value)
+        yield
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+def _native_wyoming_timeout_s() -> float:
+    return float(DEFAULT_WYOMING_TIMEOUT_SECONDS)
+
+
+def _openai_compatible_tts_timeout_s() -> float:
+    return float(DEFAULT_OPENAI_COMPATIBLE_TTS_TIMEOUT_SECONDS)
+
+
+def _looks_like_wav_bytes(payload: bytes) -> bool:
+    raw = bytes(payload or b"")
+    return len(raw) >= 12 and raw[:4] == b"RIFF" and raw[8:12] == b"WAVE"
+
+
+def _openai_compatible_tts_endpoint(base_url: Any) -> str:
+    base = _text(base_url).rstrip("/")
+    if not base:
+        return ""
+    if base.endswith("/v1/audio/speech"):
+        return base
+    if base.endswith("/v1/models"):
+        return f"{base.rsplit('/', 1)[0]}/audio/speech"
+    if base.endswith("/models") and not base.endswith("/v1/models"):
+        root = _openai_compatible_tts_service_root(base)
+        return f"{root}/v1/audio/speech" if root else ""
+    if base.endswith("/v1"):
+        return f"{base}/audio/speech"
+    return f"{base}/v1/audio/speech"
+
+
+def _openai_compatible_tts_voices_endpoint(base_url: Any) -> str:
+    base = _text(base_url).rstrip("/")
+    if not base:
+        return ""
+    if base.endswith("/v1/audio/voices") or base.endswith("/audio/voices"):
+        return base
+    if base.endswith("/v1/models"):
+        return f"{base.rsplit('/', 1)[0]}/audio/voices"
+    if base.endswith("/models") and not base.endswith("/v1/models"):
+        root = _openai_compatible_tts_service_root(base)
+        return f"{root}/v1/audio/voices" if root else ""
+    if base.endswith("/v1/audio/speech") or base.endswith("/audio/speech"):
+        return f"{base.rsplit('/', 1)[0]}/voices"
+    if base.endswith("/v1"):
+        return f"{base}/audio/voices"
+    return f"{base}/v1/audio/voices"
+
+
+def _openai_compatible_tts_models_endpoint(base_url: Any) -> str:
+    base = _text(base_url).rstrip("/")
+    if not base:
+        return ""
+    if base.endswith("/v1/models"):
+        return base
+    if base.endswith("/models") and not base.endswith("/v1/models"):
+        return base
+    root = _openai_compatible_tts_service_root(base)
+    if not root:
+        return ""
+    return f"{root}/v1/models"
+
+
+def _openai_compatible_tts_service_root(base_url: Any) -> str:
+    base = _text(base_url).rstrip("/")
+    if not base:
+        return ""
+    for suffix in (
+        "/v1/audio/speech",
+        "/v1/audio/voices",
+        "/v1/models",
+        "/audio/speech",
+        "/audio/voices",
+        "/models",
+        "/v1",
+    ):
+        if base.endswith(suffix):
+            trimmed = base[: -len(suffix)].rstrip("/")
+            return trimmed or base
+    return base
+
+
+def _openai_compatible_tts_helper_endpoint(base_url: Any, helper_path: str) -> str:
+    root = _openai_compatible_tts_service_root(base_url)
+    helper = _text(helper_path).strip()
+    if not root or not helper:
+        return ""
+    if not helper.startswith("/"):
+        helper = f"/{helper}"
+    return f"{root}{helper}"
+
+
+def _resolve_openai_compatible_tts_settings(
+    *,
+    base_url: Any = None,
+    api_key: Any = None,
+) -> Tuple[str, str]:
+    resolved_base = _text(base_url) if base_url is not None else ""
+    resolved_key = _text(api_key) if api_key is not None else ""
+    if base_url is not None and api_key is not None:
+        return resolved_base, resolved_key
+    shared = get_speech_settings() or {}
+    if base_url is None:
+        resolved_base = _text(shared.get("openai_tts_base_url")) or DEFAULT_OPENAI_COMPATIBLE_TTS_BASE_URL
+    if api_key is None:
+        resolved_key = _text(shared.get("openai_tts_api_key")) or DEFAULT_OPENAI_COMPATIBLE_TTS_API_KEY
+    return resolved_base, resolved_key
+
+
+def _response_error_text(response: Any) -> str:
+    with contextlib.suppress(Exception):
+        payload = response.json()
+        if isinstance(payload, dict):
+            detail = _text(payload.get("detail"))
+            if detail:
+                return detail
+            error = payload.get("error")
+            if isinstance(error, dict):
+                message = _text(error.get("message"))
+                if message:
+                    return message
+            message = _text(payload.get("message"))
+            if message:
+                return message
+    with contextlib.suppress(Exception):
+        body = _text(response.text)
+        if body:
+            return body[:500]
+    return f"HTTP {int(getattr(response, 'status_code', 0) or 0)}"
+
+
+def _extract_openai_compatible_voice_items(payload: Any) -> List[Any]:
+    if isinstance(payload, list):
+        return list(payload)
+    if isinstance(payload, dict):
+        for key in ("voices", "data", "items", "results"):
+            rows = payload.get(key)
+            if isinstance(rows, list):
+                return list(rows)
+    return []
+
+
+def _extract_openai_compatible_model_items(payload: Any) -> List[Any]:
+    if isinstance(payload, list):
+        return list(payload)
+    if isinstance(payload, dict):
+        for key in ("data", "models", "items", "results"):
+            rows = payload.get(key)
+            if isinstance(rows, list):
+                return list(rows)
+    return []
+
+
+def _normalize_openai_compatible_voice_row(item: Any) -> Optional[Dict[str, str]]:
+    if item is None:
+        return None
+    if isinstance(item, str):
+        value = _text(item)
+        if not value:
+            return None
+        return {"value": value, "label": value}
+    if isinstance(item, dict):
+        value = (
+            _text(item.get("voice_id"))
+            or _text(item.get("id"))
+            or _text(item.get("value"))
+            or _text(item.get("voice"))
+            or _text(item.get("name"))
+        )
+        name = (
+            _text(item.get("name"))
+            or _text(item.get("display_name"))
+            or _text(item.get("title"))
+            or _text(item.get("label"))
+        )
+        label = _text(item.get("label")) or _text(item.get("display_name")) or _text(item.get("title"))
+        if value and not label:
+            label = f"{name} ({value})" if name and name != value else (name or value)
+        if not value:
+            return None
+        return {"value": value, "label": label or value}
+    value = _text(item)
+    if not value:
+        return None
+    return {"value": value, "label": value}
+
+
+def _normalize_openai_compatible_model_row(item: Any) -> Optional[Dict[str, Any]]:
+    if item is None:
+        return None
+    if isinstance(item, str):
+        value = _text(item)
+        if not value:
+            return None
+        return {"value": value, "label": value}
+    if isinstance(item, dict):
+        value = (
+            _text(item.get("id"))
+            or _text(item.get("model"))
+            or _text(item.get("model_id"))
+            or _text(item.get("selector"))
+            or _text(item.get("value"))
+            or _text(item.get("name"))
+            or _text(item.get("repo_id"))
+        )
+        name = (
+            _text(item.get("display_name"))
+            or _text(item.get("name"))
+            or _text(item.get("title"))
+            or _text(item.get("label"))
+            or _text(item.get("repo_id"))
+        )
+        label = _text(item.get("label")) or name or value
+        if not value:
+            return None
+        row: Dict[str, Any] = {"value": value, "label": label or value}
+        voice_rows = _voice_rows_from_items(
+            item.get("voices") if isinstance(item.get("voices"), list) else item.get("available_voices"),
+            default_voice=_text(item.get("default_voice")),
+        )
+        if voice_rows:
+            row["voices"] = voice_rows
+        return row
+    value = _text(item)
+    if not value:
+        return None
+    return {"value": value, "label": value}
+
+
+def _normalize_dia_predefined_voice_row(item: Any) -> Optional[Dict[str, str]]:
+    if not isinstance(item, dict):
+        return None
+    filename = _text(item.get("filename"))
+    display_name = _text(item.get("display_name")) or _text(item.get("name"))
+    if not filename:
+        return None
+    label = f"{display_name} ({filename})" if display_name and display_name != filename else (display_name or filename)
+    return {"value": filename, "label": label}
+
+
+def _normalize_named_string_voice_row(item: Any, *, prefix: str = "") -> Optional[Dict[str, str]]:
+    value = _text(item)
+    if not value:
+        return None
+    label_prefix = _text(prefix)
+    label = f"{label_prefix}: {value}" if label_prefix else value
+    return {"value": value, "label": label}
+
+
+def _voice_rows_from_items(items: Any, *, default_voice: str = "") -> List[Dict[str, str]]:
+    rows: List[Dict[str, str]] = []
+    seen = set()
+    normalized_rows: List[Optional[Dict[str, str]]] = []
+    for item in items if isinstance(items, list) else []:
+        row = _normalize_openai_compatible_voice_row(item)
+        if row and default_voice and _text(row.get("value")) == default_voice:
+            label = _text(row.get("label")) or default_voice
+            if "(default)" not in label.lower():
+                row = {"value": _text(row.get("value")), "label": f"{label} (default)"}
+        normalized_rows.append(row)
+    _append_unique_voice_rows(rows, seen, normalized_rows)
+    if default_voice and default_voice not in seen:
+        rows.append({"value": default_voice, "label": f"{default_voice} (default)"})
+    return rows
+
+
+def _normalize_kitten_voice_rows(payload: Any) -> List[Optional[Dict[str, str]]]:
+    if not isinstance(payload, dict):
+        return []
+    model_info = payload.get("model_info")
+    model_info = model_info if isinstance(model_info, dict) else {}
+    default_voice = _text(payload.get("default_voice")) or _text(model_info.get("default_voice"))
+    voice_items = payload.get("available_voices")
+    if not isinstance(voice_items, list):
+        voice_items = model_info.get("voices")
+    if not isinstance(voice_items, list):
+        voice_items = payload.get("voices")
+    rows: List[Optional[Dict[str, str]]] = []
+    for item in voice_items if isinstance(voice_items, list) else []:
+        row = _normalize_openai_compatible_voice_row(item)
+        if row and default_voice and _text(row.get("value")) == default_voice:
+            label = _text(row.get("label")) or default_voice
+            if "(default)" not in label.lower():
+                row = {"value": _text(row.get("value")), "label": f"{label} (default)"}
+        rows.append(row)
+    if not rows and default_voice:
+        rows.append({"value": default_voice, "label": f"{default_voice} (default)"})
+    return rows
+
+
+def _normalize_kitten_model_registry_rows(payload: Any) -> List[Optional[Dict[str, Any]]]:
+    if not isinstance(payload, dict):
+        return []
+    registry = payload.get("model_registry")
+    if not isinstance(registry, dict):
+        has_registry_shape = any(
+            isinstance(value, dict)
+            and any(key in value for key in ("display_name", "voices", "default_voice", "repo_id"))
+            for value in payload.values()
+        )
+        registry = payload if has_registry_shape else {}
+    rows: List[Optional[Dict[str, Any]]] = []
+    for selector, item in registry.items():
+        if not isinstance(item, dict):
+            rows.append(_normalize_openai_compatible_model_row(selector))
+            continue
+        value = _text(item.get("selector")) or _text(selector)
+        if not value:
+            continue
+        display_name = (
+            _text(item.get("display_name"))
+            or _text(item.get("name"))
+            or _text(item.get("label"))
+            or _text(item.get("repo_id"))
+        )
+        label = display_name or value
+        row: Dict[str, Any] = {"value": value, "label": label}
+        voice_rows = _voice_rows_from_items(item.get("voices"), default_voice=_text(item.get("default_voice")))
+        if voice_rows:
+            row["voices"] = voice_rows
+        default_voice = _text(item.get("default_voice"))
+        if default_voice:
+            row["default_voice"] = default_voice
+        rows.append(row)
+    return rows
+
+
+def _normalize_kitten_model_info_rows(payload: Any) -> List[Optional[Dict[str, Any]]]:
+    if not isinstance(payload, dict):
+        return []
+    model_info = payload.get("model_info")
+    model_info = model_info if isinstance(model_info, dict) else payload
+    value = (
+        _text(payload.get("current_model"))
+        or _text(payload.get("model"))
+        or _text(payload.get("model_id"))
+        or _text(model_info.get("selector"))
+        or _text(model_info.get("model"))
+        or _text(model_info.get("model_id"))
+        or _text(model_info.get("name"))
+        or _text(model_info.get("repo_id"))
+    )
+    if not value:
+        return []
+    label = (
+        _text(model_info.get("display_name"))
+        or _text(model_info.get("name"))
+        or _text(model_info.get("label"))
+        or _text(model_info.get("repo_id"))
+        or value
+    )
+    row: Dict[str, Any] = {"value": value, "label": label}
+    voice_rows = _normalize_kitten_voice_rows(payload)
+    if voice_rows:
+        rows: List[Dict[str, str]] = []
+        seen = set()
+        _append_unique_voice_rows(rows, seen, voice_rows)
+        row["voices"] = rows
+    default_voice = _text(payload.get("default_voice")) or _text(model_info.get("default_voice"))
+    if default_voice:
+        row["default_voice"] = default_voice
+    return [row]
+
+
+def _append_unique_voice_rows(rows: List[Dict[str, str]], seen: set, items: List[Optional[Dict[str, str]]]) -> None:
+    for row in items:
+        value = _text((row or {}).get("value"))
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        rows.append({"value": value, "label": _text((row or {}).get("label")) or value})
+
+
+def _append_unique_model_rows(rows: List[Dict[str, Any]], seen: set, items: List[Optional[Dict[str, Any]]]) -> None:
+    for row in items:
+        value = _text((row or {}).get("value"))
+        if not value:
+            continue
+        if value in seen:
+            existing = next((item for item in rows if _text(item.get("value")) == value), None)
+            if existing is not None and not existing.get("voices") and isinstance((row or {}).get("voices"), list):
+                existing["voices"] = list((row or {}).get("voices") or [])
+            continue
+        seen.add(value)
+        next_row: Dict[str, Any] = {"value": value, "label": _text((row or {}).get("label")) or value}
+        if isinstance((row or {}).get("voices"), list):
+            next_row["voices"] = list((row or {}).get("voices") or [])
+        default_voice = _text((row or {}).get("default_voice"))
+        if default_voice:
+            next_row["default_voice"] = default_voice
+        rows.append(next_row)
+
+
+def _request_openai_compatible_json(endpoint: str, *, headers: Dict[str, str]) -> Any:
+    response = requests.get(
+        endpoint,
+        headers=headers,
+        timeout=_openai_compatible_tts_timeout_s(),
+    )
+    if response.status_code >= 400:
+        raise RuntimeError(f"{response.status_code}: {_response_error_text(response)}")
+    return response.json()
+
+
+def _request_openai_compatible_voice_json(endpoint: str, *, headers: Dict[str, str]) -> Any:
+    return _request_openai_compatible_json(endpoint, headers=headers)
+
+
+def _collect_voice_rows_from_endpoint(
+    endpoint: str,
+    *,
+    headers: Dict[str, str],
+    normalizer: Any,
+) -> Tuple[List[Dict[str, str]], str]:
+    if not endpoint:
+        return [], ""
+    try:
+        payload = _request_openai_compatible_voice_json(endpoint, headers=headers)
+    except Exception as exc:
+        return [], str(exc) or "Voice probe failed."
+    rows: List[Dict[str, str]] = []
+    seen = set()
+    _append_unique_voice_rows(rows, seen, normalizer(payload))
+    return rows, ""
+
+
+def _collect_model_rows_from_endpoint(
+    endpoint: str,
+    *,
+    headers: Dict[str, str],
+    normalizer: Any,
+) -> Tuple[List[Dict[str, Any]], str]:
+    if not endpoint:
+        return [], ""
+    try:
+        payload = _request_openai_compatible_json(endpoint, headers=headers)
+    except Exception as exc:
+        return [], str(exc) or "Model probe failed."
+    rows: List[Dict[str, Any]] = []
+    seen = set()
+    _append_unique_model_rows(rows, seen, normalizer(payload))
+    return rows, ""
+
+
+def _voice_selection_to_value(selection: Dict[str, Any]) -> str:
+    payload = {
+        "name": _text(selection.get("name")),
+        "language": _text(selection.get("language")),
+        "speaker": _text(selection.get("speaker")),
+    }
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
+def _voice_selection_from_value(raw: Any) -> Dict[str, str]:
+    if isinstance(raw, dict):
+        source = raw
+    else:
+        token = _text(raw)
+        if not token:
+            return {}
+        source = None
+        with contextlib.suppress(Exception):
+            parsed = json.loads(token)
+            if isinstance(parsed, dict):
+                source = parsed
+        if source is None:
+            # Backward compatibility for settings that stored only a voice name.
+            return {"name": token}
+
+    selection = {
+        "name": _text(source.get("name")),
+        "language": _text(source.get("language")),
+        "speaker": _text(source.get("speaker")),
+    }
+    return {key: value for key, value in selection.items() if value}
+
+
+def _voice_selection_label(selection: Dict[str, Any]) -> str:
+    name = _text(selection.get("name"))
+    language = _text(selection.get("language"))
+    speaker = _text(selection.get("speaker"))
+    parts = [part for part in [name, language, speaker] if part]
+    return " • ".join(parts) or "Default"
+
+
+def _wyoming_synthesize_event(text: str, voice_value: Any):
+    selected_voice = _voice_selection_from_value(voice_value)
+    if selected_voice and SynthesizeVoice is not None:
+        return Synthesize(
+            text=text,
+            voice=SynthesizeVoice(
+                name=_text(selected_voice.get("name")) or None,
+                language=_text(selected_voice.get("language")) or None,
+                speaker=_text(selected_voice.get("speaker")) or None,
+            ),
+        ).event()
+    if selected_voice:
+        with contextlib.suppress(Exception):
+            return Synthesize(text=text, voice=selected_voice).event()
+    return Synthesize(text=text).event()
+
+
+async def fetch_wyoming_tts_voice_options(
+    *,
+    host: str,
+    port: Any,
+    current_value: Any = "",
+) -> Dict[str, Any]:
+    if AsyncTcpClient is None or Describe is None or Info is None or WyomingError is None:
+        raise RuntimeError(f"Wyoming describe dependency unavailable: {WYOMING_IMPORT_ERROR or 'unknown import error'}")
+
+    resolved_host = _text(host) or DEFAULT_WYOMING_TTS_HOST
+    resolved_port = _as_int(port, DEFAULT_WYOMING_TTS_PORT, minimum=1, maximum=65535)
+    timeout = _native_wyoming_timeout_s()
+
+    info_obj = None
+    async with AsyncTcpClient(resolved_host, resolved_port) as client:
+        await asyncio.wait_for(client.write_event(Describe().event()), timeout=timeout)
+        while True:
+            event = await asyncio.wait_for(client.read_event(), timeout=timeout)
+            if event is None:
+                break
+            if WyomingError.is_type(event.type):
+                err = WyomingError.from_event(event)
+                raise RuntimeError(f"Wyoming TTS describe error: {err.text} ({err.code or 'unknown'})")
+            if Info.is_type(event.type):
+                info_obj = Info.from_event(event)
+                break
+
+    if info_obj is None:
+        raise RuntimeError("Wyoming TTS did not return info after describe.")
+
+    rows = [{"value": "", "label": "Default"}]
+    seen = {""}
+    tts_programs = getattr(info_obj, "tts", None)
+    if not isinstance(tts_programs, list):
+        tts_programs = []
+
+    for program in tts_programs:
+        program_name = _text(getattr(program, "name", None))
+        voice_rows = getattr(program, "voices", None)
+        if not isinstance(voice_rows, list):
+            continue
+        for voice in voice_rows:
+            voice_name = _text(getattr(voice, "name", None))
+            languages = [_text(item) for item in (getattr(voice, "languages", None) or []) if _text(item)]
+            speakers = getattr(voice, "speakers", None)
+            speaker_rows = speakers if isinstance(speakers, list) else []
+
+            if speaker_rows:
+                for speaker in speaker_rows:
+                    selection = {
+                        "name": voice_name,
+                        "language": _text(languages[0]) if languages else "",
+                        "speaker": _text(getattr(speaker, "name", None)),
+                    }
+                    value = _voice_selection_to_value(selection)
+                    if not value or value in seen:
+                        continue
+                    seen.add(value)
+                    label = _voice_selection_label(selection)
+                    if program_name:
+                        label = f"{label} • {program_name}"
+                    rows.append({"value": value, "label": label})
+                continue
+
+            selection = {
+                "name": voice_name,
+                "language": _text(languages[0]) if languages else "",
+                "speaker": "",
+            }
+            value = _voice_selection_to_value(selection)
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            label = _voice_selection_label(selection)
+            if program_name:
+                label = f"{label} • {program_name}"
+            rows.append({"value": value, "label": label})
+
+    rows = [rows[0]] + sorted(rows[1:], key=lambda row: _text(row.get("label")).lower())
+    current = _text(current_value)
+    if current and current not in seen:
+        rows.append({"value": current, "label": f"{current} (saved)"})
+    return {"host": resolved_host, "port": resolved_port, "voices": rows, "count": max(0, len(rows) - 1)}
+
+
+def _fetch_openai_compatible_tts_model_options_sync(
+    *,
+    base_url: str,
+    api_key: str,
+) -> Dict[str, Any]:
+    primary_endpoint = _openai_compatible_tts_models_endpoint(base_url)
+    service_root = _openai_compatible_tts_service_root(base_url)
+    if not primary_endpoint:
+        raise RuntimeError("OpenAI-compatible TTS base URL is required.")
+
+    headers = {"Accept": "application/json"}
+    bearer = _text(api_key)
+    if bearer:
+        headers["Authorization"] = f"Bearer {bearer}"
+
+    rows: List[Dict[str, Any]] = []
+    seen = set()
+    endpoints_tried: List[str] = []
+    last_error = ""
+    source = ""
+
+    def run_probe(endpoint: str, normalizer: Any) -> List[Dict[str, Any]]:
+        nonlocal last_error
+        if endpoint:
+            endpoints_tried.append(endpoint)
+        probe_rows, error_text = _collect_model_rows_from_endpoint(
+            endpoint,
+            headers=headers,
+            normalizer=normalizer,
+        )
+        if error_text:
+            last_error = error_text or last_error
+        return probe_rows
+
+    def merge_probe_rows(probe_rows: List[Dict[str, Any]], next_source: str) -> None:
+        nonlocal source
+        before_count = len(rows)
+        _append_unique_model_rows(rows, seen, probe_rows)
+        if len(rows) > before_count or any(isinstance((row or {}).get("voices"), list) for row in probe_rows):
+            source = f"{source}+{next_source}" if source and next_source not in source else next_source
+
+    merge_probe_rows(
+        run_probe(
+            primary_endpoint,
+            lambda payload: [
+                _normalize_openai_compatible_model_row(item)
+                for item in _extract_openai_compatible_model_items(payload)
+            ],
+        ),
+        "openai-compatible",
+    )
+
+    # Kitten exposes model-to-voice mapping in helper endpoints; merge it even
+    # when /v1/models exists so the UI can filter voices by selected model.
+    kitten_registry_endpoint = _openai_compatible_tts_helper_endpoint(service_root, "/api/model-registry")
+    merge_probe_rows(run_probe(kitten_registry_endpoint, _normalize_kitten_model_registry_rows), "kitten-registry")
+
+    if not any(isinstance(row.get("voices"), list) and row.get("voices") for row in rows):
+        kitten_initial_data_endpoint = _openai_compatible_tts_helper_endpoint(service_root, "/api/ui/initial-data")
+        merge_probe_rows(run_probe(kitten_initial_data_endpoint, _normalize_kitten_model_registry_rows), "kitten-ui")
+
+    if not rows or not any(isinstance(row.get("voices"), list) and row.get("voices") for row in rows):
+        kitten_model_info_endpoint = _openai_compatible_tts_helper_endpoint(service_root, "/api/model-info")
+        merge_probe_rows(run_probe(kitten_model_info_endpoint, _normalize_kitten_model_info_rows), "kitten-model-info")
+
+    rows.sort(key=lambda row: _text(row.get("label")).lower())
+    model_rows: List[Dict[str, str]] = []
+    voices_by_model: Dict[str, List[Dict[str, str]]] = {}
+    for row in rows:
+        value = _text(row.get("value"))
+        if not value:
+            continue
+        model_rows.append({"value": value, "label": _text(row.get("label")) or value})
+        voice_rows = row.get("voices")
+        if isinstance(voice_rows, list) and voice_rows:
+            compact_voices: List[Dict[str, str]] = []
+            seen_voices = set()
+            _append_unique_voice_rows(compact_voices, seen_voices, voice_rows)
+            if compact_voices:
+                voices_by_model[value] = compact_voices
+
+    return {
+        "base_url": _text(base_url),
+        "endpoint": primary_endpoint,
+        "service_root": service_root,
+        "source": source or "openai-compatible",
+        "models": model_rows,
+        "voices_by_model": voices_by_model,
+        "count": len(model_rows),
+        "endpoints_tried": endpoints_tried,
+        "error": "" if model_rows else last_error,
+    }
+
+
+async def fetch_openai_compatible_tts_model_options(
+    *,
+    base_url: Any = None,
+    api_key: Any = None,
+) -> Dict[str, Any]:
+    resolved_base_url, resolved_api_key = _resolve_openai_compatible_tts_settings(
+        base_url=base_url,
+        api_key=api_key,
+    )
+    return await run_background(
+        _fetch_openai_compatible_tts_model_options_sync,
+        base_url=resolved_base_url,
+        api_key=resolved_api_key,
+    )
+
+
+def _fetch_openai_compatible_tts_voice_options_sync(
+    *,
+    base_url: str,
+    api_key: str,
+) -> Dict[str, Any]:
+    primary_endpoint = _openai_compatible_tts_voices_endpoint(base_url)
+    service_root = _openai_compatible_tts_service_root(base_url)
+    if not primary_endpoint:
+        raise RuntimeError("OpenAI-compatible TTS base URL is required.")
+
+    headers = {"Accept": "application/json"}
+    bearer = _text(api_key)
+    if bearer:
+        headers["Authorization"] = f"Bearer {bearer}"
+
+    rows: List[Dict[str, str]] = []
+    endpoints_tried: List[str] = []
+    last_error = ""
+    source = ""
+
+    def run_probe(endpoint: str, normalizer: Any) -> List[Dict[str, str]]:
+        nonlocal last_error
+        if endpoint:
+            endpoints_tried.append(endpoint)
+        probe_rows, error_text = _collect_voice_rows_from_endpoint(
+            endpoint,
+            headers=headers,
+            normalizer=normalizer,
+        )
+        if error_text:
+            last_error = error_text or last_error
+        return probe_rows
+
+    # Standard OpenAI-compatible discovery.
+    rows = run_probe(
+        primary_endpoint,
+        lambda payload: [_normalize_openai_compatible_voice_row(item) for item in _extract_openai_compatible_voice_items(payload)],
+    )
+    if rows:
+        source = "openai-compatible"
+
+    # Dia compatibility helpers.
+    if not rows:
+        dia_rows: List[Dict[str, str]] = []
+        dia_seen = set()
+        dia_predefined_endpoint = _openai_compatible_tts_helper_endpoint(service_root, "/get_predefined_voices")
+        _append_unique_voice_rows(
+            dia_rows,
+            dia_seen,
+            run_probe(
+                dia_predefined_endpoint,
+                lambda payload: [
+                    _normalize_dia_predefined_voice_row(item)
+                    for item in (payload if isinstance(payload, list) else [])
+                ],
+            ),
+        )
+        dia_reference_endpoint = _openai_compatible_tts_helper_endpoint(service_root, "/get_reference_files")
+        _append_unique_voice_rows(
+            dia_rows,
+            dia_seen,
+            run_probe(
+                dia_reference_endpoint,
+                lambda payload: [
+                    _normalize_named_string_voice_row(item, prefix="Reference")
+                    for item in (payload if isinstance(payload, list) else [])
+                ],
+            ),
+        )
+        if dia_rows:
+            _append_unique_voice_rows(
+                dia_rows,
+                dia_seen,
+                [
+                    {"value": "dialogue", "label": "Dia Dialogue"},
+                    {"value": "S1", "label": "Dia Speaker 1"},
+                    {"value": "S2", "label": "Dia Speaker 2"},
+                ],
+            )
+            rows = dia_rows
+            source = "dia-compatible"
+
+    # Kitten compatibility helpers.
+    if not rows:
+        kitten_initial_data_endpoint = _openai_compatible_tts_helper_endpoint(service_root, "/api/ui/initial-data")
+        rows = run_probe(kitten_initial_data_endpoint, _normalize_kitten_voice_rows)
+        if rows:
+            source = "kitten-ui"
+    if not rows:
+        kitten_model_info_endpoint = _openai_compatible_tts_helper_endpoint(service_root, "/api/model-info")
+        rows = run_probe(kitten_model_info_endpoint, _normalize_kitten_voice_rows)
+        if rows:
+            source = "kitten-model-info"
+
+    if rows:
+        rows.sort(key=lambda row: _text(row.get("label")).lower())
+        return {
+            "base_url": _text(base_url),
+            "endpoint": primary_endpoint,
+            "service_root": service_root,
+            "source": source or "openai-compatible",
+            "voices": rows,
+            "count": len(rows),
+            "endpoints_tried": endpoints_tried,
+        }
+
+    detail = last_error or "OpenAI-compatible TTS server did not report voices."
+    raise RuntimeError(detail)
+
+
+async def fetch_openai_compatible_tts_voice_options(
+    *,
+    base_url: Any = None,
+    api_key: Any = None,
+) -> Dict[str, Any]:
+    resolved_base_url, resolved_api_key = _resolve_openai_compatible_tts_settings(
+        base_url=base_url,
+        api_key=api_key,
+    )
+    return await run_background(
+        _fetch_openai_compatible_tts_voice_options_sync,
+        base_url=resolved_base_url,
+        api_key=resolved_api_key,
+    )
+
+
+async def _wyoming_synthesize(
+    text: str,
+    *,
+    host: str,
+    port: int,
+    voice_name: str = "",
+) -> Tuple[bytes, Dict[str, Any]]:
+    if (
+        AsyncTcpClient is None
+        or Synthesize is None
+        or WyomingAudioStart is None
+        or WyomingAudioChunk is None
+        or WyomingAudioStop is None
+        or WyomingError is None
+    ):
+        raise RuntimeError(f"Wyoming client dependency unavailable: {WYOMING_IMPORT_ERROR or 'unknown import error'}")
+
+    prompt = _text(text)
+    if not prompt:
+        return b"", {}
+
+    timeout = _native_wyoming_timeout_s()
+    synth_event = _wyoming_synthesize_event(prompt, voice_name)
+
+    audio_out = bytearray()
+    audio_format: Dict[str, Any] = {}
+    saw_start = False
+
+    async with AsyncTcpClient(host, port) as client:
+        await asyncio.wait_for(client.write_event(synth_event), timeout=timeout)
+        while True:
+            event = await asyncio.wait_for(client.read_event(), timeout=timeout)
+            if event is None:
+                break
+            if WyomingAudioStart.is_type(event.type):
+                start = WyomingAudioStart.from_event(event)
+                saw_start = True
+                audio_format = {"rate": start.rate, "width": start.width, "channels": start.channels}
+                continue
+            if WyomingAudioChunk.is_type(event.type):
+                chunk = WyomingAudioChunk.from_event(event)
+                audio_out.extend(chunk.audio or b"")
+                continue
+            if WyomingAudioStop.is_type(event.type):
+                break
+            if WyomingError.is_type(event.type):
+                err = WyomingError.from_event(event)
+                raise RuntimeError(f"Wyoming TTS error: {err.text} ({err.code or 'unknown'})")
+
+    if not saw_start:
+        raise RuntimeError("Wyoming TTS did not emit audio-start")
+    return bytes(audio_out), audio_format
+
+
+def _synthesize_openai_compatible_tts_wav_sync(
+    text: str,
+    *,
+    model: str,
+    voice: str,
+    base_url: str,
+    api_key: str,
+) -> bytes:
+    prompt = _text(text)
+    if not prompt:
+        return b""
+
+    endpoint = _openai_compatible_tts_endpoint(base_url)
+    if not endpoint:
+        raise RuntimeError("OpenAI-compatible TTS base URL is required.")
+
+    headers = {"Content-Type": "application/json"}
+    bearer = _text(api_key)
+    if bearer:
+        headers["Authorization"] = f"Bearer {bearer}"
+
+    payload = {
+        "model": _text(model) or DEFAULT_OPENAI_COMPATIBLE_TTS_MODEL,
+        "input": prompt,
+        "voice": _text(voice) or DEFAULT_OPENAI_COMPATIBLE_TTS_VOICE,
+        "response_format": "wav",
+    }
+
+    response = requests.post(
+        endpoint,
+        json=payload,
+        headers=headers,
+        timeout=_openai_compatible_tts_timeout_s(),
+    )
+    if response.status_code >= 400:
+        raise RuntimeError(f"OpenAI-compatible TTS request failed: {_response_error_text(response)}")
+    wav_bytes = bytes(response.content or b"")
+    if not wav_bytes:
+        raise RuntimeError("OpenAI-compatible TTS returned no audio.")
+    if not _looks_like_wav_bytes(wav_bytes):
+        raise RuntimeError("OpenAI-compatible TTS did not return WAV audio.")
+    return wav_bytes
+
+
+def _load_kokoro_pipeline(model_id: str, acceleration: Any = None, voice: Optional[str] = None) -> Any:
+    model_token = _text(model_id) or DEFAULT_KOKORO_MODEL
+    variant, _, quality = model_token.partition(":")
+    variant = variant or "v1.0"
+    quality = quality or "q8"
+    engine = _kokoro_engine(acceleration)
+    if engine == "torch":
+        if KokoroTorchPipeline is None:
+            raise RuntimeError(f"kokoro torch dependency unavailable: {KOKORO_TORCH_IMPORT_ERROR or 'unknown import error'}")
+        selected_voice = _text(voice) or DEFAULT_KOKORO_VOICE
+        lang_code = selected_voice[0:1].lower() or "a"
+        device = _kokoro_torch_device(acceleration)
+        repo_id = DEFAULT_KOKORO_TORCH_ZH_REPO_ID if variant.startswith("v1.1-zh") else DEFAULT_KOKORO_TORCH_REPO_ID
+        key = ("torch", repo_id, lang_code, device)
+
+        with _kokoro_pipeline_lock:
+            pipeline = _kokoro_pipeline_cache.get(key)
+            if pipeline is None:
+                root = _ensure_tts_backend_model_root("kokoro_torch")
+                logger.info("[speech_tts] kokoro model source=%s model=%s engine=torch device=%s repo=%s", root, model_token, device, repo_id)
+                env = huggingface_environment(
+                    {
+                        "HF_HOME": root,
+                        "HF_HUB_CACHE": os.path.join(root, "hub"),
+                        "HUGGINGFACE_HUB_CACHE": os.path.join(root, "hub"),
+                    }
+                )
+                if device == "mps":
+                    env["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
+                with _temporary_env(env):
+                    pipeline = KokoroTorchPipeline(lang_code=lang_code, repo_id=repo_id, device=device)
+                _kokoro_pipeline_cache[key] = pipeline
+            return pipeline
+
+    if build_kokoro_pipeline is None or KokoroPipelineConfig is None:
+        raise RuntimeError(f"kokoro dependency unavailable: {KOKORO_IMPORT_ERROR or 'unknown import error'}")
+
+    provider = _kokoro_provider(acceleration)
+    key = ("onnx", variant, quality, provider)
+
+    with _kokoro_pipeline_lock:
+        pipeline = _kokoro_pipeline_cache.get(key)
+        if pipeline is None:
+            root = _ensure_tts_backend_model_root("kokoro")
+            onnx_backend_mod = importlib.import_module("pykokoro.onnx_backend")
+            _patch_kokoro_ssmd_parser()
+
+            def _kokoro_cache_path(folder: Optional[str] = None):
+                base = root
+                if folder:
+                    base = os.path.join(base, folder)
+                os.makedirs(base, exist_ok=True)
+                return Path(base)
+
+            setattr(onnx_backend_mod, "get_user_cache_path", _kokoro_cache_path)
+            cfg = KokoroPipelineConfig(
+                voice=DEFAULT_KOKORO_VOICE,
+                model_source="huggingface",
+                model_variant=variant,
+                model_quality=quality,
+                provider=provider,
+                tokenizer_config=(
+                    KokoroTokenizerConfig(use_spacy=False)
+                    if KokoroTokenizerConfig is not None
+                    else None
+                ),
+            )
+            logger.info("[speech_tts] kokoro model source=%s model=%s provider=%s", root, model_token, provider)
+            with _temporary_env(huggingface_environment()):
+                pipeline = build_kokoro_pipeline(config=cfg, eager=True)
+            _kokoro_pipeline_cache[key] = pipeline
+        return pipeline
+
+
+def _pocket_tts_load_model_for_token(token: str) -> Any:
+    model_token = _text(token)
+    if not model_token or model_token.lower() in {"default", DEFAULT_POCKET_TTS_MODEL.lower()}:
+        return PocketTTSModel.load_model()
+
+    expanded = os.path.expanduser(model_token)
+    if expanded.lower().endswith((".yaml", ".yml")):
+        return PocketTTSModel.load_model(config=expanded)
+
+    try:
+        return PocketTTSModel.load_model(model_token)
+    except Exception as exc:
+        message = str(exc)
+        if "Config should be a path" in message:
+            raise RuntimeError(
+                "PocketTTS model config must be a local .yaml file. "
+                "Use the built-in PocketTTS model option unless you are providing a custom YAML config path."
+            ) from exc
+        raise
+
+
+def _load_pocket_tts_model(model_id: str) -> Any:
+    if PocketTTSModel is None:
+        raise RuntimeError(f"pocket-tts dependency unavailable: {POCKET_TTS_IMPORT_ERROR or 'unknown import error'}")
+    token = _text(model_id) or DEFAULT_POCKET_TTS_MODEL
+    with _pocket_tts_model_lock:
+        model = _pocket_tts_model_cache.get(token)
+        if model is None:
+            root = _ensure_tts_backend_model_root("pocket_tts")
+            hf_root = os.path.join(root, "hf")
+            os.makedirs(hf_root, exist_ok=True)
+            with _temporary_env(
+                huggingface_environment(
+                    {
+                        "HF_HOME": hf_root,
+                        "HF_HUB_CACHE": os.path.join(hf_root, "hub"),
+                        "HUGGINGFACE_HUB_CACHE": os.path.join(hf_root, "hub"),
+                    }
+                )
+            ):
+                model = _pocket_tts_load_model_for_token(token)
+            _pocket_tts_model_cache[token] = model
+        return model
+
+
+def _piper_model_paths(model_id: str) -> Tuple[str, str]:
+    root = _ensure_tts_backend_model_root("piper")
+    token = _text(model_id) or DEFAULT_PIPER_MODEL
+    return os.path.join(root, f"{token}.onnx"), os.path.join(root, f"{token}.onnx.json")
+
+
+def _load_piper_voice_model(model_id: str) -> Any:
+    if PiperVoice is None or PiperSynthesisConfig is None or piper_download_voice is None:
+        raise RuntimeError(f"piper dependency unavailable: {PIPER_IMPORT_ERROR or 'unknown import error'}")
+    model_path, config_path = _piper_model_paths(model_id)
+    backend_root = _ensure_tts_backend_model_root("piper")
+    if not (os.path.isfile(model_path) and os.path.isfile(config_path)):
+        with _temporary_env(huggingface_environment()):
+            piper_download_voice(_text(model_id) or DEFAULT_PIPER_MODEL, download_dir=Path(backend_root))
+    cache_key = _text(model_path)
+    with _piper_voice_lock:
+        voice = _piper_voice_cache.get(cache_key)
+        if voice is None:
+            with _temporary_env(huggingface_environment()):
+                voice = PiperVoice.load(model_path=model_path, config_path=config_path, download_dir=backend_root)
+            _piper_voice_cache[cache_key] = voice
+        return voice
+
+
+def _synthesize_kokoro_sync(
+    text: str,
+    model_id: str,
+    voice: str,
+    acceleration: Any = None,
+    output_gain: Any = None,
+) -> Tuple[bytes, Dict[str, Any]]:
+    engine = _kokoro_engine(acceleration)
+    pipeline = _load_kokoro_pipeline(model_id, acceleration=acceleration, voice=voice)
+    if engine == "torch":
+        chunks: List[Any] = []
+        prompt = _text(text)
+        selected_voice = _text(voice) or DEFAULT_KOKORO_VOICE
+        env = {}
+        if _kokoro_torch_device(acceleration) == "mps":
+            env["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
+        with _temporary_env(env):
+            for result in pipeline(prompt, voice=selected_voice, speed=1, split_pattern=r"\n+"):
+                audio = getattr(result, "audio", None)
+                if audio is not None:
+                    chunks.append(audio)
+        if not chunks:
+            return b"", {"rate": 24000, "width": 2, "channels": 1}
+        np_mod = importlib.import_module("numpy")
+        audio = np_mod.concatenate([np_mod.asarray(chunk, dtype=np_mod.float32).reshape(-1) for chunk in chunks])
+        audio_bytes = _float_audio_to_pcm16_bytes(audio, gain=_kokoro_output_gain(output_gain))
+        return audio_bytes, {"rate": 24000, "width": 2, "channels": 1}
+
+    result = pipeline.run(_text(text), voice=_text(voice) or DEFAULT_KOKORO_VOICE)
+    audio_bytes = _float_audio_to_pcm16_bytes(getattr(result, "audio", None), gain=_kokoro_output_gain(output_gain))
+    sample_rate = int(getattr(result, "sample_rate", 24000) or 24000)
+    return audio_bytes, {"rate": sample_rate, "width": 2, "channels": 1}
+
+
+def _synthesize_pocket_tts_sync(text: str, model_id: str, voice: str, output_gain: Any = None) -> Tuple[bytes, Dict[str, Any]]:
+    prompt = _text(text)
+    if not prompt:
+        return b"", {}
+    model = _load_pocket_tts_model(model_id)
+    root = _ensure_tts_backend_model_root("pocket_tts")
+    hf_root = os.path.join(root, "hf")
+    os.makedirs(hf_root, exist_ok=True)
+    selected_voice = _text(voice) or DEFAULT_POCKET_TTS_VOICE
+    env = huggingface_environment(
+        {
+            "HF_HOME": hf_root,
+            "HF_HUB_CACHE": os.path.join(hf_root, "hub"),
+            "HUGGINGFACE_HUB_CACHE": os.path.join(hf_root, "hub"),
+        }
+    )
+    with _pocket_tts_runtime_lock:
+        with _temporary_env(env):
+            model_state = _get_pocket_tts_voice_state(model, model_id, selected_voice)
+            audio_bytes = _generate_pocket_tts_pcm(
+                model,
+                model_state,
+                prompt,
+                gain=_pocket_tts_output_gain(output_gain),
+            )
+    return audio_bytes, {"rate": int(getattr(model, "sample_rate", 24000) or 24000), "width": 2, "channels": 1}
+
+
+def _pocket_tts_voice_cache_key(model_id: str, voice: str) -> Tuple[str, str]:
+    model_token = _text(model_id) or DEFAULT_POCKET_TTS_MODEL
+    voice_token = _text(voice) or DEFAULT_POCKET_TTS_VOICE
+    expanded = os.path.abspath(os.path.expanduser(voice_token))
+    try:
+        stat = os.stat(expanded)
+    except OSError:
+        return model_token, voice_token
+    return model_token, f"file:{expanded}:{stat.st_size}:{stat.st_mtime_ns}"
+
+
+def _get_pocket_tts_voice_state(model: Any, model_id: str, voice: str) -> Any:
+    cache_key = _pocket_tts_voice_cache_key(model_id, voice)
+    with _pocket_tts_model_lock:
+        cached = _pocket_tts_voice_state_cache.pop(cache_key, None)
+        if cached is not None:
+            _pocket_tts_voice_state_cache[cache_key] = cached
+            return cached
+
+        state = model.get_state_for_audio_prompt(_text(voice) or DEFAULT_POCKET_TTS_VOICE)
+        _pocket_tts_voice_state_cache[cache_key] = state
+        while len(_pocket_tts_voice_state_cache) > _POCKET_TTS_VOICE_STATE_CACHE_LIMIT:
+            oldest_key = next(iter(_pocket_tts_voice_state_cache))
+            _pocket_tts_voice_state_cache.pop(oldest_key, None)
+        return state
+
+
+def _generate_pocket_tts_pcm(model: Any, model_state: Any, text: str, *, gain: float) -> bytes:
+    stream = getattr(model, "generate_audio_stream", None)
+    if callable(stream):
+        chunks: List[bytes] = []
+        for audio_chunk in stream(model_state, text):
+            tensor = audio_chunk.detach().cpu().squeeze()
+            pcm = _float_audio_to_pcm16_bytes(tensor.numpy(), gain=gain)
+            if pcm:
+                chunks.append(pcm)
+        return b"".join(chunks)
+
+    audio_tensor = model.generate_audio(model_state, text)
+    tensor = audio_tensor.detach().cpu().squeeze()
+    return _float_audio_to_pcm16_bytes(tensor.numpy(), gain=gain)
+
+
+def _synthesize_piper_sync(text: str, model_id: str) -> Tuple[bytes, Dict[str, Any]]:
+    prompt = _text(text)
+    if not prompt:
+        return b"", {}
+    voice = _load_piper_voice_model(model_id)
+    segment_plan = _build_piper_segment_plan(prompt) or [(prompt, 0.0)]
+    audio_parts: list[bytes] = []
+    audio_format: Dict[str, Any] = {"rate": 22050, "width": 2, "channels": 1}
+    for segment_text, pause_seconds in segment_plan:
+        segment_audio, segment_format = _synthesize_piper_segment_sync(voice, segment_text)
+        if segment_audio:
+            audio_parts.append(segment_audio)
+            audio_format = dict(segment_format)
+        if pause_seconds > 0:
+            audio_parts.append(_append_pcm_silence(b"", audio_format, seconds=pause_seconds))
+    padded = _append_pcm_silence(
+        b"".join(audio_parts),
+        audio_format,
+        seconds=DEFAULT_PIPER_TAIL_PAD_SECONDS,
+    )
+    return padded, audio_format
+
+
+def pcm_to_wav(audio_bytes: bytes, audio_format: Dict[str, Any]) -> bytes:
+    pcm = bytes(audio_bytes or b"")
+    if not pcm:
+        return b""
+    sample_rate = _as_int(audio_format.get("rate"), 24000, minimum=1)
+    sample_width = _as_int(audio_format.get("width"), 2, minimum=1)
+    channels = _as_int(audio_format.get("channels"), 1, minimum=1)
+    with io.BytesIO() as buf:
+        with wave.open(buf, "wb") as wavf:
+            wavf.setnchannels(channels)
+            wavf.setsampwidth(sample_width)
+            wavf.setframerate(sample_rate)
+            wavf.writeframes(pcm)
+        return buf.getvalue()
+
+
+async def synthesize_tts_wav(
+    *,
+    text: str,
+    backend: str,
+    model: str = "",
+    voice: str = "",
+    wyoming_host: str = "",
+    wyoming_port: Any = None,
+    wyoming_voice: str = "",
+    openai_base_url: Optional[str] = None,
+    openai_api_key: Optional[str] = None,
+    acceleration: Any = None,
+    kokoro_output_gain: Any = None,
+    pocket_tts_output_gain: Any = None,
+    clone_audio: Any = None,
+    clone_text: Any = None,
+    managed_language: Any = None,
+    managed_instruct: Any = None,
+) -> bytes:
+    selected_backend = normalize_tts_backend(backend)
+    prompt = _text(text)
+    if not prompt:
+        raise RuntimeError("Preview text is required.")
+
+    if spud_link_should_use_hub("tts", redis_conn=redis_client):
+        try:
+            return await spud_link_request_tts_wav_async(text=prompt, redis_conn=redis_client)
+        except Exception:
+            if not spud_link_allow_local_fallback("tts", redis_conn=redis_client):
+                raise
+
+    if selected_backend == "pocket_tts":
+        speech_settings = get_speech_settings()
+        reference_audio = _text(clone_audio) or _text(speech_settings.get("tts_clone_audio"))
+        if not reference_audio:
+            raise RuntimeError("Pocket TTS needs a shared reference voice sample. Upload one in Speech settings.")
+        audio_bytes, audio_format = await run_tts(
+            _synthesize_pocket_tts_sync,
+            prompt,
+            _text(model) or DEFAULT_POCKET_TTS_MODEL,
+            reference_audio,
+            pocket_tts_output_gain,
+        )
+        return pcm_to_wav(audio_bytes, audio_format)
+
+    if selected_backend in {"qwen3_tts", "omnivoice"}:
+        speech_settings = get_speech_settings()
+        prefix = {
+            "qwen3_tts": "qwen_tts",
+            "omnivoice": "omnivoice_tts",
+        }[selected_backend]
+        audio_bytes, audio_format = await run_tts(
+            synthesize_managed_tts_pcm,
+            prompt,
+            backend=selected_backend,
+            model=_text(model),
+            clone_audio=(clone_audio if clone_audio is not None else speech_settings.get("tts_clone_audio")),
+            clone_text=(clone_text if clone_text is not None else speech_settings.get("tts_clone_text")),
+            language=(
+                managed_language if managed_language is not None else speech_settings.get(f"{prefix}_language")
+            ),
+            instruct=(
+                managed_instruct if managed_instruct is not None else speech_settings.get(f"{prefix}_instruct")
+            ),
+            temperature="",
+            exaggeration="",
+            cfg_weight="",
+            seed="",
+            acceleration=acceleration if acceleration is not None else speech_settings.get("acceleration"),
+        )
+        return pcm_to_wav(audio_bytes, audio_format)
+
+    if selected_backend == "openai_compatible":
+        resolved_base_url, resolved_api_key = _resolve_openai_compatible_tts_settings(
+            base_url=openai_base_url,
+            api_key=openai_api_key,
+        )
+        return await run_tts(
+            _synthesize_openai_compatible_tts_wav_sync,
+            prompt,
+            model=_text(model) or DEFAULT_OPENAI_COMPATIBLE_TTS_MODEL,
+            voice=_text(voice) or DEFAULT_OPENAI_COMPATIBLE_TTS_VOICE,
+            base_url=resolved_base_url,
+            api_key=resolved_api_key,
+        )
+
+    audio_bytes, audio_format = await _wyoming_synthesize(
+        prompt,
+        host=_text(wyoming_host) or DEFAULT_WYOMING_TTS_HOST,
+        port=_as_int(wyoming_port, DEFAULT_WYOMING_TTS_PORT, minimum=1, maximum=65535),
+        voice_name=_text(wyoming_voice) or _text(voice) or DEFAULT_WYOMING_TTS_VOICE,
+    )
+    return pcm_to_wav(audio_bytes, audio_format)
+
+
+async def synthesize_preview_wav(
+    *,
+    text: str,
+    backend: str,
+    model: str = "",
+    voice: str = "",
+    wyoming_host: str = "",
+    wyoming_port: Any = None,
+    wyoming_voice: str = "",
+    openai_base_url: Optional[str] = None,
+    openai_api_key: Optional[str] = None,
+    acceleration: Any = None,
+    kokoro_output_gain: Any = None,
+    pocket_tts_output_gain: Any = None,
+    clone_audio: Any = None,
+    clone_text: Any = None,
+    managed_language: Any = None,
+    managed_instruct: Any = None,
+) -> bytes:
+    return await synthesize_tts_wav(
+        text=text,
+        backend=backend,
+        model=model,
+        voice=voice,
+        wyoming_host=wyoming_host,
+        wyoming_port=wyoming_port,
+        wyoming_voice=wyoming_voice,
+        openai_base_url=openai_base_url,
+        openai_api_key=openai_api_key,
+        acceleration=acceleration,
+        kokoro_output_gain=kokoro_output_gain,
+        pocket_tts_output_gain=pocket_tts_output_gain,
+        clone_audio=clone_audio,
+        clone_text=clone_text,
+        managed_language=managed_language,
+        managed_instruct=managed_instruct,
+    )
+
+
+def _voice_core_play_media_sync(
+    *,
+    selectors: list[str],
+    source_url: str,
+    audio_bytes: bytes | None = None,
+    text: str = "",
+    media_type: str = "audio/wav",
+    filename: str = "tts.wav",
+    timeout_s: float = DEFAULT_VOICE_CORE_PLAY_TIMEOUT_SECONDS,
+    tts_kind: str = "",
+    continue_conversation: bool = False,
+    conversation_id: str = "",
+    audio_scene: Optional[Dict[str, Any]] = None,
+    wait_for_completion: bool = False,
+) -> Dict[str, Any]:
+    clean_selectors = [_text(item) for item in list(selectors or []) if _text(item)]
+    if not clean_selectors:
+        return {"ok": False, "sent_count": 0, "error": "No Tater satellites selected."}
+
+    base_url = _voice_core_base_url().rstrip("/")
+    logger.info(
+        "[speech_tts] Tater satellite play start base=%s selectors=%s has_source_url=%s inline_bytes=%s media_type=%s",
+        base_url,
+        len(clean_selectors),
+        bool(_text(source_url)),
+        len(bytes(audio_bytes or b"")) if isinstance(audio_bytes, (bytes, bytearray)) else 0,
+        _text(media_type) or "audio/wav",
+    )
+    payload_template = {
+        "source_url": _text(source_url),
+        "text": _text(text),
+        "media_type": _text(media_type) or "audio/wav",
+        "filename": _text(filename) or "tts.wav",
+        "timeout_s": _as_float(timeout_s, DEFAULT_VOICE_CORE_PLAY_TIMEOUT_SECONDS, minimum=30.0),
+        "respect_reply_playback": False,
+    }
+    if _text(tts_kind):
+        payload_template["tts_kind"] = _text(tts_kind)
+    if continue_conversation:
+        payload_template["continue_conversation"] = True
+        if _text(conversation_id):
+            payload_template["conversation_id"] = _text(conversation_id)
+    if wait_for_completion:
+        payload_template["wait_for_completion"] = True
+    if isinstance(audio_scene, dict) and audio_scene:
+        payload_template["audio_scene"] = dict(audio_scene)
+    if isinstance(audio_bytes, (bytes, bytearray)) and audio_bytes:
+        payload_template["audio_b64"] = base64.b64encode(bytes(audio_bytes)).decode("ascii")
+    failures = []
+    sent_count = 0
+    audio_scene_sent_count = 0
+    audio_scene_fallback_count = 0
+    playback_completed_count = 0
+    audio_scene_warnings: list[str] = []
+    pending_selectors = list(clean_selectors)
+
+    if isinstance(audio_scene, dict) and audio_scene and len(clean_selectors) > 1:
+        group_payload = dict(payload_template)
+        group_payload["selectors"] = list(clean_selectors)
+        try:
+            response = requests.post(
+                f"{base_url}/api/tater/satellite/v1/play-group",
+                json=group_payload,
+                headers=_voice_core_auth_headers(),
+                timeout=(
+                    max(90.0, min(615.0, float(timeout_s or 180.0) + 15.0))
+                    if wait_for_completion
+                    else 90
+                ),
+            )
+            logger.info(
+                "[speech_tts] Tater satellite group announcement attempt selectors=%s status=%s",
+                len(clean_selectors),
+                int(getattr(response, "status_code", 0) or 0),
+            )
+            if response.status_code < 400:
+                response_payload: Dict[str, Any] = {}
+                with contextlib.suppress(Exception):
+                    parsed_response = response.json()
+                    if isinstance(parsed_response, dict):
+                        response_payload = parsed_response
+                raw_played_selectors = response_payload.get("played_selectors")
+                played_selectors = (
+                    [
+                        _text(selector)
+                        for selector in list(raw_played_selectors or [])
+                        if _text(selector)
+                    ]
+                    if isinstance(raw_played_selectors, list)
+                    else list(clean_selectors)
+                )
+                played_selector_set = set(played_selectors)
+                sent_count += len(played_selectors)
+                pending_selectors = [
+                    selector
+                    for selector in clean_selectors
+                    if selector not in played_selector_set
+                ]
+                if bool(response_payload.get("audio_scene_started")):
+                    audio_scene_sent_count += len(played_selectors)
+                else:
+                    audio_scene_fallback_count += len(played_selectors)
+                    fallback_reason = _text(
+                        response_payload.get("audio_scene_fallback_reason")
+                    )
+                    if fallback_reason:
+                        audio_scene_warnings.extend(
+                            f"{selector} ({fallback_reason})"
+                            for selector in played_selectors
+                        )
+                if bool(response_payload.get("playback_completed")):
+                    playback_completed_count += len(played_selectors)
+            else:
+                detail = ""
+                with contextlib.suppress(Exception):
+                    parsed = response.json()
+                    detail = _text(parsed.get("detail"))
+                logger.warning(
+                    "[speech_tts] synchronized group announcement unavailable; "
+                    "using per-destination fallback status=%s error=%s",
+                    int(getattr(response, "status_code", 0) or 0),
+                    detail or "request rejected",
+                )
+        except Exception as exc:
+            logger.warning(
+                "[speech_tts] synchronized group announcement failed; "
+                "using per-destination fallback error=%s",
+                exc,
+            )
+
+    for selector in pending_selectors:
+        payload = dict(payload_template)
+        payload["selector"] = selector
+        try:
+            response = requests.post(
+                f"{base_url}/api/tater/satellite/v1/play",
+                json=payload,
+                headers=_voice_core_auth_headers(),
+                timeout=(
+                    max(90.0, min(615.0, float(timeout_s or 180.0) + 15.0))
+                    if wait_for_completion
+                    else 90
+                ),
+            )
+            logger.info(
+                "[speech_tts] Tater satellite play attempt selector=%s status=%s",
+                selector,
+                int(getattr(response, "status_code", 0) or 0),
+            )
+            if response.status_code < 400:
+                sent_count += 1
+                response_payload: Dict[str, Any] = {}
+                with contextlib.suppress(Exception):
+                    parsed_response = response.json()
+                    if isinstance(parsed_response, dict):
+                        response_payload = parsed_response
+                if bool(response_payload.get("audio_scene_started")):
+                    audio_scene_sent_count += 1
+                elif isinstance(audio_scene, dict) and audio_scene:
+                    audio_scene_fallback_count += 1
+                    fallback_reason = _text(response_payload.get("audio_scene_fallback_reason"))
+                    if fallback_reason:
+                        audio_scene_warnings.append(f"{selector} ({fallback_reason})")
+                if bool(response_payload.get("playback_completed")):
+                    playback_completed_count += 1
+                continue
+            detail = ""
+            with contextlib.suppress(Exception):
+                parsed = response.json()
+                detail = _text(parsed.get("detail"))
+            failures.append(f"{selector} ({detail or f'HTTP {response.status_code}'})")
+        except Exception as exc:
+            logger.warning("[speech_tts] Tater satellite play exception selector=%s error=%s", selector, exc)
+            failures.append(f"{selector} ({exc})")
+
+    if sent_count:
+        result: Dict[str, Any] = {
+            "ok": True,
+            "sent_count": sent_count,
+            "audio_scene_sent_count": audio_scene_sent_count,
+            "audio_scene_fallback_count": audio_scene_fallback_count,
+            "playback_completed_count": playback_completed_count,
+            "playback_completed": bool(sent_count and playback_completed_count == sent_count),
+        }
+        if audio_scene_warnings:
+            result["audio_scene_warnings"] = audio_scene_warnings
+        if failures:
+            result["warnings"] = failures
+        return result
+    return {"ok": False, "sent_count": 0, "error": "; ".join(failures) or "Tater satellite playback failed."}
+
+
+def _homeassistant_play_media_sync(
+    *,
+    base_url: str,
+    token: str,
+    players: list[str],
+    media_content_id: str,
+) -> Dict[str, Any]:
+    clean_base = _text(base_url).rstrip("/")
+    bearer = _text(token)
+    clean_players = [_text(item) for item in list(players or []) if _text(item)]
+    if not clean_players:
+        return {"ok": False, "sent_count": 0, "error": "No Home Assistant media players selected."}
+    if not clean_base or not bearer:
+        return {"ok": False, "sent_count": 0, "error": "Home Assistant base URL or token is missing."}
+    if not _text(media_content_id):
+        return {"ok": False, "sent_count": 0, "error": "Home Assistant media content id is missing."}
+
+    sent_count = 0
+    failures: list[str] = []
+
+    logger.info(
+        "[speech_tts] HA play_media start base=%s players=%s media_content_id=%s",
+        clean_base,
+        clean_players,
+        _text(media_content_id),
+    )
+    for player in clean_players:
+        try:
+            service_data = {
+                "entity_id": player,
+                "media_content_id": _text(media_content_id),
+                "media_content_type": "music",
+                "announce": True,
+            }
+            try:
+                ha_call_service_sync(
+                    clean_base,
+                    bearer,
+                    domain="media_player",
+                    service="play_media",
+                    service_data=service_data,
+                    timeout_s=30.0,
+                )
+            except Exception as announce_exc:
+                fallback_data = dict(service_data)
+                fallback_data.pop("announce", None)
+                logger.info(
+                    "[speech_tts] HA play_media announce retry without announce player=%s error=%s",
+                    player,
+                    announce_exc,
+                )
+                ha_call_service_sync(
+                    clean_base,
+                    bearer,
+                    domain="media_player",
+                    service="play_media",
+                    service_data=fallback_data,
+                    timeout_s=30.0,
+                )
+            logger.info("[speech_tts] HA play_media accepted player=%s", player)
+            sent_count += 1
+        except Exception as exc:
+            logger.warning("[speech_tts] HA play_media failed player=%s error=%s", player, exc)
+            failures.append(f"{player} ({exc})")
+
+    if sent_count:
+        result: Dict[str, Any] = {"ok": True, "sent_count": sent_count}
+        if failures:
+            result["warnings"] = failures
+        return result
+    return {"ok": False, "sent_count": 0, "error": "; ".join(failures) or "Home Assistant playback failed."}
+
+
+def _integration_device_playback_action(integration_id: str, device_id: str) -> str:
+    try:
+        from integration_registry import get_integration_devices_by_capability
+
+        devices = get_integration_devices_by_capability("media_player", redis_client)
+    except Exception:
+        devices = []
+    wanted_integration = _text(integration_id).lower()
+    wanted_device = _text(device_id)
+    for row in devices if isinstance(devices, list) else []:
+        if not isinstance(row, dict):
+            continue
+        if _text(row.get("integration_id")).lower() != wanted_integration:
+            continue
+        ids = {
+            _text(row.get("id")),
+            _text(row.get("ref")),
+            _text(row.get("device_id")),
+        }
+        if wanted_device not in ids:
+            continue
+        actions = {_text(value).lower() for value in row.get("actions") or [] if _text(value)}
+        features = {_text(value).lower() for value in row.get("features") or [] if _text(value)}
+        capabilities = {_text(value).lower() for value in row.get("capabilities") or [] if _text(value)}
+        supported = actions | features
+        if "announce" in supported:
+            return "announce"
+        if "play_url" in supported:
+            return "play_url"
+        if "announcement_target" in capabilities and "play_media" in supported:
+            return "play_media"
+    return ""
+
+
+def _runtime_audio_source_url(
+    audio: bytes,
+    *,
+    content_type: str,
+    filename: str,
+    public_base_url: str = "",
+) -> str:
+    asset_id = store_runtime_tts_wav(audio, content_type=content_type)
+    if not asset_id:
+        raise RuntimeError("failed to store reply audio")
+    if _text(public_base_url):
+        return f"{_text(public_base_url).rstrip('/')}/api/speech/tts/runtime/{asset_id}/{quote(filename)}"
+    return build_runtime_tts_asset_url(asset_id, filename=filename)
+
+
+def _integration_playback_sync(
+    *,
+    targets: list[Dict[str, str]],
+    source_url: str,
+    media_type: str,
+    timeout_s: float = SONOS_DEFAULT_PLAY_TIMEOUT_SECONDS,
+) -> Dict[str, Any]:
+    clean_targets = [
+        {"integration_id": _text(item.get("integration_id")).lower(), "device_id": _text(item.get("device_id"))}
+        for item in list(targets or [])
+        if isinstance(item, dict) and _text(item.get("integration_id")) and _text(item.get("device_id"))
+    ]
+    if not clean_targets:
+        return {"ok": False, "sent_count": 0, "error": "No integration playback targets selected."}
+    if not _text(source_url):
+        return {"ok": False, "sent_count": 0, "error": "Integration playback URL is missing."}
+
+    from integration_registry import run_integration_device_action
+
+    sent_count = 0
+    failures: list[str] = []
+    for target in clean_targets:
+        integration_id = target["integration_id"]
+        device_id = target["device_id"]
+        action = _integration_device_playback_action(integration_id, device_id)
+        if not action:
+            failures.append(f"{integration_id}:{device_id} (no playback action)")
+            continue
+        try:
+            result = run_integration_device_action(
+                integration_id,
+                action,
+                device_id,
+                {
+                    "source_url": source_url,
+                    "url": source_url,
+                    "media_url": source_url,
+                    "media_content_id": source_url,
+                    "media_content_type": _text(media_type) or "audio/wav",
+                    "timeout_s": timeout_s,
+                },
+            )
+            if isinstance(result, dict) and result.get("ok") is False:
+                failures.append(f"{integration_id}:{device_id} ({_text(result.get('error')) or 'failed'})")
+                continue
+            sent_count += 1
+        except Exception as exc:
+            failures.append(f"{integration_id}:{device_id} ({exc})")
+
+    if sent_count:
+        result: Dict[str, Any] = {"ok": True, "sent_count": sent_count}
+        if failures:
+            result["warnings"] = failures
+        return result
+    return {"ok": False, "sent_count": 0, "error": "; ".join(failures) or "Integration playback failed."}
+
+
+async def speak_announcement_targets(
+    *,
+    text: str,
+    backend: str,
+    ha_base: str,
+    token: str,
+    targets: list[str],
+    public_base_url: str = "",
+    model: str = "",
+    voice: str = "",
+    wyoming_host: str = "",
+    wyoming_port: Any = None,
+    wyoming_voice: str = "",
+    openai_base_url: Optional[str] = None,
+    openai_api_key: Optional[str] = None,
+    acceleration: Any = None,
+    kokoro_output_gain: Any = None,
+    pocket_tts_output_gain: Any = None,
+    clone_audio: Any = None,
+    clone_text: Any = None,
+    managed_language: Any = None,
+    managed_instruct: Any = None,
+    voice_core_backend: str = DEFAULT_TTS_BACKEND,
+    voice_core_model: str = "",
+    voice_core_voice: str = "",
+    voice_core_wyoming_host: str = DEFAULT_WYOMING_TTS_HOST,
+    voice_core_wyoming_port: Any = DEFAULT_WYOMING_TTS_PORT,
+    voice_core_wyoming_voice: str = DEFAULT_WYOMING_TTS_VOICE,
+    default_backend: str = DEFAULT_ANNOUNCEMENT_TTS_BACKEND,
+    tts_kind: str = "",
+    audio_scene: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    prompt = _text(text)
+    if not prompt:
+        raise RuntimeError("TTS text is required.")
+
+    raw_targets = list(targets or [])
+    grouped = split_announcement_targets(targets)
+    homeassistant_players = list(grouped.get("homeassistant_media_players") or [])
+    voice_core_selectors = list(grouped.get("voice_core_selectors") or [])
+    unifi_protect_cameras = list(grouped.get("unifi_protect_cameras") or [])
+    sonos_speakers = list(grouped.get("sonos_speakers") or [])
+    integration_devices = [item for item in list(grouped.get("integration_devices") or []) if isinstance(item, dict)]
+    target_count = (
+        len(homeassistant_players)
+        + len(voice_core_selectors)
+        + len(unifi_protect_cameras)
+        + len(sonos_speakers)
+        + len(integration_devices)
+    )
+    logger.info(
+        "[speech_tts] speak_announcement_targets backend=%s raw_targets=%s ha_players=%s voice_core_selectors=%s unifi_cameras=%s sonos_speakers=%s integration_devices=%s",
+        normalize_announcement_tts_backend(backend, default=default_backend),
+        raw_targets,
+        homeassistant_players,
+        voice_core_selectors,
+        unifi_protect_cameras,
+        sonos_speakers,
+        integration_devices,
+    )
+    if target_count <= 0:
+        return {"ok": False, "sent_count": 0, "error": "No announcement targets selected."}
+
+    selected_backend = normalize_announcement_tts_backend(backend, default=default_backend)
+    shared_speech = get_speech_settings() or {}
+    uses_direct_tts = selected_backend == ANNOUNCEMENT_TTS_DIRECT_BACKEND
+    if uses_direct_tts:
+        selected_backend = normalize_tts_backend(shared_speech.get("tts_backend"))
+        model = _text(shared_speech.get("tts_model"))
+        voice = _text(shared_speech.get("tts_voice"))
+        wyoming_host = _text(shared_speech.get("wyoming_tts_host"))
+        wyoming_port = shared_speech.get("wyoming_tts_port")
+        wyoming_voice = _text(shared_speech.get("wyoming_tts_voice"))
+        openai_base_url = shared_speech.get("openai_tts_base_url")
+        openai_api_key = shared_speech.get("openai_tts_api_key")
+        pocket_tts_output_gain = shared_speech.get("pocket_tts_output_gain")
+        profile_prefix = {
+            "qwen3_tts": "qwen_tts",
+            "omnivoice": "omnivoice_tts",
+        }.get(selected_backend, "")
+    else:
+        model = _text(model) or _text(shared_speech.get("announcement_tts_model"))
+        voice = _text(voice) or _text(shared_speech.get("announcement_tts_voice"))
+        wyoming_host = _text(wyoming_host) or _text(shared_speech.get("announcement_wyoming_tts_host"))
+        wyoming_port = wyoming_port if wyoming_port is not None else shared_speech.get("announcement_wyoming_tts_port")
+        wyoming_voice = _text(wyoming_voice) or _text(shared_speech.get("announcement_wyoming_tts_voice"))
+        openai_base_url = openai_base_url if openai_base_url is not None else shared_speech.get("announcement_openai_tts_base_url")
+        openai_api_key = openai_api_key if openai_api_key is not None else shared_speech.get("announcement_openai_tts_api_key")
+        pocket_tts_output_gain = pocket_tts_output_gain if pocket_tts_output_gain is not None else shared_speech.get("announcement_pocket_tts_output_gain")
+        profile_prefix = {
+            "qwen3_tts": "announcement_qwen_tts",
+            "omnivoice": "announcement_omnivoice_tts",
+        }.get(selected_backend, "")
+    acceleration = acceleration if acceleration is not None else shared_speech.get("acceleration")
+    if selected_backend in {"pocket_tts", "qwen3_tts", "omnivoice"}:
+        shared_clone_prefix = "" if uses_direct_tts else "announcement_"
+        clone_audio = clone_audio if clone_audio is not None else shared_speech.get(f"{shared_clone_prefix}tts_clone_audio")
+        clone_text = clone_text if clone_text is not None else shared_speech.get(f"{shared_clone_prefix}tts_clone_text")
+    if selected_backend in {"qwen3_tts", "omnivoice"}:
+        managed_language = managed_language if managed_language is not None else shared_speech.get(f"{profile_prefix}_language")
+        managed_instruct = managed_instruct if managed_instruct is not None else shared_speech.get(f"{profile_prefix}_instruct")
+    warnings: list[str] = []
+    sent_count = 0
+    result: Dict[str, Any] = {
+        "backend": selected_backend,
+        "target_count": target_count,
+        "homeassistant_target_count": len(homeassistant_players),
+        "voice_core_target_count": len(voice_core_selectors),
+        "unifi_protect_target_count": len(unifi_protect_cameras),
+        "sonos_target_count": len(sonos_speakers),
+        "integration_target_count": len(integration_devices),
+    }
+
+    synthesis_kwargs = {
+        "backend": selected_backend,
+        "model": model,
+        "voice": voice,
+        "wyoming_host": wyoming_host,
+        "wyoming_port": wyoming_port,
+        "wyoming_voice": wyoming_voice,
+        "openai_base_url": openai_base_url,
+        "openai_api_key": openai_api_key,
+        "acceleration": acceleration,
+        "kokoro_output_gain": kokoro_output_gain,
+        "pocket_tts_output_gain": pocket_tts_output_gain,
+        "clone_audio": clone_audio,
+        "clone_text": clone_text,
+        "managed_language": managed_language,
+        "managed_instruct": managed_instruct,
+    }
+    cache_key = _announcement_tts_cache_key(text=prompt, **synthesis_kwargs)
+    wav_bytes = _announcement_tts_cache_read(cache_key)
+    cache_hit = wav_bytes is not None
+    if wav_bytes is None:
+        wav_bytes = await synthesize_tts_wav(text=prompt, **synthesis_kwargs)
+        _announcement_tts_cache_write(cache_key, wav_bytes)
+    result["audio_cache"] = "hit" if cache_hit else "miss"
+    result["bytes"] = len(wav_bytes or b"")
+    logger.info(
+        "[speech_tts] announcement audio ready backend=%s cache=%s bytes=%s ha_players=%s voice_core_selectors=%s unifi_cameras=%s sonos_speakers=%s integration_devices=%s",
+        selected_backend,
+        result["audio_cache"],
+        len(wav_bytes or b""),
+        homeassistant_players,
+        voice_core_selectors,
+        unifi_protect_cameras,
+        sonos_speakers,
+        integration_devices,
+    )
+
+    if homeassistant_players:
+        if not _text(ha_base) or not _text(token):
+            warnings.append("Home Assistant announcement targets are selected but Home Assistant is not configured.")
+        else:
+            try:
+                media_content_id = await run_background(
+                    ha_upload_local_media_source_file_sync,
+                    _text(ha_base),
+                    _text(token),
+                    target_media_content_id=HOMEASSISTANT_MEDIA_SOURCE_TARGET,
+                    filename=f"tater-announcement-{uuid.uuid4().hex}.wav",
+                    content=wav_bytes,
+                    content_type="audio/wav",
+                    timeout_s=60.0,
+                )
+                result["homeassistant_media_content_id"] = media_content_id
+                logger.info(
+                    "[speech_tts] HA media upload prepared media_content_id=%s players=%s",
+                    media_content_id,
+                    homeassistant_players,
+                )
+                ha_result = await run_background(
+                    _homeassistant_play_media_sync,
+                    base_url=_text(ha_base),
+                    token=_text(token),
+                    players=homeassistant_players,
+                    media_content_id=media_content_id,
+                )
+                result["homeassistant_sent_count"] = int(ha_result.get("sent_count") or 0)
+                sent_count += int(ha_result.get("sent_count") or 0)
+                warnings.extend([_text(item) for item in list(ha_result.get("warnings") or []) if _text(item)])
+                if not ha_result.get("ok") and _text(ha_result.get("error")):
+                    warnings.append(_text(ha_result.get("error")))
+                _schedule_homeassistant_media_cleanup(
+                    base_url=_text(ha_base),
+                    token=_text(token),
+                    media_content_id=media_content_id,
+                )
+            except Exception as exc:
+                warnings.append(f"Home Assistant media upload failed: {exc}")
+
+    if voice_core_selectors:
+        voice_result = await run_background(
+            _voice_core_play_media_sync,
+            selectors=voice_core_selectors,
+            source_url="",
+            audio_bytes=wav_bytes,
+            text=prompt,
+            media_type="audio/wav",
+            filename=f"tts-{selected_backend}.wav",
+            timeout_s=DEFAULT_VOICE_CORE_PLAY_TIMEOUT_SECONDS,
+            tts_kind=tts_kind,
+            audio_scene=audio_scene,
+        )
+        result["voice_core_sent_count"] = int(voice_result.get("sent_count") or 0)
+        result["audio_scene_sent_count"] = int(voice_result.get("audio_scene_sent_count") or 0)
+        result["audio_scene_fallback_count"] = int(voice_result.get("audio_scene_fallback_count") or 0)
+        result["audio_scene_warnings"] = [
+            _text(item)
+            for item in list(voice_result.get("audio_scene_warnings") or [])
+            if _text(item)
+        ]
+        sent_count += int(voice_result.get("sent_count") or 0)
+        warnings.extend([_text(item) for item in list(voice_result.get("warnings") or []) if _text(item)])
+        if not voice_result.get("ok") and _text(voice_result.get("error")):
+            warnings.append(_text(voice_result.get("error")))
+
+    if sonos_speakers:
+        try:
+            asset_id = store_runtime_tts_wav(wav_bytes)
+            if not asset_id:
+                raise RuntimeError("failed to store Sonos announcement audio")
+            if _text(public_base_url):
+                sonos_source_url = f"{_text(public_base_url).rstrip('/')}/api/speech/tts/runtime/{asset_id}.wav"
+            else:
+                sonos_source_url = build_runtime_tts_asset_url(asset_id)
+            result["sonos_source_url"] = sonos_source_url
+            sonos_result = await run_background(
+                sonos_play_media_sync,
+                speakers=sonos_speakers,
+                source_url=sonos_source_url,
+                timeout_s=SONOS_DEFAULT_PLAY_TIMEOUT_SECONDS,
+            )
+            result["sonos_sent_count"] = int(sonos_result.get("sent_count") or 0)
+            sent_count += int(sonos_result.get("sent_count") or 0)
+            warnings.extend([_text(item) for item in list(sonos_result.get("warnings") or []) if _text(item)])
+            if not sonos_result.get("ok") and _text(sonos_result.get("error")):
+                warnings.append(_text(sonos_result.get("error")))
+        except Exception as exc:
+            warnings.append(f"Sonos playback failed: {exc}")
+
+    if unifi_protect_cameras:
+        unifi_result = await run_background(
+            play_unifi_protect_audio_sync,
+            cameras=unifi_protect_cameras,
+            audio_bytes=wav_bytes,
+            timeout_s=DEFAULT_UNIFI_PROTECT_AUDIO_TIMEOUT_SECONDS,
+        )
+        result["unifi_protect_sent_count"] = int(unifi_result.get("sent_count") or 0)
+        sent_count += int(unifi_result.get("sent_count") or 0)
+        warnings.extend([_text(item) for item in list(unifi_result.get("warnings") or []) if _text(item)])
+        if not unifi_result.get("ok") and _text(unifi_result.get("error")):
+            warnings.append(_text(unifi_result.get("error")))
+
+    if integration_devices:
+        try:
+            integration_source_url = _runtime_audio_source_url(
+                wav_bytes,
+                content_type="audio/wav",
+                filename=f"tts-{selected_backend}.wav",
+                public_base_url=public_base_url,
+            )
+            result["integration_source_url"] = integration_source_url
+            integration_result = await run_background(
+                _integration_playback_sync,
+                targets=integration_devices,
+                source_url=integration_source_url,
+                media_type="audio/wav",
+                timeout_s=SONOS_DEFAULT_PLAY_TIMEOUT_SECONDS,
+            )
+            result["integration_sent_count"] = int(integration_result.get("sent_count") or 0)
+            sent_count += int(integration_result.get("sent_count") or 0)
+            warnings.extend([_text(item) for item in list(integration_result.get("warnings") or []) if _text(item)])
+            if not integration_result.get("ok") and _text(integration_result.get("error")):
+                warnings.append(_text(integration_result.get("error")))
+        except Exception as exc:
+            warnings.append(f"Integration playback failed: {exc}")
+
+    result["sent_count"] = sent_count
+    if sent_count > 0:
+        result["ok"] = True
+        result["sent_count"] = sent_count
+        if warnings:
+            result["warnings"] = warnings
+        return result
+
+    result["ok"] = False
+    result["error"] = "; ".join(warnings) or "Announcement playback failed."
+    return result
+
+
+async def play_announcement_audio_targets(
+    *,
+    text: str,
+    wav_bytes: bytes,
+    ha_base: str,
+    token: str,
+    targets: list[str],
+    public_base_url: str = "",
+    backend: str = "",
+    default_backend: str = DEFAULT_ANNOUNCEMENT_TTS_BACKEND,
+    tts_kind: str = "",
+    continue_conversation: bool = False,
+    conversation_id: str = "",
+    media_type: str = "audio/wav",
+    filename: str = "",
+    wait_for_completion: bool = False,
+) -> Dict[str, Any]:
+    prompt = _text(text)
+    audio = bytes(wav_bytes or b"")
+    clean_media_type = _text(media_type).split(";", 1)[0].strip().lower() or "audio/wav"
+    default_ext = "mp3" if clean_media_type in {"audio/mpeg", "audio/mp3"} else "wav" if clean_media_type == "audio/wav" else "bin"
+    safe_filename = Path(_text(filename)).name or f"audio.{default_ext}"
+    raw_targets = list(targets or [])
+    grouped = split_announcement_targets(targets)
+    homeassistant_players = list(grouped.get("homeassistant_media_players") or [])
+    voice_core_selectors = list(grouped.get("voice_core_selectors") or [])
+    unifi_protect_cameras = list(grouped.get("unifi_protect_cameras") or [])
+    sonos_speakers = list(grouped.get("sonos_speakers") or [])
+    integration_devices = [item for item in list(grouped.get("integration_devices") or []) if isinstance(item, dict)]
+    target_count = (
+        len(homeassistant_players)
+        + len(voice_core_selectors)
+        + len(unifi_protect_cameras)
+        + len(sonos_speakers)
+        + len(integration_devices)
+    )
+    selected_backend = normalize_announcement_tts_backend(backend, default=default_backend)
+    if selected_backend == ANNOUNCEMENT_TTS_DIRECT_BACKEND:
+        selected_backend = normalize_tts_backend((get_speech_settings() or {}).get("tts_backend"))
+    logger.info(
+        "[speech_tts] play_announcement_audio_targets backend=%s raw_targets=%s bytes=%s ha_players=%s voice_core_selectors=%s unifi_cameras=%s sonos_speakers=%s integration_devices=%s",
+        selected_backend,
+        raw_targets,
+        len(audio),
+        homeassistant_players,
+        voice_core_selectors,
+        unifi_protect_cameras,
+        sonos_speakers,
+        integration_devices,
+    )
+    if target_count <= 0:
+        return {"ok": False, "sent_count": 0, "error": "No announcement targets selected."}
+    if not audio:
+        return {"ok": False, "sent_count": 0, "error": "Announcement audio is empty."}
+
+    warnings: list[str] = []
+    sent_count = 0
+    result: Dict[str, Any] = {
+        "backend": selected_backend,
+        "bytes": len(audio),
+        "target_count": target_count,
+        "homeassistant_target_count": len(homeassistant_players),
+        "voice_core_target_count": len(voice_core_selectors),
+        "unifi_protect_target_count": len(unifi_protect_cameras),
+        "sonos_target_count": len(sonos_speakers),
+        "integration_target_count": len(integration_devices),
+    }
+
+    if homeassistant_players:
+        if not _text(ha_base) or not _text(token):
+            warnings.append("Home Assistant announcement targets are selected but Home Assistant is not configured.")
+        else:
+            try:
+                media_content_id = await run_background(
+                    ha_upload_local_media_source_file_sync,
+                    _text(ha_base),
+                    _text(token),
+                    target_media_content_id=HOMEASSISTANT_MEDIA_SOURCE_TARGET,
+                    filename=f"tater-reply-{uuid.uuid4().hex}-{safe_filename}",
+                    content=audio,
+                    content_type=clean_media_type,
+                    timeout_s=60.0,
+                )
+                result["homeassistant_media_content_id"] = media_content_id
+                ha_result = await run_background(
+                    _homeassistant_play_media_sync,
+                    base_url=_text(ha_base),
+                    token=_text(token),
+                    players=homeassistant_players,
+                    media_content_id=media_content_id,
+                )
+                result["homeassistant_sent_count"] = int(ha_result.get("sent_count") or 0)
+                sent_count += int(ha_result.get("sent_count") or 0)
+                warnings.extend([_text(item) for item in list(ha_result.get("warnings") or []) if _text(item)])
+                if not ha_result.get("ok") and _text(ha_result.get("error")):
+                    warnings.append(_text(ha_result.get("error")))
+                _schedule_homeassistant_media_cleanup(
+                    base_url=_text(ha_base),
+                    token=_text(token),
+                    media_content_id=media_content_id,
+                )
+            except Exception as exc:
+                warnings.append(f"Home Assistant media upload failed: {exc}")
+
+    if voice_core_selectors:
+        voice_result = await run_background(
+            _voice_core_play_media_sync,
+            selectors=voice_core_selectors,
+            source_url="",
+            audio_bytes=audio,
+            text=prompt,
+            media_type=clean_media_type,
+            filename=safe_filename,
+            timeout_s=DEFAULT_VOICE_CORE_PLAY_TIMEOUT_SECONDS,
+            tts_kind=tts_kind,
+            continue_conversation=continue_conversation,
+            conversation_id=conversation_id,
+            wait_for_completion=wait_for_completion,
+        )
+        result["voice_core_sent_count"] = int(voice_result.get("sent_count") or 0)
+        result["voice_core_playback_completed"] = bool(voice_result.get("playback_completed"))
+        sent_count += int(voice_result.get("sent_count") or 0)
+        warnings.extend([_text(item) for item in list(voice_result.get("warnings") or []) if _text(item)])
+        if not voice_result.get("ok") and _text(voice_result.get("error")):
+            warnings.append(_text(voice_result.get("error")))
+
+    if sonos_speakers:
+        try:
+            sonos_source_url = _runtime_audio_source_url(
+                audio,
+                content_type=clean_media_type,
+                filename=safe_filename,
+                public_base_url=public_base_url,
+            )
+            result["sonos_source_url"] = sonos_source_url
+            sonos_result = await run_background(
+                sonos_play_media_sync,
+                speakers=sonos_speakers,
+                source_url=sonos_source_url,
+                timeout_s=SONOS_DEFAULT_PLAY_TIMEOUT_SECONDS,
+            )
+            result["sonos_sent_count"] = int(sonos_result.get("sent_count") or 0)
+            sent_count += int(sonos_result.get("sent_count") or 0)
+            warnings.extend([_text(item) for item in list(sonos_result.get("warnings") or []) if _text(item)])
+            if not sonos_result.get("ok") and _text(sonos_result.get("error")):
+                warnings.append(_text(sonos_result.get("error")))
+        except Exception as exc:
+            warnings.append(f"Sonos playback failed: {exc}")
+
+    if unifi_protect_cameras:
+        unifi_result = await run_background(
+            play_unifi_protect_audio_sync,
+            cameras=unifi_protect_cameras,
+            audio_bytes=audio,
+            timeout_s=DEFAULT_UNIFI_PROTECT_AUDIO_TIMEOUT_SECONDS,
+        )
+        result["unifi_protect_sent_count"] = int(unifi_result.get("sent_count") or 0)
+        sent_count += int(unifi_result.get("sent_count") or 0)
+        warnings.extend([_text(item) for item in list(unifi_result.get("warnings") or []) if _text(item)])
+        if not unifi_result.get("ok") and _text(unifi_result.get("error")):
+            warnings.append(_text(unifi_result.get("error")))
+
+    if integration_devices:
+        try:
+            integration_source_url = _runtime_audio_source_url(
+                audio,
+                content_type=clean_media_type,
+                filename=safe_filename,
+                public_base_url=public_base_url,
+            )
+            result["integration_source_url"] = integration_source_url
+            integration_result = await run_background(
+                _integration_playback_sync,
+                targets=integration_devices,
+                source_url=integration_source_url,
+                media_type=clean_media_type,
+                timeout_s=SONOS_DEFAULT_PLAY_TIMEOUT_SECONDS,
+            )
+            result["integration_sent_count"] = int(integration_result.get("sent_count") or 0)
+            sent_count += int(integration_result.get("sent_count") or 0)
+            warnings.extend([_text(item) for item in list(integration_result.get("warnings") or []) if _text(item)])
+            if not integration_result.get("ok") and _text(integration_result.get("error")):
+                warnings.append(_text(integration_result.get("error")))
+        except Exception as exc:
+            warnings.append(f"Integration playback failed: {exc}")
+
+    result["sent_count"] = sent_count
+    if sent_count > 0:
+        result["ok"] = True
+        if warnings:
+            result["warnings"] = warnings
+        return result
+
+    result["ok"] = False
+    result["error"] = "; ".join(warnings) or "Announcement playback failed."
+    return result

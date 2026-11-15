@@ -170,7 +170,7 @@ class SpudLinkModelRoutingTests(unittest.TestCase):
         self.assertIsNone(rows)
 
     def test_hub_capability_endpoint_exports_sanitized_runtime_inventory(self):
-        source = (Path(__file__).resolve().parents[1] / "tateros_app.py").read_text(encoding="utf-8")
+        source = (Path(__file__).resolve().parents[1] / 'tater/web/application.py').read_text(encoding="utf-8")
         self.assertIn('"loaded_models": _spud_link_public_loaded_models_payload()', source)
         self.assertIn('_spud_link_effective_modality_capability("vision", vision, base)', source)
         self.assertIn('_spud_link_effective_modality_capability("audio", audio, base)', source)
@@ -185,7 +185,7 @@ class SpudLinkModelRoutingTests(unittest.TestCase):
         self.assertNotIn('"cache_key"', public_inventory)
 
     def test_hub_face_embedding_operation_is_stateless(self):
-        source = (Path(__file__).resolve().parents[1] / "tateros_app.py").read_text(encoding="utf-8")
+        source = (Path(__file__).resolve().parents[1] / 'tater/web/application.py').read_text(encoding="utf-8")
         endpoint = source[
             source.index('def spud_link_model_face_id(') : source.index(
                 '@app.post("/api/spudlink/v1/tts/speech")'
@@ -199,7 +199,7 @@ class SpudLinkModelRoutingTests(unittest.TestCase):
         self.assertIn('"model": face_id_runtime.embedding_model_metadata(', endpoint)
 
     def test_hub_speaker_embedding_operation_is_stateless(self):
-        source = (Path(__file__).resolve().parents[1] / "tateros_app.py").read_text(encoding="utf-8")
+        source = (Path(__file__).resolve().parents[1] / 'tater/web/application.py').read_text(encoding="utf-8")
         endpoint = source[
             source.index('def spud_link_model_speaker_id(') : source.index(
                 '@app.post("/api/spudlink/v1/models/emotion-id")'

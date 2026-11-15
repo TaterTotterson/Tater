@@ -9,7 +9,7 @@ from typing import Any, List
 
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
-APP_PATH = REPO_ROOT / "tateros_app.py"
+APP_PATH = REPO_ROOT / 'tater/web/application.py'
 STYLES_PATH = REPO_ROOT / "frontend" / "src" / "tater-ui.css"
 COMPONENT_PATH = REPO_ROOT / "frontend" / "src" / "settings" / "components" / "models" / "HuggingFaceModels.vue"
 
@@ -193,7 +193,8 @@ class HuggingFaceModelBrowserLayoutTests(unittest.TestCase):
         self.assertIn("selectedFiles.value.forEach((filename)", self.component)
 
     def test_download_endpoint_accepts_batch_and_legacy_requests(self) -> None:
-        self.assertIn("items: List[HfModelDownloadItemRequest] = Field(default_factory=list)", self.app)
+        schemas = (REPO_ROOT / 'tater/web/schemas.py').read_text(encoding="utf-8")
+        self.assertIn("items: List[HfModelDownloadItemRequest] = Field(default_factory=list)", schemas)
         self.assertIn("list(request.items or []) or [request]", self.app)
         self.assertIn("targets = _dedupe_hf_llm_warmup_targets(targets)", self.app)
         self.assertIn('result["queued_count"] = len(targets)', self.app)

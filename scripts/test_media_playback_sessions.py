@@ -1092,11 +1092,11 @@ class MediaPlaybackSessionTests(unittest.TestCase):
         self.assertNotIn("secret", proxy_url)
 
     def test_runtime_media_proxy_is_public_for_lan_players(self) -> None:
-        app_source = (Path(__file__).resolve().parents[1] / "tateros_app.py").read_text()
+        app_source = (Path(__file__).resolve().parents[1] / 'tater/web/application.py').read_text()
         self.assertIn('path.startswith("/api/media/runtime/")', app_source)
 
     def test_shared_media_relay_is_public_only_through_its_tokenized_path(self) -> None:
-        app_source = (Path(__file__).resolve().parents[1] / "tateros_app.py").read_text()
+        app_source = (Path(__file__).resolve().parents[1] / 'tater/web/application.py').read_text()
         self.assertIn('path.startswith("/api/media/shared/")', app_source)
         self.assertIn('@app.get("/api/media/shared/{relay_id}/{filename:path}")', app_source)
 

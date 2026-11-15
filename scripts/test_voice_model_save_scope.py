@@ -16,7 +16,7 @@ MODELS_COMPONENT = ROOT / "frontend" / "src" / "settings" / "components" / "Mode
 SETTINGS_TYPES = ROOT / "frontend" / "src" / "settings" / "types.ts"
 SETTINGS_STYLES = ROOT / "frontend" / "src" / "tater-ui.css"
 APP_BOOTSTRAP = ROOT / "tateros_static" / "app.js"
-BACKEND_APP = ROOT / "tateros_app.py"
+BACKEND_APP = ROOT / 'tater/web/application.py'
 
 
 def _load_pocket_access_helper():

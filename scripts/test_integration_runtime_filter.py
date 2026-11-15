@@ -8,7 +8,7 @@ import unittest
 from typing import Any, Dict
 
 
-RUNTIME_PATH = Path(__file__).resolve().parents[1] / "integration_runtime.py"
+RUNTIME_PATH = Path(__file__).resolve().parents[1] / 'tater/extensions/integration_runtime.py'
 
 
 def _runtime_filter_namespace(module: Any) -> Dict[str, Any]:

@@ -124,7 +124,7 @@ class TaterBuildVersionTests(unittest.TestCase):
         )
 
     def test_auth_bootstrap_and_sidebar_display_are_wired(self) -> None:
-        backend = (REPO_ROOT / "tateros_app.py").read_text(encoding="utf-8")
+        backend = (REPO_ROOT / 'tater/web/application.py').read_text(encoding="utf-8")
         app_js = (REPO_ROOT / "tateros_static" / "app.js").read_text(encoding="utf-8")
         shell = (REPO_ROOT / "frontend" / "src" / "shell" / "AppShell.vue").read_text(encoding="utf-8")
         styles = (REPO_ROOT / "frontend" / "src" / "base.css").read_text(encoding="utf-8")

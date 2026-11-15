@@ -12,7 +12,7 @@ class LlamaCppSpeculativeUiTests(unittest.TestCase):
     def test_settings_offer_all_supported_speculative_methods(self):
         component = (ROOT / "frontend" / "src" / "settings" / "components" / "models" / "LlmModels.vue").read_text(encoding="utf-8")
         settings = (ROOT / "frontend" / "src" / "settings" / "components" / "ModelsSettings.vue").read_text(encoding="utf-8")
-        backend = (ROOT / "tateros_app.py").read_text(encoding="utf-8")
+        backend = (ROOT / 'tater/web/application.py').read_text(encoding="utf-8")
 
         self.assertIn("Speculative decoding", component)
         self.assertIn('value="draft-mtp"', component)
@@ -57,7 +57,7 @@ class LlamaCppSpeculativeUiTests(unittest.TestCase):
         self.assertIn(".tm-llm-feature-toggle > span", styles)
 
     def test_local_inventory_classifies_speculative_sidecars(self):
-        source = (ROOT / "tateros_app.py").read_text(encoding="utf-8")
+        source = (ROOT / 'tater/web/application.py').read_text(encoding="utf-8")
         tree = ast.parse(source)
         wanted = {"_normalize_local_llm_speculative_method", "_local_llm_speculative_profile"}
         module = ast.Module(
@@ -65,7 +65,7 @@ class LlamaCppSpeculativeUiTests(unittest.TestCase):
             type_ignores=[],
         )
         namespace = {"Any": Any, "Dict": Dict, "Path": Path, "re": re}
-        exec(compile(module, str(ROOT / "tateros_app.py"), "exec"), namespace)
+        exec(compile(module, str(ROOT / 'tater/web/application.py'), "exec"), namespace)
         classify = namespace["_local_llm_speculative_profile"]
 
         base = classify({"filename": "gemma-4-26B-A4B-it-UD-Q4_K_M.gguf"})
@@ -89,7 +89,7 @@ class LlamaCppSpeculativeUiTests(unittest.TestCase):
         self.assertIn("function speculativeMethodForModel", component)
         self.assertIn("function draftMatchesBase", component)
         self.assertIn("candidateRepo === baseRepo", component)
-        self.assertIn("rows.filter((model) => !isSpeculativeDraft(model))", component)
+        self.assertIn("rows.filter((model) => !isSpeculativeDraft(model) && !isDecisionModel(model))", component)
         self.assertIn("speculativeMethodForModel(model) === method", component)
         self.assertIn("No compatible {{ activeSpeculative.label }} sidecar", component)
         self.assertIn("row.is_speculative_draft === true", media)

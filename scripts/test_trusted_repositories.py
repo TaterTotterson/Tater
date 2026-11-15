@@ -84,7 +84,7 @@ class TrustedRepositoryDirectoryTests(unittest.TestCase):
                 self.assertIn("combinedRepos", source)
 
     def test_shop_payload_exposes_trusted_directories(self) -> None:
-        source = (REPO_ROOT / "tateros_app.py").read_text(encoding="utf-8")
+        source = (REPO_ROOT / 'tater/web/application.py').read_text(encoding="utf-8")
         self.assertIn('trusted_repositories_module.load_trusted_repositories(kind)', source)
         for kind in ("verba", "portal", "core"):
             self.assertIn(f'_shop_repo_config_payload("{kind}",', source)
