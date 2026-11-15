@@ -61,7 +61,8 @@ on-screen weather, notifications and media controls.
 Prefer Home Assistant Assist? The
 **[Tater Home Assistant Satellites bridge](https://github.com/TaterTotterson/Tater-Home-Assistant-Satellites)**
 connects compatible satellites directly to Home Assistant without requiring
-the Tater app.
+the Tater app. It also offers an optional **Mini-Tater** mode—a streamlined
+Tater assistant built into the bridge.
 
 ---
 
