@@ -3,7 +3,7 @@ import type {JsonRow} from './types';
 export function coreWorkspace(key: unknown, metadata?: unknown): JsonRow {
   const fallback=(defaults as Record<string,JsonRow>)[String(key)]||{};
   const source=metadata&&typeof metadata==='object'&&(metadata as JsonRow).schema===1?metadata as JsonRow:{};
-  return {...fallback,...source,icon:String(source.icon||fallback.icon||'cores'),description:String(source.description||fallback.description||'A workspace for this core.')};
+  return {...fallback,...source,screens:{...fallback.screens,...source.screens},icon:String(source.icon||fallback.icon||'cores'),description:String(source.description||fallback.description||'A workspace for this core.')};
 }
 export function workspaceTabs(tabs: unknown, metadata: JsonRow): JsonRow[] {
   const rows=(Array.isArray(tabs)?tabs:[]).filter(row=>row&&String(row.key||'').trim());

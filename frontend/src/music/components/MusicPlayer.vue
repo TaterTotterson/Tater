@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import PopupTransition from "../../shared/PopupTransition.vue";
+import DynamicField from "./DynamicField.vue";
 import type { MusicField, MusicItem, MusicPlayerRow } from "../types";
 import {
   groupPlayerTargets,

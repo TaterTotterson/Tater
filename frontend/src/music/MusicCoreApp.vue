@@ -30,6 +30,11 @@ const payload = computed(() => props.state.payload || {});
 const ui = computed(() => payload.value.ui || {});
 const items = computed(() => ui.value.item_forms || []);
 const player = computed(() => items.value.find((item) => item.group === "player"));
+const upNext = computed(() => {
+  const tracks = player.value?.track_list || [];
+  const current = tracks.findIndex(track => track.active);
+  return tracks.slice(current + 1, current + 6);
+});
 const managerTabs = computed(()=>workspaceTabs(ui.value.manager_tabs,metadata.value));
 const activeManagerTab = computed(() =>
   managerTabs.value.find((tab) => tab.key === selectedTab.value) || managerTabs.value[0],
@@ -196,6 +201,7 @@ onBeforeUnmount(() => {
         </nav>
       </section>
 
+      <div class="cw-music-workspace" data-workspace-layout="music"><div class="cw-music-main">
       <LibraryBrowser
         v-if="activeManagerTab?.source === 'grouped_items'"
         :groups="activeManagerTab.groups || []"
@@ -234,6 +240,8 @@ onBeforeUnmount(() => {
           {{ activeManagerTab?.empty_message || payload.empty_message || 'Nothing is available here yet.' }}
         </div>
       </section>
+
+      </div><aside v-if="player" class="cw-purpose-context cw-music-context"><h3>Up next</h3><p>{{ player.title }}</p><small>{{ player.subtitle||player.detail }}</small><ol><li v-for="(track,index) in upNext" :key="track.id||index"><strong>{{ track.title||'Untitled' }}</strong><span>{{ [track.artist,track.album].filter(Boolean).join(' · ') }}</span></li></ol><button v-if="managerTabs.some(tab=>tab.key==='playlist')" class="cw-text-button" type="button" @click="selectedTab='playlist'">View playlist →</button></aside></div>
 
       <section v-if="player" class="tm-playback-dock workspace-music-player" aria-label="Playback"><MusicPlayer :item="player" :busy="isBusy" :run="run" /></section>
 

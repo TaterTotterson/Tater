@@ -64,7 +64,24 @@
         ],
         "description": "Choose an announcement destination in Delivery to enable background audio."
       }
-    ]
+    ],
+    "screens": {
+      "items": {
+        "layout": "tasks",
+        "label": "Scheduled tasks",
+        "icon": "calendar",
+        "unit": "tasks",
+        "context_label": "Task details"
+      }
+    },
+    "preview_fields": [
+      "title",
+      "schedule_text",
+      "destination",
+      "enabled",
+      "task_prompt"
+    ],
+    "edit_label": "Edit task"
   },
   "automation_core": {
     "schema": 1,
@@ -75,7 +92,85 @@
     "views": {
       "rules": "list",
       "history": "timeline"
-    }
+    },
+    "screens": {
+      "rules": {
+        "layout": "rules",
+        "label": "Your automations",
+        "icon": "workflow",
+        "unit": "automations",
+        "context_label": "Trigger & action"
+      },
+      "history": {
+        "layout": "timeline",
+        "label": "Recent runs",
+        "icon": "activity",
+        "unit": "runs"
+      }
+    },
+    "preview_fields": [
+      "name",
+      "trigger",
+      "trigger_device",
+      "trigger_event",
+      "action_type",
+      "tts_targets",
+      "action_operation",
+      "action_devices",
+      "last_status",
+      "last_summary",
+      "cooldown_seconds",
+      "enabled"
+    ],
+    "edit_label": "Edit automation",
+    "editor": "flow",
+    "field_groups": [
+      {
+        "label": "Rule",
+        "terms": [
+          "name",
+          "enabled",
+          "cooldown"
+        ]
+      },
+      {
+        "label": "When this happens",
+        "terms": [
+          "trigger_category",
+          "trigger_integration",
+          "trigger_device",
+          "trigger_event",
+          "trigger_attribute",
+          "trigger_value"
+        ]
+      },
+      {
+        "label": "Optional conditions",
+        "terms": [
+          "trigger_person",
+          "condition"
+        ]
+      },
+      {
+        "label": "Then do this",
+        "terms": [
+          "action_",
+          "tts_",
+          "notification_",
+          "camera_",
+          "vision_"
+        ]
+      },
+      {
+        "label": "Voice & background audio",
+        "terms": [
+          "tts_audio",
+          "tts_background",
+          "tts_ducking",
+          "tts_start_delay"
+        ]
+      }
+    ]
   },
   "awareness_core": {
     "schema": 1,
@@ -121,7 +216,35 @@
           "destination"
         ]
       }
-    ]
+    ],
+    "screens": {
+      "events": {
+        "layout": "events",
+        "label": "Event history",
+        "icon": "eye",
+        "unit": "events",
+        "context_label": "Event details"
+      },
+      "monitors": {
+        "layout": "sources",
+        "label": "Monitored sources",
+        "icon": "eye",
+        "unit": "sources",
+        "context_label": "Source & delivery"
+      }
+    },
+    "preview_fields": [
+      "name",
+      "kind",
+      "integration",
+      "device",
+      "trigger_events",
+      "description_mode",
+      "area",
+      "notifications_enabled",
+      "notification_destinations"
+    ],
+    "edit_label": "Edit source"
   },
   "environment_core": {
     "schema": 1,
@@ -135,7 +258,39 @@
       "trends": "overview",
       "sources": "list",
       "settings": "stack"
-    }
+    },
+    "screens": {
+      "overview": {
+        "layout": "weather",
+        "label": "Current conditions",
+        "icon": "weather",
+        "context_label": "Weather context"
+      },
+      "forecast": {
+        "layout": "forecast",
+        "label": "Forecast",
+        "icon": "weather",
+        "context_label": "Forecast context"
+      },
+      "trends": {
+        "layout": "trends",
+        "label": "Tater Trends",
+        "icon": "chart",
+        "context_label": "Reading context"
+      },
+      "sources": {
+        "layout": "sources",
+        "label": "Weather & sensor sources",
+        "icon": "weather",
+        "unit": "sources"
+      }
+    },
+    "preview_fields": [
+      "label",
+      "area",
+      "enabled"
+    ],
+    "edit_label": "Edit sensor"
   },
   "guardian_core": {
     "schema": 1,
@@ -150,7 +305,48 @@
       "devices": "list",
       "events": "timeline",
       "settings": "stack"
-    }
+    },
+    "screens": {
+      "ai_overview": {
+        "layout": "network",
+        "label": "What needs your attention",
+        "icon": "shield",
+        "context_label": "Network context"
+      },
+      "overview": {
+        "layout": "network",
+        "label": "Network overview",
+        "icon": "shield",
+        "context_label": "Network context"
+      },
+      "devices": {
+        "layout": "devices",
+        "label": "Network devices",
+        "icon": "shield",
+        "unit": "devices",
+        "context_label": "Device review"
+      },
+      "confirm": {
+        "layout": "devices",
+        "label": "Confirm device identities",
+        "icon": "shield",
+        "unit": "devices",
+        "context_label": "Device review"
+      },
+      "events": {
+        "layout": "timeline",
+        "label": "Recent network changes",
+        "icon": "activity",
+        "unit": "events"
+      }
+    },
+    "preview_fields": [
+      "label",
+      "trusted",
+      "critical",
+      "notes"
+    ],
+    "edit_label": "Edit device"
   },
   "memory_core": {
     "schema": 1,
@@ -203,7 +399,47 @@
           "confirm"
         ]
       }
-    ]
+    ],
+    "screens": {
+      "knows": {
+        "layout": "memories",
+        "label": "What Tater knows",
+        "icon": "brain",
+        "unit": "records",
+        "context_label": "Remembered context"
+      },
+      "overview": {
+        "layout": "insights",
+        "label": "Memory insights",
+        "icon": "brain",
+        "context_label": "Memory context"
+      },
+      "data": {
+        "layout": "memories",
+        "label": "Memory data",
+        "icon": "brain",
+        "unit": "records"
+      },
+      "people": {
+        "layout": "people",
+        "label": "People & linked memories",
+        "icon": "people",
+        "unit": "people"
+      },
+      "manage": {
+        "layout": "memories",
+        "label": "Manage memory",
+        "icon": "brain",
+        "unit": "records"
+      }
+    },
+    "preview_fields": [
+      "person_id",
+      "alias_label",
+      "preview_text",
+      "edit_value"
+    ],
+    "edit_label": "Edit memory"
   },
   "meshtastic_core": {
     "schema": 1,
@@ -238,7 +474,28 @@
           "security"
         ]
       }
-    ]
+    ],
+    "screens": {
+      "nodes": {
+        "layout": "nodes",
+        "label": "Nodes & signal",
+        "icon": "radio",
+        "unit": "nodes",
+        "context_label": "Radio details"
+      },
+      "bluetooth": {
+        "layout": "sources",
+        "label": "Bluetooth pairing",
+        "icon": "radio",
+        "unit": "radios",
+        "context_label": "Connection details"
+      }
+    },
+    "preview_fields": [
+      "device_name",
+      "address_type"
+    ],
+    "edit_label": "Edit connection"
   },
   "music_core": {
     "schema": 1,
@@ -258,7 +515,29 @@
     "views": {
       "settings": "stack",
       "providers": "stack"
-    }
+    },
+    "screens": {
+      "library": {
+        "layout": "music",
+        "label": "Music library",
+        "icon": "music"
+      },
+      "playlist": {
+        "layout": "queue",
+        "label": "Current playlist",
+        "icon": "music"
+      },
+      "recommendations": {
+        "layout": "music",
+        "label": "Made for this moment",
+        "icon": "sparkles"
+      }
+    },
+    "preview_fields": [
+      "default_volume",
+      "default_speakers"
+    ],
+    "edit_label": "Edit music settings"
   },
   "personal_core": {
     "schema": 1,
@@ -318,7 +597,42 @@
           "prompt"
         ]
       }
-    ]
+    ],
+    "screens": {
+      "calendar": {
+        "layout": "agenda",
+        "label": "Your agenda",
+        "icon": "calendar",
+        "context_label": "Today at a glance"
+      },
+      "overview": {
+        "layout": "insights",
+        "label": "Your overview",
+        "icon": "calendar",
+        "context_label": "Personal context"
+      },
+      "accounts": {
+        "layout": "accounts",
+        "label": "Connected accounts",
+        "icon": "people",
+        "unit": "accounts"
+      },
+      "cleanup": {
+        "layout": "memories",
+        "label": "Review & cleanup",
+        "icon": "file",
+        "unit": "records"
+      }
+    },
+    "preview_fields": [
+      "email_address",
+      "provider",
+      "calendar_enabled",
+      "calendar_source",
+      "person_id",
+      "mailbox"
+    ],
+    "edit_label": "Edit account"
   },
   "reachy_core": {
     "schema": 1,
@@ -369,7 +683,21 @@
           "reaction"
         ]
       }
-    ]
+    ],
+    "screens": {
+      "*": {
+        "layout": "behavior",
+        "label": "Reachy behavior",
+        "icon": "robot",
+        "context_label": "Device context"
+      }
+    },
+    "preview_fields": [
+      "enabled",
+      "motion_enabled",
+      "tracking_enabled"
+    ],
+    "edit_label": "Edit behavior"
   },
   "rss_core": {
     "schema": 1,
@@ -429,7 +757,21 @@
           "status"
         ]
       }
-    ]
+    ],
+    "screens": {
+      "feeds": {
+        "layout": "feeds",
+        "label": "Your feeds",
+        "icon": "rss",
+        "unit": "feeds",
+        "context_label": "Feed & destinations"
+      }
+    },
+    "preview_fields": [
+      "url",
+      "enabled"
+    ],
+    "edit_label": "Edit feed"
   },
   "tater_tube_core": {
     "schema": 1,
@@ -485,6 +827,33 @@
           "tts"
         ]
       }
-    ]
+    ],
+    "screens": {
+      "overview": {
+        "layout": "media",
+        "label": "Your media workspace",
+        "icon": "film",
+        "context_label": "Playback & voice"
+      },
+      "picks": {
+        "layout": "picks",
+        "label": "Tater\u2019s Picks",
+        "icon": "film",
+        "unit": "picks",
+        "context_label": "About this pick"
+      },
+      "history": {
+        "layout": "timeline",
+        "label": "Recent viewing context",
+        "icon": "film",
+        "unit": "events"
+      }
+    },
+    "preview_fields": [
+      "profile_id",
+      "tts_enabled",
+      "name"
+    ],
+    "edit_label": "Edit connection"
   }
 }

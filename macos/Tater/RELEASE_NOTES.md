@@ -1,48 +1,33 @@
-# Tater v3.0.0
+# Tater v3.0.1
 
-Tater 3 brings a redesigned workspace, more focused controls, an interactive
-Spudex terminal and improved satellite/media responsiveness.
+Tater 3.0.1 brings the Library first design inside all twelve built-in Core
+workspaces, with clearer details, focused editors, and layouts suited to each Core.
 
 ## What's New
 
-### A new Tater workspace
+- **Tasks, automations, and feeds:** searchable lists with selected details and
+  clear editing controls. Automation editing follows the trigger, optional
+  conditions, action, and audio flow.
+- **Awareness and Guardian:** readable event timelines, camera media previews,
+  network briefings, and device review.
+- **Environment:** native current conditions, room readings, and forecasts beside
+  weather context. Original source tables and generated charts remain available.
+- **Memory and Personal:** remembered context, people, agendas, insights, and
+  account management in the shared workspace style.
+- **Meshtastic:** channel messaging beside radio context, with nodes and pairing
+  controls still accessible.
+- **Music:** the library and persistent player now include an upcoming queue that
+  follows the current track. Fix a missing component import in player settings.
+- **Reachy and Tater Tube:** focused behavior controls, media context, pick cards,
+  and viewing history using the same theme.
+- Responsive layouts for desktop, tablet, and phone widths, with light and dark
+  theme support.
 
-- Refreshed charcoal styling, consistent icons, focused navigation and responsive
-  layouts across Chat, Cores, Verbas, Integrations, Portals, Music and Settings.
-- Searchable catalogs, clearer cards, shared popup/toast styling and configurable
-  Compotato motion effects with a smooth default.
-- Dedicated model, voice and satellite settings workspaces, clearer model labels
-  and preserved editor drafts while navigating.
-- Richer Core workspaces, including structured field editing and agenda views.
+Existing settings, actions, popup controls, pagination, and draft preservation
+remain available. New or unrecognized settings remain reachable in the editor,
+and credentials stay out of summary previews. Core backend functions are unchanged.
 
-### Interactive Spudex
+Update Tater to 3.0.1 and install the matching Core updates from Tater Shop for the
+complete workspace refresh. Older installed Cores retain compatible app defaults.
 
-- New task navigation and an interactive terminal workspace with streamed
-  output, terminal sizing and task/session events.
-- Improved task lifecycle handling and clearer runtime state in the UI.
-
-### Satellites and hardware video
-
-- Add per-satellite Smooth/Matrix conversation-text settings for compatible
-  Echo GPU screens, with capability checks and local-setting synchronization.
-- Negotiate balanced hardware H.264 Sat Chat on compatible Shows/Rook while
-  keeping JPEG fallback for older/mixed pairs.
-- Preserve ordered H.264 frames and prioritize audio with bounded relay queues.
-- Reduce repeated settings/status work, directory refresh overhead and blocking
-  integration polling; improve heartbeat and Bluetooth handling.
-- Use the wsproto WebSocket transport to avoid the reproduced legacy writer
-  failure under media backpressure.
-
-### Safer updates and startup
-
-- Explain and enforce Echo 5's one-time full USB upgrade, keeping saved settings
-  by default. Updating Tater does not perform that firmware migration.
-- Improve firmware batch progress and prevent application updates from bypassing
-  the installed platform's OTA compatibility requirements.
-- Improve startup/loading feedback and keep UI setup work responsive.
-- Default voice-state LEDs to the voice ring on compatible satellites.
-
-Echo 5 firmware publication remains separately gated on its final platform and
-USB/OTA qualification. Existing satellites remain usable with this Tater update.
-
-**Full Changelog**: [v2.0.8...v3.0.0](https://github.com/TaterTotterson/Tater/compare/v2.0.8...v3.0.0)
+**Full Changelog**: [v3.0.0...v3.0.1](https://github.com/TaterTotterson/Tater/compare/v3.0.0...v3.0.1)

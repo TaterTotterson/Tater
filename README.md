@@ -11,6 +11,11 @@
 
 **Tater** is a local-first AI platform that can run local models through **llama.cpp**, or connect to remote OpenAI-compatible and llama.cpp APIs. It supports voice satellites like **VoicePE**, **Sat1**, **S3Box**, and **ReSpeaker XVF3800**, plus portals for **Discord**, **Home Assistant**, **HomeKit**, **IRC**, **macOS**, **Matrix**, **Meshtastic**, **Telegram**, and **XBMC4Xbox**.
 
+**New in 3.0.1:** the Library first design now extends inside all twelve built-in
+Core workspaces, with clearer details, focused editors, timelines, weather views,
+and an upcoming music queue. Update the matching Cores from Tater Shop for the
+complete refresh. [Read the release notes](macos/Tater/RELEASE_NOTES.md).
+
 ---
 
 ## Little Spud Companion App

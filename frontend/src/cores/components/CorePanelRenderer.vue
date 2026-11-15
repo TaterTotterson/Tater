@@ -6,6 +6,7 @@ import CoreChannelChat from "./CoreChannelChat.vue";
 import CoreManagerField from "./CoreManagerField.vue";
 import CoreManagerItems from "./CoreManagerItems.vue";
 import CoreFieldsEditor from './CoreFieldsEditor.vue';
+import {workspaceScreen,overviewLayouts} from '../presentation';
 import {coreWorkspace,workspaceTabs,initialWorkspaceTab,presentationFor} from '../workspace';
 import {provideCoreDrafts,workspaceKey,cloneFieldValue,sameFieldValue} from '../drafts';
 
@@ -43,6 +44,7 @@ const managerTabs = computed<JsonRow[]>(()=>workspaceTabs(ui.value.manager_tabs,
 const currentTab = computed<JsonRow | null>(() => managerTabs.value.find((tab) => text(tab.key) === activeManagerTab.value) || managerTabs.value[0] || null);
 const groupTabs = computed<JsonRow[]>(() => currentTab.value && Array.isArray(currentTab.value.groups) ? currentTab.value.groups.filter((group: JsonRow) => text(group.key)) : []);
 const currentGroup = computed<JsonRow | null>(() => groupTabs.value.find((group) => text(group.key) === activeGroupTab.value) || groupTabs.value[0] || null);
+const focusedOverview=computed(()=>overviewLayouts.has(String(workspaceScreen(currentGroup.value||currentTab.value,metadata.value).layout)));
 const persistentItems = computed(() => {
   const groups = new Set((Array.isArray(ui.value.persistent_item_groups) ? ui.value.persistent_item_groups : []).map((value: unknown) => text(value).toLowerCase()).filter(Boolean));
   return itemForms.value.filter((item) => groups.has(text(item.group).toLowerCase()));
@@ -104,8 +106,12 @@ function itemsFor(group: unknown): JsonRow[] {
 }
 function listOptions(source: JsonRow | null): JsonRow {
   if (!source) return {};
+  const screen=workspaceScreen(source,metadata.value);
   return {
-    presentation:presentationFor(source,metadata.value),
+    presentation:screen.layout||presentationFor(source,metadata.value),
+    screen,
+    stats:stats.value,
+    contextItems:decorate(itemForms.value),
     selector: Boolean(source.selector),
     selector_label: source.selector_label,
     item_group: source.item_group,
@@ -161,8 +167,8 @@ watch(statsControls, (fields) => fields.forEach((field) => { const key = text(fi
 
       <CoreManagerItems v-if="persistentItems.length" class="core-manager-persistent" :items="decorate(persistentItems)" :ui="ui" :options="{ empty_message: body.empty_message }" :run="run" :busy="isBusy" />
 
-      <div v-if="stats.length || statsControls.length || ui.stats_refresh_button" class="core-metric-row tcx-native-stats">
-        <div v-for="entry in stats" :key="entry.label" class="core-metric-pill"><div class="small">{{ entry.label }}</div><div>{{ entry.value ?? '-' }}</div></div>
+      <div v-if="(!focusedOverview&&stats.length) || statsControls.length || ui.stats_refresh_button" class="core-metric-row tcx-native-stats">
+        <template v-if="!focusedOverview"><div v-for="entry in stats" :key="entry.label" class="core-metric-pill"><div class="small">{{ entry.label }}</div><div>{{ entry.value ?? '-' }}</div></div></template>
         <form v-if="statsControls.length && ui.stats_controls_action" class="inline-row tcx-native-stats-controls" @submit.prevent="saveStats"><CoreManagerField v-for="field in statsControls" :key="field.key" :field="field" :model-value="statsValues[field.key]" :all-values="statsValues" @update:model-value="updateStats(field, $event)" @error="error = $event" /><button v-if="ui.stats_controls_auto_save === false || statsDirty.size>0" class="action-btn" type="submit" :disabled="isBusy('stats-controls')">Save</button></form>
         <button v-if="ui.stats_refresh_button" class="action-btn" type="button" @click="refresh">{{ ui.stats_refresh_label || 'Refresh' }}</button>
       </div>

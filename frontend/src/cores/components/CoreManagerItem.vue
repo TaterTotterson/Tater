@@ -3,6 +3,8 @@ import { computed, inject, ref, watch } from "vue";
 import PopupTransition from "../../shared/PopupTransition.vue";
 import type { JsonRow } from "../types";
 import CoreFieldsEditor from "./CoreFieldsEditor.vue";
+import CoreItemPreview from './CoreItemPreview.vue';
+import {itemCanEdit} from '../presentation';
 import {useCoreDraft,workspaceKey,cloneFieldValue,sameFieldValue,acknowledgeDraft} from '../drafts';
 
 type ActionRunner = (action: string, payload: JsonRow, busyKey?: string, successText?: string) => Promise<JsonRow | null>;
@@ -13,6 +15,9 @@ const props = defineProps<{
   run: ActionRunner;
   busy: (key: string) => boolean;
   selected?: boolean;
+  preview?: boolean;
+  deferVisuals?: boolean;
+  deferFields?: string[];
 }>();
 
 const emit = defineEmits<{ select: [selected: boolean] }>();
@@ -21,6 +26,8 @@ const values=draft.values;const dirty=draft.dirty;
 const metadata=inject(workspaceKey,ref<JsonRow>({}));
 const status = ref("");
 const popupOpen = ref(false);
+const editing=ref(false);
+const canEdit=computed(()=>itemCanEdit({...props.item,popup_fields:[]}));
 
 const itemId = computed(() => text(props.item.id));
 const title = computed(() => text(props.item.title || props.item.id) || "(item)");
@@ -127,7 +134,8 @@ watch(allKnownFields, syncValues, { immediate: true });
       <div class="core-manager-card-tools"><label v-if="item.selectable" class="core-manager-item-selection"><input class="toggle-input" type="checkbox" :checked="selected" :aria-label="item.selection_label || `Select ${title}`" @change="emit('select', ($event.target as HTMLInputElement).checked)" /><span>Select</span></label><span v-if="!item.hide_core_key" class="small">{{ item.core_key }}</span></div>
     </div>
 
-    <div v-if="hasSummary" class="core-satellite-summary" :class="{ 'no-image': !item.hero_image_src }">
+    <CoreItemPreview v-if="preview&&!editing" :item="item" :metadata="metadata" :values="values" :defer-visuals="deferVisuals" :defer-fields="deferFields" />
+    <div v-else-if="hasSummary" class="core-satellite-summary" :class="{ 'no-image': !item.hero_image_src }">
       <div v-if="item.hero_image_src" class="core-satellite-image-wrap"><img class="core-satellite-image" :src="item.hero_image_src" :alt="item.hero_image_alt || title" /></div>
       <div class="core-satellite-summary-main">
         <div v-if="item.subtitle" class="small core-satellite-subtitle">{{ item.subtitle }}</div>
@@ -139,11 +147,12 @@ watch(allKnownFields, syncValues, { immediate: true });
     </div>
     <div v-else-if="item.subtitle" class="small">{{ item.subtitle }}</div>
 
-    <CoreFieldsEditor v-if="fields.length||sections.length" :fields="fields" :sections="sections" :values="values" :metadata="metadata" :label="`${title} sections`" @update="setValue" @commit="commitField" @error="status=$event" />
+    <CoreFieldsEditor v-if="(!preview||editing)&&(fields.length||sections.length)" :fields="fields" :sections="sections" :values="values" :metadata="metadata" :label="`${title} sections`" @update="setValue" @commit="commitField" @error="status=$event" />
 
-    <div v-if="customActions.length || item.save_action || item.reset_action || item.remove_action || item.run_action || showPopupButton" class="inline-row tcx-native-actions">
+    <div v-if="customActions.length || item.save_action || item.reset_action || item.remove_action || item.run_action || showPopupButton || (preview&&canEdit)" class="inline-row tcx-native-actions">
+      <button v-if="preview&&canEdit" class="tv-button" type="button" @click="editing=!editing">{{ editing?'Back to details':metadata.edit_label||'Edit' }}</button>
       <button v-for="action in customActions" :key="action.action" type="button" :class="action.tone === 'danger' ? 'inline-btn danger' : action.tone === 'muted' ? 'inline-btn' : 'action-btn'" :disabled="busy(actionKey(action.action))" :title="action.tooltip || action.title" @click="runCustom(action)">{{ action.label || action.title || 'Run' }}</button>
-      <button v-if="item.save_action && item.show_save_button !== false" type="button" class="action-btn" :disabled="busy(actionKey(item.save_action))" @click="save(false)">{{ item.save_label || 'Save' }}</button>
+      <button v-if="item.save_action && item.show_save_button !== false && (!preview||editing)" type="button" class="action-btn" :disabled="busy(actionKey(item.save_action))" @click="save(false)">{{ item.save_label || 'Save' }}</button>
       <button v-if="item.reset_action" type="button" class="inline-btn danger" :disabled="busy(actionKey(item.reset_action))" @click="reset">{{ item.reset_label || 'Restore Default Settings' }}</button>
       <button v-if="item.remove_action" type="button" class="inline-btn danger" :disabled="busy(actionKey(item.remove_action))" @click="remove">{{ item.remove_label || 'Remove' }}</button>
       <button v-if="showPopupButton" type="button" class="action-btn" @click="popupOpen = true">{{ item.settings_label || ui.item_fields_popup_label || 'Settings' }}</button>

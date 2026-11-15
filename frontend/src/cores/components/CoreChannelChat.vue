@@ -5,6 +5,7 @@ import type { CoreTabSpec, JsonRow } from "../types";
 import CoreManagerItems from "./CoreManagerItems.vue";
 import {workspaceKey} from '../drafts';
 import {workspaceTabs,presentationFor} from '../workspace';
+import {workspaceScreen} from '../presentation';
 
 const props = defineProps<{
   payload: JsonRow;
@@ -63,8 +64,11 @@ function itemsFor(group: unknown): JsonRow[] {
 }
 function listOptions(source: JsonRow | null): JsonRow {
   if (!source) return {};
+  const screen=workspaceScreen(source,metadata.value);
   return {
-    presentation:presentationFor(source,metadata.value),
+    presentation:screen.layout||presentationFor(source,metadata.value),
+    screen,
+    stats:body.value.stats||[],
     server_pagination:source.server_pagination,
     bulk_actions:source.bulk_actions,
     selector: Boolean(source.selector),
@@ -187,7 +191,7 @@ onMounted(() => void scrollToBottom(true));
       <button v-for="entry in topTabs" :key="entry.key" type="button" class="core-manager-tab-btn" :class="{ active: activeTab === entry.key }" @click="activeTab = entry.key">{{ entry.label || entry.key }}</button>
     </nav>
 
-    <section v-if="activeTab === 'chat'" class="core-channel-chat-shell">
+    <div v-if="activeTab === 'chat'" class="cw-radio-workspace" data-workspace-layout="radio"><section class="core-channel-chat-shell">
       <aside class="core-channel-rail" aria-label="Mesh channels">
         <div class="core-channel-rail-title"><span>Channels</span><small>{{ channels.length }}</small></div>
         <button v-for="channel in channels" :key="channel.id" type="button" :class="{ active: selectedChannel === String(channel.id) }" @click="selectChannel(channel)">
@@ -220,7 +224,7 @@ onMounted(() => void scrollToBottom(true));
           <div><small>Enter to send · Shift+Enter for a new line</small><span>{{ draft.length }}/{{ maxLength }}</span><button class="tv-button primary" type="submit" :disabled="!connection.connected || !draft.trim() || isBusy('chat:send')">{{ isBusy('chat:send') ? 'Sending…' : composer.send_label || 'Send' }}</button></div>
         </form>
       </div>
-    </section>
+    </section><aside class="cw-purpose-context"><h3>Radio context</h3><dl><div><dt>Radio</dt><dd>{{ connection.radio_name||'No radio selected' }}</dd></div><div><dt>Transport</dt><dd>{{ connection.transport||'Not connected' }}</dd></div><div><dt>Connection</dt><dd>{{ connection.label||(connection.connected?'Connected':'Disconnected') }}</dd></div><div><dt>Channel</dt><dd>{{ currentChannel?.label||selectedChannel }}</dd></div></dl><button v-if="topTabs.some(entry=>entry.key==='nodes')" class="cw-text-button" type="button" @click="activeTab='nodes'">Nodes &amp; signal →</button></aside></div>
 
     <section v-else-if="currentManager" class="card core-channel-manager">
       <header class="card-head"><div><span class="tv-eyebrow">Meshtastic</span><h3 class="card-title">{{ currentManager.label || currentManager.key }}</h3></div></header>

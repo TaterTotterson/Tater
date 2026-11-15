@@ -12,6 +12,14 @@ test('all twelve cores have layouts with backward compatible defaults',()=>{
  for(const [key,row] of Object.entries(metadata)){assert.equal(row.schema,1);assert.equal(coreWorkspace(key).description,row.description);assert.equal(coreWorkspace(key,{schema:99,description:'invalid'}).description,row.description);}
  assert.equal(coreWorkspace('community_core').icon,'cores');assert.equal(coreWorkspace('community_core',{schema:1,description:'Custom'}).description,'Custom');
 });
+test('older installed metadata keeps new screen defaults and custom screens remain authoritative',()=>{
+ const old={schema:1,views:{items:'list'},description:'Installed task core'};
+ const merged=coreWorkspace('ai_task_core',old);
+ assert.equal(merged.screens.items.layout,'tasks');
+ assert.equal(merged.description,old.description);
+ assert.equal(coreWorkspace('ai_task_core',{...old,screens:{items:{layout:'custom'}}}).screens.items.layout,'custom');
+ assert.deepEqual(old,{schema:1,views:{items:'list'},description:'Installed task core'});
+});
 test('tab ordering and labels preserve original contracts and future tabs',()=>{
  const tabs=[{key:'settings',source:'items',action:'save'},{key:'future',source:'custom'},{key:'library',groups:[{key:'albums'}]}];const before=structuredClone(tabs);
  const result=workspaceTabs(tabs,coreWorkspace('music_core'));
