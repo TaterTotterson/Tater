@@ -1,49 +1,36 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
-import PopupTransition from "../../shared/PopupTransition.vue";
-import DynamicField from "./DynamicField.vue";
-import type { MusicField, MusicItem, MusicPlayerRow } from "../types";
 import {
-  groupPlayerTargets,
-  playerFriendlyName,
-  playerSecondaryText,
-  playerTargetKind,
-} from "../playerDisplay";
-
-type PlayerSetting = {
-  volume_percent: number;
-  sync_offset_ms: number;
-  transport_mode: "auto" | "native" | "airplay";
-};
-
+  computed,
+  onMounted,
+  onBeforeUnmount,
+  onActivated,
+  onDeactivated,
+  ref,
+  watch,
+} from "vue";
+import MusicIcon from "./MusicIcon.vue";
+import type { MusicItem } from "../types";
+import { playerFriendlyName } from "../playerDisplay";
 const props = defineProps<{
   item: MusicItem;
   busy: (key: string) => boolean;
-  run: (action: string, payload: Record<string, unknown>, busyKey?: string) => Promise<boolean>;
+  run: (
+    action: string,
+    payload: Record<string, unknown>,
+    busyKey?: string,
+  ) => Promise<boolean>;
 }>();
-
-const speakersOpen = ref(false);
-const volume = ref(75);
-const speakerValues = ref<Record<string, unknown>>({});
-const playerSettings = ref<Record<string, PlayerSetting>>({});
-const speakersDirty = ref(false);
-const volumeEditing = ref(false);
-
-const volumeField = computed(() => props.item.fields?.find((field) => field.key === "volume_percent"));
-const popupFields = computed(() => props.item.popup_fields || []);
-const playerRows = computed(() => props.item.player_rows || []);
-const playerSections = computed(() => groupPlayerTargets(playerRows.value, (row) => row.target));
-const volumeStyle = computed<Record<string, string>>(() => ({
-  "--tm-volume-percent": `${Math.max(0, Math.min(100, volume.value))}%`,
-}));
-const selectedPlayerCount = computed(() => selectedTargets().length);
-
-function copyFieldValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map((entry) => (entry && typeof entry === "object" ? { ...entry } : entry));
-  if (value && typeof value === "object") return { ...(value as Record<string, unknown>) };
-  return value;
-}
-
+const emit = defineEmits<{ speakers: [] }>();
+const volume = ref(75),
+  volumeEditing = ref(false),
+  seeking = ref(false),
+  seekPosition = ref(0),
+  now = ref(Date.now() / 1000);
+let timer = 0;
+let seekTrackId = "";
+const volumeField = computed(() =>
+  props.item.fields?.find((field) => field.key === "volume_percent"),
+);
 watch(
   volumeField,
   (field) => {
@@ -51,428 +38,239 @@ watch(
   },
   { immediate: true },
 );
-
-watch(
-  [popupFields, playerRows],
-  ([fields]) => {
-    if (!speakersOpen.value || !speakersDirty.value) syncSpeakerValues(fields);
-  },
-  { immediate: true },
+const selected = computed(() =>
+  (props.item.player_rows || []).filter((row) => row.selected),
 );
-
-function syncSpeakerValues(fields = popupFields.value): void {
-  speakerValues.value = Object.fromEntries(fields.map((field) => [field.key, copyFieldValue(field.value)]));
-  playerSettings.value = Object.fromEntries(
-    playerRows.value.map((row) => [
-      row.target,
-      {
-        volume_percent: clampNumber(row.volume_percent, 75, 0, 100),
-        sync_offset_ms: clampNumber(row.sync_offset_ms, 0, -1000, 1000),
-        transport_mode: transportMode(row.transport_mode),
-      },
-    ]),
+const destinations = computed(() =>
+  selected.value.length === 1
+    ? playerFriendlyName(selected.value[0].label, selected.value[0].target)
+    : selected.value.length
+      ? String(selected.value.length) + " destinations"
+      : "Choose speakers",
+);
+const timeline = computed(() => props.item.timeline);
+const duration = computed(() =>
+  Math.max(0, Number(timeline.value?.duration_seconds || 0)),
+);
+const position = computed(() => {
+  if (seeking.value) return seekPosition.value;
+  const t = timeline.value;
+  const offset = Number(t?.position_offset_seconds || 0);
+  const elapsed =
+    t?.status === "playing" && t.started_at
+      ? Math.max(0, now.value - t.started_at)
+      : 0;
+  return Math.min(duration.value || Infinity, Math.max(0, offset + elapsed));
+});
+const seekable = computed(() =>
+  Boolean(timeline.value?.seekable && props.item.seek_action),
+);
+const transport = computed(() =>
+  [...(props.item.actions || [])].sort(
+    (a, b) => rank(a.action) - rank(b.action),
+  ),
+);
+function rank(action: string) {
+  return action.endsWith("_previous")
+    ? 0
+    : action.endsWith("_play") || action.endsWith("_pause")
+      ? 1
+      : action.endsWith("_next")
+        ? 2
+        : 3;
+}
+function glyph(action: string) {
+  return action.endsWith("_previous")
+    ? "previous"
+    : action.endsWith("_next")
+      ? "next"
+      : action.endsWith("_pause")
+        ? "pause"
+        : action.endsWith("_play")
+          ? "play"
+          : "stop";
+}
+function time(seconds: number) {
+  const n = Math.max(0, Math.floor(seconds));
+  return Math.floor(n / 60) + ":" + String(n % 60).padStart(2, "0");
+}
+function startClock() {
+  window.clearInterval(timer);
+  now.value = Date.now() / 1000;
+  timer = window.setInterval(() => (now.value = Date.now() / 1000), 1000);
+}
+onMounted(startClock);
+onActivated(startClock);
+onDeactivated(() => window.clearInterval(timer));
+onBeforeUnmount(() => window.clearInterval(timer));
+async function control(action: string) {
+  await props.run(
+    action,
+    { id: props.item.id, values: { volume_percent: volume.value } },
+    "transport",
   );
 }
-
-function clampNumber(value: unknown, fallback: number, minimum: number, maximum: number): number {
-  const parsed = Number(value);
-  return Math.max(minimum, Math.min(maximum, Number.isFinite(parsed) ? parsed : fallback));
+function updateVolumeFromEvent(event: Event) {
+  volumeEditing.value = true;
+  volume.value = Number((event.target as HTMLInputElement).value);
 }
-
-function transportMode(value: unknown): "auto" | "native" | "airplay" {
-  const mode = String(value || "").toLowerCase();
-  return mode === "native" || mode === "airplay" ? mode : "auto";
+async function setVolume() {
+  if (volumeField.value?.action)
+    await props.run(
+      volumeField.value.action,
+      { id: props.item.id, values: { volume_percent: volume.value } },
+      "volume",
+    );
+  volumeEditing.value = false;
+  volume.value = Number(volumeField.value?.value ?? volume.value);
 }
-
-function selectedTargets(): string[] {
-  const raw = speakerValues.value.targets;
-  if (Array.isArray(raw)) return raw.map(String).filter(Boolean);
-  return typeof raw === "string" && raw ? [raw] : [];
+function stageSeek(event: Event) {
+  if (!seeking.value) seekTrackId = timeline.value?.track_id || "";
+  seeking.value = true;
+  seekPosition.value = Number((event.target as HTMLInputElement).value);
 }
-
-function isPlayerSelected(target: string): boolean {
-  return selectedTargets().includes(target);
-}
-
-function setPlayerSelected(target: string, selected: boolean): void {
-  const targets = selectedTargets();
-  speakerValues.value = {
-    ...speakerValues.value,
-    targets: selected
-      ? Array.from(new Set([...targets, target]))
-      : targets.filter((entry) => entry !== target),
-  };
-  speakersDirty.value = true;
-}
-
-function playerSetting(target: string): PlayerSetting {
-  return playerSettings.value[target] || {
-    volume_percent: 75,
-    sync_offset_ms: 0,
-    transport_mode: "auto",
-  };
-}
-
-function updateTransportMode(target: string, event: Event): void {
-  const current = playerSetting(target);
-  playerSettings.value = {
-    ...playerSettings.value,
-    [target]: {
-      ...current,
-      transport_mode: transportMode((event.target as HTMLSelectElement).value),
-    },
-  };
-  speakersDirty.value = true;
-}
-
-function updatePlayerVolumeFromEvent(target: string, event: Event): void {
-  const current = playerSetting(target);
-  playerSettings.value = {
-    ...playerSettings.value,
-    [target]: {
-      ...current,
-      volume_percent: clampNumber(
-        (event.target as HTMLInputElement).value,
-        current.volume_percent,
-        0,
-        100,
-      ),
-    },
-  };
-  speakersDirty.value = true;
-}
-
-function syncQualityLabel(row: MusicPlayerRow): string {
-  if (row.sync_quality === "precise") return "Precise sync";
-  if (row.sync_quality === "bridge") return "AirPlay bridge";
-  if (row.sync_quality === "automatic") {
-    const mode = playerSetting(row.target).transport_mode;
-    if (mode === "native") return "Native Sonos";
-    if (mode === "airplay") return "AirPlay bridge";
-    return "Auto sync";
-  }
-  return "Best effort";
-}
-
-function syncQualityTitle(row: MusicPlayerRow): string {
-  if (row.sync_quality === "precise") return "Clock-scheduled Tater playback";
-  if (row.sync_quality === "bridge") return "Wall-clock scheduled through Tater AirPlay Bridge";
-  if (row.sync_quality === "automatic") {
-    return "Automatic uses AirPlay Bridge with Tater sats and native Sonos otherwise";
-  }
-  return "Timing depends on the external player";
-}
-
-function playerKind(row: MusicPlayerRow): string {
-  return playerTargetKind(row.target);
-}
-
-function playerDisplayName(row: MusicPlayerRow): string {
-  return playerFriendlyName(row.label, row.target);
-}
-
-function playerDisplayMeta(row: MusicPlayerRow): string {
-  return playerSecondaryText(row.label, row.meta, row.target);
-}
-
-function playerGlyph(row: MusicPlayerRow): string {
-  const kind = playerKind(row);
-  if (kind === "stereo") return "T²";
-  if (kind === "satellite") return "T";
-  if (kind === "airplay") return "△";
-  if (kind === "sonos") return "S";
-  if (kind === "home") return "H";
-  return "♪";
-}
-
-function openSpeakers(): void {
-  syncSpeakerValues();
-  speakersDirty.value = false;
-  speakersOpen.value = true;
-}
-
-function closeSpeakers(): void {
-  speakersOpen.value = false;
-  speakersDirty.value = false;
-  syncSpeakerValues();
-}
-
-function controlClass(action: string): string {
-  if (action.endsWith("_play") || action.endsWith("_pause")) return "primary";
-  if (action.endsWith("_stop")) return "stop";
-  return "";
-}
-
-function actionGlyph(action: string, fallback: string): string {
-  if (action.endsWith("_previous")) return "⏮";
-  if (action.endsWith("_pause")) return "⏸";
-  if (action.endsWith("_stop")) return "■";
-  if (action.endsWith("_next")) return "⏭";
-  return fallback;
-}
-
-async function runTransport(action: string): Promise<void> {
-  await props.run(action, { id: props.item.id, values: { volume_percent: volume.value } }, "transport");
-}
-
-async function setVolume(): Promise<void> {
-  const field = volumeField.value;
-  if (!field?.action) {
-    volumeEditing.value = false;
+async function commitSeek() {
+  if (!seekable.value || seekTrackId !== (timeline.value?.track_id || "")) {
+    seeking.value = false;
     return;
   }
-  const saved = await props.run(
-    field.action,
-    { id: props.item.id, values: { volume_percent: volume.value } },
-    "volume",
-  );
-  volumeEditing.value = false;
-  if (!saved) volume.value = Number(volumeField.value?.value ?? volume.value);
-}
-
-function updateVolume(value: unknown): void {
-  volume.value = Number(value);
-  volumeEditing.value = true;
-}
-
-function updateVolumeFromEvent(event: Event): void {
-  updateVolume((event.target as HTMLInputElement).value);
-}
-
-async function saveSpeakers(): Promise<void> {
-  if (!props.item.save_action) return;
-  const saved = await props.run(
-    props.item.save_action,
-    {
-      id: props.item.id,
-      values: { ...speakerValues.value, player_settings: playerSettings.value },
-    },
-    "speakers",
-  );
-  if (saved) {
-    speakersDirty.value = false;
-    syncSpeakerValues();
-    speakersOpen.value = false;
-  }
-}
-
-async function testSync(): Promise<void> {
-  if (!props.item.test_sync_action || selectedTargets().length === 0) return;
   await props.run(
-    props.item.test_sync_action,
-    {
-      id: props.item.id,
-      values: { ...speakerValues.value, player_settings: playerSettings.value },
-    },
-    "sync-test",
+    props.item.seek_action!,
+    { id: props.item.id, values: { position_seconds: seekPosition.value } },
+    "seek",
   );
+  seeking.value = false;
+  now.value = Date.now() / 1000;
 }
-
-function setSpeakerValue(field: MusicField, value: unknown): void {
-  speakerValues.value = { ...speakerValues.value, [field.key]: value };
-  speakersDirty.value = true;
+async function shuffle() {
+  if (props.item.track_list_shuffle_action)
+    await props.run(
+      props.item.track_list_shuffle_action,
+      {
+        id: props.item.id,
+        values: { shuffle: !props.item.track_list_shuffle },
+      },
+      "shuffle",
+    );
+}
+async function repeat() {
+  if (props.item.repeat_action)
+    await props.run(
+      props.item.repeat_action,
+      {
+        id: props.item.id,
+        values: {
+          repeat:
+            props.item.repeat === "off"
+              ? "all"
+              : props.item.repeat === "all"
+                ? "one"
+                : "off",
+        },
+      },
+      "repeat",
+    );
 }
 </script>
-
 <template>
-  <section class="tm-player" aria-label="Music player">
-    <div id="tm-player-details" class="tm-player-main">
-      <div class="tm-art-wrap">
-        <img v-if="item.hero_image_src" class="tm-art" :src="item.hero_image_src" :alt="item.hero_image_alt || ''" />
-        <div v-else class="tm-art tm-art-placeholder" aria-hidden="true">♫</div>
-      </div>
-
-      <div class="tm-now-playing">
-        <h2>{{ item.title || 'Music Player' }}</h2>
-        <p>{{ item.subtitle || item.detail }}</p>
-      </div>
-
-      <div class="tm-transport" aria-label="Playback controls">
+  <section class="tm-player tm-workspace-dock" aria-label="Music player">
+    <div class="tm-dock-track">
+      <img
+        v-if="item.hero_image_src"
+        :src="item.hero_image_src"
+        :alt="item.hero_image_alt || ''"
+      />
+      <span v-else class="tm-art-fallback" aria-hidden="true"
+        ><MusicIcon name="music"
+      /></span>
+      <span
+        ><strong>{{
+          item.now_playing?.title || item.title || "Nothing playing"
+        }}</strong
+        ><small>{{ item.now_playing?.artist || item.subtitle }}</small></span
+      >
+    </div>
+    <div class="tm-dock-center">
+      <div class="tm-dock-transport" aria-label="Playback controls">
         <button
-          v-for="entry in item.actions || []"
+          v-if="item.track_list_shuffle_action"
+          type="button"
+          aria-label="Shuffle"
+          :aria-pressed="Boolean(item.track_list_shuffle)"
+          :disabled="busy('shuffle')"
+          @click="shuffle"
+        >
+          <MusicIcon name="shuffle" />
+        </button>
+        <button
+          v-for="entry in transport"
           :key="entry.action"
           type="button"
-          :class="[controlClass(entry.action), { 'is-play': entry.action.endsWith('_play') }]"
+          :class="{
+            'tm-dock-play': ['_play', '_pause'].some((suffix) =>
+              entry.action.endsWith(suffix),
+            ),
+          }"
           :disabled="busy('transport')"
           :aria-label="entry.aria_label || entry.label"
           :title="entry.tooltip || entry.label"
-          @click="runTransport(entry.action)"
+          @click="control(entry.action)"
         >
-          <svg
-            v-if="entry.action.endsWith('_play')"
-            class="tm-transport-play-icon"
-            viewBox="0 0 24 24"
-            focusable="false"
-            aria-hidden="true"
-          >
-            <path d="M10 6.5 22 13.5 10 20.5Z" />
-          </svg>
-          <span v-else class="tm-transport-glyph" aria-hidden="true">
-            {{ actionGlyph(entry.action, entry.label || 'Run') }}
-          </span>
+          <MusicIcon :name="glyph(entry.action)" />
         </button>
-      </div>
-
-      <div class="tm-player-utility">
-        <label v-if="volumeField" class="tm-player-volume" :style="volumeStyle">
-          <span aria-hidden="true">♪</span>
-          <input
-            type="range"
-            min="0"
-            max="100"
-            step="1"
-            :value="volume"
-            :disabled="busy('volume')"
-            aria-label="Music volume"
-            @input="updateVolumeFromEvent"
-            @change="setVolume"
-          />
-          <output>{{ volume }}%</output>
-        </label>
         <button
+          v-if="item.repeat_action"
           type="button"
-          class="tm-speaker-button"
-          :aria-label="item.settings_aria_label || 'Choose speakers and players'"
-          title="Choose speakers and players"
-          @click="openSpeakers"
+          :aria-label="'Repeat: ' + (item.repeat || 'off')"
+          :title="'Repeat: ' + (item.repeat || 'off')"
+          :aria-pressed="item.repeat !== 'off'"
+          :disabled="busy('repeat')"
+          @click="repeat"
         >
-          <span aria-hidden="true">🔊</span>
-          <span class="tm-speaker-label">
-            {{ selectedPlayerCount ? `${selectedPlayerCount} Player${selectedPlayerCount === 1 ? '' : 's'}` : 'Players' }}
-          </span>
+          <MusicIcon :name="item.repeat === 'one' ? 'repeat-one' : 'repeat'" />
         </button>
       </div>
-
+      <label v-if="timeline" class="tm-timeline"
+        ><span>{{ time(position) }}</span
+        ><input
+          type="range"
+          min="0"
+          :max="duration || 1"
+          step="1"
+          :value="position"
+          :disabled="!seekable || busy('seek')"
+          aria-label="Track position"
+          @input="stageSeek"
+          @change="commitSeek"
+        /><span>{{ time(duration) }}</span></label
+      >
     </div>
-
-    <PopupTransition :open="speakersOpen" backdrop-class="tm-modal-backdrop" @close="closeSpeakers">
-        <section class="tm-modal" role="dialog" aria-modal="true" aria-labelledby="tm-speaker-title">
-          <header>
-            <div>
-              <div class="tm-eyebrow">Playback destination</div>
-              <h3 id="tm-speaker-title">{{ item.settings_title || 'Choose Speakers & Players' }}</h3>
-            </div>
-            <button type="button" class="tm-close" aria-label="Close" @click="closeSpeakers">×</button>
-          </header>
-          <div class="tm-modal-body">
-            <div v-if="playerRows.length" class="tm-player-rows">
-              <div class="tm-player-picker-intro">
-                <p class="tm-player-calibration-help">
-                  Pick any combination of Tater sats and external speakers. Selected players expand for playback route and volume.
-                </p>
-                <strong>{{ selectedTargets().length }} selected</strong>
-              </div>
-              <section v-for="section in playerSections" :key="section.key" class="tm-player-section">
-                <h4>{{ section.label }}</h4>
-                <div class="tm-player-section-list">
-                  <article
-                    v-for="row in section.items"
-                    :key="row.target"
-                    class="tm-player-row"
-                    :class="[
-                      `kind-${playerKind(row)}`,
-                      { 'is-selected': isPlayerSelected(row.target) },
-                    ]"
-                  >
-                  <header>
-                  <label class="tm-player-row-select">
-                    <input
-                      type="checkbox"
-                      :checked="isPlayerSelected(row.target)"
-                      @change="setPlayerSelected(row.target, ($event.target as HTMLInputElement).checked)"
-                    />
-                    <span class="tm-player-row-icon" aria-hidden="true">{{ playerGlyph(row) }}</span>
-                    <span class="tm-player-row-copy">
-                      <strong>{{ playerDisplayName(row) }}</strong>
-                      <small v-if="playerDisplayMeta(row)">{{ playerDisplayMeta(row) }}</small>
-                    </span>
-                  </label>
-                  <span
-                    class="tm-sync-quality"
-                    :class="`is-${row.sync_quality || 'best_effort'}`"
-                    :title="syncQualityTitle(row)"
-                  >
-                    {{ syncQualityLabel(row) }}
-                  </span>
-                </header>
-
-                <div
-                  v-if="isPlayerSelected(row.target)"
-                  class="tm-player-row-controls"
-                  :class="{
-                    'has-transport': Boolean(row.transport_options?.length),
-                  }"
-                >
-                  <label v-if="row.transport_options?.length" class="tm-player-row-control tm-transport-mode-control">
-                    <span>
-                      <strong>Playback route</strong>
-                      <output>{{ playerSetting(row.target).transport_mode === 'auto' ? 'Context aware' : 'Fixed' }}</output>
-                    </span>
-                    <select
-                      :value="playerSetting(row.target).transport_mode"
-                      :disabled="!isPlayerSelected(row.target)"
-                      :aria-label="`${row.label || row.target} playback route`"
-                      @change="updateTransportMode(row.target, $event)"
-                    >
-                      <option
-                        v-for="option in row.transport_options"
-                        :key="option.value"
-                        :value="option.value"
-                      >{{ option.label }}</option>
-                    </select>
-                  </label>
-
-                  <label class="tm-player-row-control">
-                    <span><strong>Volume</strong><output>{{ playerSetting(row.target).volume_percent }}%</output></span>
-                    <input
-                      type="range"
-                      min="0"
-                      max="100"
-                      step="1"
-                      :value="playerSetting(row.target).volume_percent"
-                      :disabled="!isPlayerSelected(row.target)"
-                      :aria-label="`${row.label || row.target} volume`"
-                      @input="updatePlayerVolumeFromEvent(row.target, $event)"
-                    />
-                  </label>
-                </div>
-                  </article>
-                </div>
-              </section>
-            </div>
-            <template v-else>
-              <DynamicField
-                v-for="field in popupFields"
-                :key="field.key"
-                :field="field"
-                :model-value="speakerValues[field.key]"
-                @update:model-value="setSpeakerValue(field, $event)"
-              />
-            </template>
-          </div>
-          <footer class="tm-player-modal-footer">
-            <button
-              v-if="item.test_sync_action && playerRows.length"
-              type="button"
-              class="tm-button secondary tm-sync-test"
-              :disabled="busy('sync-test') || selectedTargets().length === 0"
-              title="Stops current music and plays a short click track"
-              @click="testSync"
-            >
-              {{ busy('sync-test') ? 'Starting test…' : 'Test sync' }}
-            </button>
-            <span class="tm-modal-footer-spacer" />
-            <button type="button" class="tm-button secondary" @click="closeSpeakers">Cancel</button>
-            <button
-              type="button"
-              class="tm-button primary"
-              :disabled="busy('speakers') || selectedTargets().length === 0"
-              @click="saveSpeakers"
-            >
-              Set players
-            </button>
-          </footer>
-        </section>
-    </PopupTransition>
+    <div class="tm-dock-utility">
+      <label
+        v-if="volumeField"
+        class="tm-player-volume"
+        :style="{ '--tm-volume-percent': volume + '%' }"
+        ><MusicIcon name="speaker" /><input
+          type="range"
+          min="0"
+          max="100"
+          step="1"
+          :value="volume"
+          :disabled="busy('volume')"
+          aria-label="Music volume"
+          @input="updateVolumeFromEvent"
+          @change="setVolume"
+        /><output>{{ volume }}%</output></label
+      >
+      <button
+        type="button"
+        class="tm-dock-speakers"
+        :aria-label="item.settings_aria_label || 'Choose speakers and players'"
+        @click="emit('speakers')"
+      >
+        <MusicIcon name="speaker" /><span>{{ destinations }}</span
+        ><MusicIcon name="chevron" />
+      </button>
+    </div>
   </section>
 </template>

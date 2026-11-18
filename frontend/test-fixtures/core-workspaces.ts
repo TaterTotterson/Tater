@@ -27,3 +27,5 @@ const app=createApp({setup(){
  ]);
 }});
 app.mount('#app');
+
+import '../src/music/music-workspace.css';

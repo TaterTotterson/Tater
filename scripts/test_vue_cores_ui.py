@@ -177,7 +177,7 @@ class VueCoresTests(unittest.TestCase):
             REPO_ROOT / "frontend" / "src" / "music" / "components" / "DynamicField.vue"
         ).read_text(encoding="utf-8")
         player = (
-            REPO_ROOT / "frontend" / "src" / "music" / "components" / "MusicPlayer.vue"
+            REPO_ROOT / "frontend" / "src" / "music" / "components" / "SpeakersWorkspace.vue"
         ).read_text(encoding="utf-8")
 
         for heading in ("Tater Native Sats", "Tater Stereo Pairs", "AirPlay Devices"):
@@ -185,10 +185,10 @@ class VueCoresTests(unittest.TestCase):
         self.assertIn("groupPlayerTargets", dynamic)
         self.assertIn("optionDisplayName", dynamic)
         self.assertIn("groupPlayerTargets", player)
-        self.assertIn("playerDisplayName", player)
+        self.assertIn("playerFriendlyName", player)
         self.assertNotIn('<strong>Audio sync</strong>', player)
         self.assertNotIn('class="tm-player-row-control tm-sync-control"', player)
-        self.assertIn("sync_offset_ms: clampNumber", player)
+        self.assertIn('sync_offset_ms', player)
 
     def test_webui_assets_are_cache_busted_by_the_current_build(self) -> None:
         app_js = (REPO_ROOT / "tateros_static" / "app.js").read_text(encoding="utf-8")
@@ -213,36 +213,23 @@ class VueCoresTests(unittest.TestCase):
             REPO_ROOT / "frontend" / "src" / "music" / "components" / "TrackList.vue"
         ).read_text(encoding="utf-8")
 
-        self.assertIn("activeManagerTab?.source === 'player_queue'", app)
+        self.assertIn("selectedTab === 'playlist'", app)
         self.assertIn("<TrackList", app)
         self.assertNotIn("tm-player-size-toggle", player)
         self.assertNotIn("is-collapsed", player)
         self.assertNotIn("progressStyle", player)
         self.assertIn("tm-player-volume", player)
-        self.assertIn("selectedPlayerCount", player)
+        self.assertIn("destinations", player)
         self.assertIn("tm-queue-tab", track_list)
 
-    def test_music_play_triangle_uses_geometric_centering(self) -> None:
-        player = (
-            REPO_ROOT / "frontend" / "src" / "music" / "components" / "MusicPlayer.vue"
-        ).read_text(encoding="utf-8")
-        styles = (
-            REPO_ROOT / "frontend" / "src" / "music" / "music-core.css"
-        ).read_text(encoding="utf-8")
-
-        # Keep both the circle and SVG explicitly sized. Percentage-sized SVGs
-        # can contribute their 300px intrinsic width to an auto-sized button in
-        # WebKit and blow out the slim player layout.
-        self.assertIn('viewBox="0 0 24 24"', player)
-        self.assertIn('<path d="M10 6.5 22 13.5 10 20.5Z" />', player)
-        self.assertNotIn('return "▶"', player)
-        self.assertIn(".tm-transport-play-icon {", styles)
-        self.assertIn("width: 14px;", styles)
-        self.assertIn("height: 14px;", styles)
-        self.assertIn("flex: 0 0 30px;", styles)
-        self.assertIn("flex-basis: 36px;", styles)
-        self.assertNotIn("width: 44%;", styles)
-        self.assertNotIn("button.is-play .tm-transport-glyph", styles)
+    def test_music_transport_icons_have_explicit_size_and_centered_geometry(self) -> None:
+        icon = (REPO_ROOT / "frontend/src/music/components/MusicIcon.vue").read_text()
+        styles = (REPO_ROOT / "frontend/src/music/music-workspace.css").read_text()
+        self.assertIn('viewBox="0 0 24 24"', icon)
+        self.assertIn('width="18"', icon)
+        self.assertIn('height="18"', icon)
+        self.assertIn('d="m8 4 13 8-13 8Z"', icon)
+        self.assertIn(".tm-dock-transport .tm-dock-play", styles)
 
 
 if __name__ == "__main__":

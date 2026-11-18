@@ -27,7 +27,7 @@ async function updateShuffle(event: Event): Promise<void> {
 </script>
 
 <template>
-  <section class="tm-queue tm-queue-tab" aria-label="Current playlist">
+  <section class="tm-queue tm-queue-tab" aria-label="Current queue">
     <header class="tm-queue-header">
       <span>
         <strong>{{ item.track_list_label || 'Playlist' }}</strong>
@@ -45,7 +45,7 @@ async function updateShuffle(event: Event): Promise<void> {
         </label>
       </span>
     </header>
-    <div v-if="item.track_list?.length" class="tm-track-scroll" role="listbox" aria-label="Current track list">
+    <div v-if="item.track_list?.length" class="tm-track-scroll" aria-label="Current track list">
       <button
         v-for="track in item.track_list"
         :key="track.id || track.position"
@@ -54,8 +54,8 @@ async function updateShuffle(event: Event): Promise<void> {
         :class="{ active: track.active, pending: busy(`track:${track.id}`) }"
         :disabled="busy(`track:${track.id}`)"
         :aria-current="track.active ? 'true' : undefined"
-        :title="`Double-click to play ${track.title || 'this track'}`"
-        @dblclick="playTrack(track)"
+        :title="`Play ${track.title || 'this track'}`"
+        @click="playTrack(track)"
       >
         <span class="tm-track-position">{{ track.active ? '▶' : track.position }}</span>
         <img

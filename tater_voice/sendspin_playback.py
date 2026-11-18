@@ -868,6 +868,17 @@ class _SendspinPeer:
         )
 
     def uses_legacy_player_audio_wire(self) -> bool:
+        device_info = self.client_hello.get("device_info")
+        device_info = device_info if isinstance(device_info, dict) else {}
+        if (
+            self.noise_transport is not None
+            and _text(device_info.get("product_name")) == "Tater ThirdReality S420"
+        ):
+            # S420 patches its hello for aiosendspin 9.1.1 compatibility, but
+            # sendspin-cpp still consumes the modern four-byte send_ahead field.
+            # Its hello's supported_commands must not select the shorter header:
+            # that would discard the first four bytes of every FLAC frame.
+            return False
         support = self.client_hello.get("player@v1_support")
         support = support if isinstance(support, dict) else {}
         return (

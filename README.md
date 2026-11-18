@@ -11,10 +11,11 @@
 
 **Tater** is a local-first AI platform that can run local models through **llama.cpp**, or connect to remote OpenAI-compatible and llama.cpp APIs. It supports voice satellites like **VoicePE**, **Sat1**, **S3Box**, and **ReSpeaker XVF3800**, plus portals for **Discord**, **Home Assistant**, **HomeKit**, **IRC**, **macOS**, **Matrix**, **Meshtastic**, **Telegram**, and **XBMC4Xbox**.
 
-**New in 3.0.1:** the Library first design now extends inside all twelve built-in
-Core workspaces, with clearer details, focused editors, timelines, weather views,
-and an upcoming music queue. Update the matching Cores from Tater Shop for the
-complete refresh. [Read the release notes](macos/Tater/RELEASE_NOTES.md).
+**New in 3.0.2:** a refreshed Music workspace with browse-first library pages,
+a persistent player, and dedicated speaker controls. This release also fixes
+ThirdReality stereo playback and adds STT wake-check timing controls. Update
+Music Core to **3.6.6** from Tater Shop for the complete music experience.
+[Read the release notes](macos/Tater/RELEASE_NOTES.md).
 
 ---
 
@@ -43,6 +44,18 @@ detection, microphone capture and speaker playback run on the satellite;
 Tater handles speech recognition, conversation, tools and spoken replies.
 Pair and manage your devices from Tater's Voice settings, with wake words,
 volume, device preferences and firmware updates where supported.
+
+In **Model Settings → Wake Word → STT wake verification**, the **Verification
+audio window** chooses 500–2000 ms of buffered audio to check (default 1000 ms).
+Try 2000 ms if short clips return empty text. **Wait for wake check** separately
+sets the maximum response wait from 500–2000 ms (default 500 ms). Apply changes
+to update connected satellites; saved values also apply when they reconnect.
+These controls use the existing satellite protocol and require no firmware
+installation. Empty STT results, provider errors, and timeouts allow listening.
+
+**Send audio to trainer** uses the trainer URL for direct satellite uploads.
+The separate **Auto-training link** is optional and lets the trainer publish
+new wake models back to Tater. Linking is not required to send audio.
 
 Choose the firmware or runtime for your hardware:
 

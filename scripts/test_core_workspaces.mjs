@@ -24,7 +24,7 @@ test('tab ordering and labels preserve original contracts and future tabs',()=>{
  const tabs=[{key:'settings',source:'items',action:'save'},{key:'future',source:'custom'},{key:'library',groups:[{key:'albums'}]}];const before=structuredClone(tabs);
  const result=workspaceTabs(tabs,coreWorkspace('music_core'));
  assert.deepEqual(result.map(t=>t.key),['library','settings','future']);assert.equal(result[0].label,'Library');assert.equal(result[1].action,'save');assert.deepEqual(tabs,before);
- assert.equal(initialWorkspaceTab(result,coreWorkspace('music_core'),'settings'),'library');assert.equal(initialWorkspaceTab(result,{default_tab:'missing'},'future'),'future');
+ assert.equal(initialWorkspaceTab(result,coreWorkspace('music_core'),'settings'),'settings');assert.equal(initialWorkspaceTab([{key:'listen'},...result],coreWorkspace('music_core'),'settings'),'listen');assert.equal(initialWorkspaceTab(result,{default_tab:'missing'},'future'),'future');
 });
 test('grouped forms retain every field exactly once, including unknown future options',()=>{
  for(const row of Object.values(metadata)){

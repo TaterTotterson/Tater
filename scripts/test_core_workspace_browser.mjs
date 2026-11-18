@@ -4,7 +4,7 @@ const {chromium}=await import(process.env.TATER_PLAYWRIGHT_MODULE||'playwright')
 const base=process.env.TATER_WORKSPACE_PREVIEW_URL||'http://127.0.0.1:5179/test-fixtures/core-workspaces.html';
 const shots=process.env.TATER_WORKSPACE_SCREENSHOTS;
 if(shots)await mkdir(shots,{recursive:true});
-const browser=await chromium.launch({headless:true});
+const browser=await chromium.launch({headless:true,...(process.env.CHROME_PATH?{executablePath:process.env.CHROME_PATH}:{})});
 const page=await browser.newPage({viewport:{width:1440,height:1000}});
 const errors=[];
 page.on('pageerror',error=>errors.push(error.message));
@@ -45,15 +45,16 @@ try{
  await page.evaluate(()=>window.workspaceMusic.payload.ui.item_forms.find(item=>item.group==='player').track_list=[
   {id:'past',title:'Already played'}, {id:'now',title:'Now playing',active:true}, {id:'next',title:'Next track'},
  ]);
- await page.getByText('Next track',{exact:true}).waitFor();
- assert.deepEqual(await page.locator('.cw-music-context li strong').allTextContents(),['Next track']);
+ await page.locator('.tm-listening-context').getByText('Next track',{exact:true}).waitFor();
+ assert.deepEqual(await page.locator('.tm-listening-context .tm-home-track strong').allTextContents(),['Next track']);
  console.log('PASS Up next follows the currently playing queue entry');
  await page.evaluate(()=>window.workspaceMusic.payload.ui.item_forms.find(item=>item.group==='player').popup_fields=[{key:'playback_note',label:'Playback note',type:'text',value:'Preserved setting'}]);
  await page.getByRole('button',{name:'Choose speakers and players',exact:true}).click();
  assert.equal(await page.getByLabel('Playback note',{exact:true}).inputValue(),'Preserved setting');
  await page.getByLabel('Playback note',{exact:true}).fill('Edited setting');
- await page.getByRole('button',{name:'Cancel',exact:true}).click();
- console.log('PASS Music player popup fields render as editable controls');
+ await page.getByRole('button',{name:'Reset changes',exact:true}).click();
+ assert.equal(await page.getByLabel('Playback note',{exact:true}).inputValue(),'Preserved setting');
+ console.log('PASS Music speaker settings remain editable and can be reset');
 
  await open('ai_task_core');
  await page.getByRole('button',{name:'Edit task',exact:true}).click();

@@ -265,6 +265,8 @@ GLOBAL_SATELLITE_CONTROL_KEYS = (
     "wake_sound_url",
     "continued_chat",
     "barge_in_enabled",
+    "wake_verifier_window_ms",
+    "wake_verifier_timeout_ms",
 )
 GLOBAL_WAKE_PROFILE_KEYS = (
     "wake_profile_key",
@@ -2447,6 +2449,8 @@ def shared_wake_settings_snapshot() -> Dict[str, Any]:
     current["wake_nww_enabled"] = nww_enabled
     current["wake_verifier_mode"] = _global_wake_verifier_mode()
     current["wake_verifier_threshold"] = _global_wake_verifier_threshold()
+    for key in ("wake_verifier_window_ms", "wake_verifier_timeout_ms"):
+        current[key] = global_settings[key]
     return current
 
 
@@ -4185,6 +4189,29 @@ def save_shared_wake_settings(values: Dict[str, Any]) -> Dict[str, Any]:
     result["scope"] = "shared_wake"
     result["family"] = "shared"
     return result
+
+
+def save_wake_verifier_timings(values: Dict[str, Any]) -> Dict[str, Any]:
+    """Save global clip/wait durations without reloading wake-model profiles."""
+    patch: Dict[str, int] = {}
+    for key, label in (
+        ("wake_verifier_window_ms", "Verification audio window"),
+        ("wake_verifier_timeout_ms", "Wake-check wait"),
+    ):
+        if key not in values:
+            continue
+        try:
+            duration = float(values[key])
+            if isinstance(values[key], bool) or not (500 <= duration <= 2000 and duration.is_integer()):
+                raise ValueError
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(f"{label} must be a whole number between 500 and 2000 ms.") from exc
+        patch[key] = int(duration)
+    current = settings_snapshot()
+    changed = {key: value for key, value in patch.items() if current[key] != value}
+    if changed:
+        redis_client.hset(SETTINGS_HASH_KEY, mapping={key: str(value) for key, value in changed.items()})
+    return {"updated_count": len(changed), "changed_keys": list(changed)}
 
 
 def save_settings(values: Dict[str, Any], *, selector: Any = "", board: Any = "") -> Dict[str, Any]:

@@ -13,6 +13,10 @@ if str(REPO_ROOT) not in sys.path:
 from tater_voice import home, native_live_settings, settings  # noqa: E402
 
 
+def form_value(form, key):
+    return next(field["value"] for section in form["sections"] for field in section["fields"] if field["key"] == key)
+
+
 class GlobalWakeVerifierSettingsTests(unittest.TestCase):
     def test_continued_chat_defaults_match_voice_pipeline(self) -> None:
         from tater_voice import voice_pipeline
@@ -328,9 +332,9 @@ class GlobalWakeVerifierSettingsTests(unittest.TestCase):
         self.assertEqual(card["group"], "wake_verifier")
         self.assertEqual(card["sections"][0]["fields"][0]["value"], "observe")
         self.assertEqual(card["sections"][0]["fields"][1]["value"], 0.85)
-        self.assertIn("3 checks", card["sections"][0]["fields"][2]["value"])
+        self.assertIn("3 checks", form_value(card, "wake_verifier_summary"))
         self.assertEqual(
-            card["sections"][0]["fields"][3]["value"],
+            form_value(card, "wake_verifier_stt_engine"),
             "faster_whisper",
         )
         rows = card["sections"][1]["fields"][0]["rows"]
@@ -379,7 +383,7 @@ class GlobalWakeVerifierSettingsTests(unittest.TestCase):
         ):
             card = home._wake_verifier_item_form(native_status)
 
-        self.assertIn("4 checks", card["sections"][0]["fields"][2]["value"])
+        self.assertIn("4 checks", form_value(card, "wake_verifier_summary"))
         row = card["sections"][1]["fields"][0]["rows"][0]
         self.assertEqual(row["accepted"], 3)
         self.assertEqual(row["rejected"], 1)
@@ -421,7 +425,7 @@ class GlobalWakeVerifierSettingsTests(unittest.TestCase):
             card = home._wake_verifier_item_form(native_status)
 
         self.assertEqual(
-            card["sections"][0]["fields"][3]["value"],
+            form_value(card, "wake_verifier_stt_engine"),
             "qwen3_asr_llama_cpp",
         )
         results_field = card["sections"][1]["fields"][0]

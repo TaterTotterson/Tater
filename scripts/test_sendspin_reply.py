@@ -203,6 +203,47 @@ class _FakeWebSocket:
 
 
 class SendspinReplyHandshakeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_thirdreality_compatibility_hello_preserves_flac_frame(self) -> None:
+        peer = sendspin_playback._SendspinPeer(
+            mock.Mock(),
+            {"selector": "native:office-left", "host": "192.0.2.10"},
+        )
+        peer.ws = _FakeWebSocket()
+        peer.noise_transport = mock.Mock(send_bytes=mock.AsyncMock())
+        peer.client_hello = {
+            "device_info": {"product_name": "Tater ThirdReality S420"},
+            "player@v1_support": {"supported_commands": ["volume", "mute"]},
+        }
+        flac_frame = b"\xff\xf8\x3a\x18\x00\x01frame"
+
+        with mock.patch.object(sendspin_playback, "_monotonic_us", return_value=1_000_000):
+            await peer.send_audio(2_000_000, flac_frame)
+
+        packet = peer.noise_transport.send_bytes.call_args.args[0]
+        # The deployed S420 reads a 13-byte header before its FLAC decoder.
+        self.assertEqual(struct.unpack(">qI", packet[1:13]), (2_000_000, 1_000_000))
+        self.assertEqual(packet[13:], flac_frame)
+
+    async def test_echo_compatibility_hello_keeps_legacy_pcm_header(self) -> None:
+        peer = sendspin_playback._SendspinPeer(
+            mock.Mock(),
+            {"selector": "native:checkers", "host": "192.0.2.11"},
+        )
+        peer.ws = _FakeWebSocket()
+        peer.noise_transport = mock.Mock(send_bytes=mock.AsyncMock())
+        peer.client_hello = {
+            "version": 1,
+            "device_info": {"product_name": "Tater Echo checkers"},
+            "player@v1_support": {"supported_commands": ["volume", "mute"]},
+        }
+        pcm = _little_endian_pcm([1000, -1000])
+
+        await peer.send_audio(2_000_000, pcm)
+
+        packet = peer.noise_transport.send_bytes.call_args.args[0]
+        self.assertEqual(struct.unpack(">q", packet[1:9])[0], 2_000_000)
+        self.assertEqual(packet[9:], pcm)
+
     async def test_client_time_requests_receive_four_timestamp_reply(self) -> None:
         peer = sendspin_playback._SendspinPeer(
             mock.Mock(),

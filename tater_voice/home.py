@@ -425,10 +425,10 @@ def _wake_trainer_link_item_form() -> Dict[str, Any]:
     return {
         "id": "voice_wake_trainer_link",
         "group": "wake_trainer_link",
-        "title": "Wake Word Trainer",
+        "title": "Auto-training link",
         "subtitle": (
-            "Securely link the trainer with a short pairing code. Once linked, only that trainer "
-            "can publish a new microWakeWord model to compatible satellites."
+            "Optional: automatically apply newly trained wake models. "
+            "Satellite audio uploads only need the trainer URL, not this link."
         ),
         "linked": linked,
         "status_label": "Linked" if linked else "Not Linked",
@@ -495,6 +495,7 @@ def _wake_verifier_item_form(native_status: Dict[str, Any]) -> Dict[str, Any]:
     total_rejected = 0
     total_fail_open = 0
     threshold = esphome_settings.wake_verifier_threshold()
+    verifier_timing = native_live_settings.settings_snapshot()
 
     for selector in sorted(selectors, key=esphome_runtime.text):
         raw_row = clients.get(selector) if isinstance(clients.get(selector), dict) else {}
@@ -598,7 +599,7 @@ def _wake_verifier_item_form(native_status: Dict[str, Any]) -> Dict[str, Any]:
         "title": "STT Wake Verification",
         "subtitle": (
             "Applies one mode to every Tater Native satellite. Observe records decisions without blocking; "
-            "Enabled rejects transcript mismatches and opens the mic if Tater errors or exceeds the 500 ms deadline. "
+            "Enabled rejects transcript mismatches and allows listening on empty STT results, errors, or timeouts. "
             "Verification uses the STT backend selected in Model Settings."
         ),
         "sections": [
@@ -629,6 +630,34 @@ def _wake_verifier_item_form(native_status: Dict[str, Any]) -> Dict[str, Any]:
                         "step": 0.01,
                         "format": "percent",
                         "description": "Minimum transcript similarity required in Enabled mode. Higher is stricter; lower tolerates harmless STT substitutions. The on-device wake model remains the first check.",
+                    },
+                    {
+                        "key": "wake_verifier_window_ms",
+                        "label": "Verification audio window",
+                        "type": "range",
+                        "value": verifier_timing["wake_verifier_window_ms"],
+                        "default": 1000,
+                        "min": 500,
+                        "max": 2000,
+                        "step": 100,
+                        "format": "milliseconds",
+                        "min_label": "shorter clip",
+                        "max_label": "more audio context",
+                        "description": "How much buffered audio before wake detection is sent to STT. Try 2000 ms if short clips return no text. This changes the audio clip length, not how long the satellite waits for a result.",
+                    },
+                    {
+                        "key": "wake_verifier_timeout_ms",
+                        "label": "Wait for wake check",
+                        "type": "range",
+                        "value": verifier_timing["wake_verifier_timeout_ms"],
+                        "default": 500,
+                        "min": 500,
+                        "max": 2000,
+                        "step": 100,
+                        "format": "milliseconds",
+                        "min_label": "shorter wait",
+                        "max_label": "more time to verify",
+                        "description": "Maximum time to wait for the wake check. Try 1000 ms if checks time out. Results are used as soon as they arrive; this does not add a fixed delay. If no result arrives, listening is allowed.",
                     },
                     {
                         "key": "wake_verifier_summary",
@@ -2116,12 +2145,21 @@ def handle_runtime_action(*, action: str, payload: Dict[str, Any], redis_client:
             raise ValueError("STT match threshold must be between 50% and 100%.") from exc
         if not 0.5 <= threshold <= 1.0:
             raise ValueError("STT match threshold must be between 50% and 100%.")
+        timings = {
+            key: values[key]
+            for key in ("wake_verifier_window_ms", "wake_verifier_timeout_ms")
+            if key in values
+        }
+        timing_result = native_live_settings.save_wake_verifier_timings(timings) if timings else {}
         result = esphome_settings.save_settings_values(
             {
                 esphome_settings.VOICE_WAKE_VERIFIER_MODE_KEY: mode,
                 esphome_settings.VOICE_WAKE_VERIFIER_THRESHOLD_KEY: threshold,
             }
         )
+        if timing_result:
+            result["updated_count"] = int(result.get("updated_count") or 0) + timing_result["updated_count"]
+            result["changed_keys"] = list(result.get("changed_keys") or []) + timing_result["changed_keys"]
         push = native_satellite.run_on_runtime_loop(
             native_satellite.push_live_settings(),
             timeout=10.0,

@@ -500,17 +500,19 @@
   "music_core": {
     "schema": 1,
     "icon": "music",
-    "description": "Browse music and keep your speakers in sync.",
-    "default_tab": "library",
+    "description": "Your library. Your rooms. One place to listen.",
+    "default_tab": "listen",
     "tab_order": [
+      "listen",
       "library",
-      "playlist",
       "recommendations",
-      "providers",
+      "playlist",
+      "speakers",
       "settings"
     ],
     "tab_labels": {
-      "library": "Library"
+      "library": "Library",
+      "playlist": "Queue"
     },
     "views": {
       "settings": "stack",

@@ -56,6 +56,7 @@ const verifierThresholdKey = computed(() => String(verifierThresholdField.value.
 const verifierThresholdDefault = computed(() => Number(verifierThresholdField.value.default ?? 0.85));
 const verifierThreshold = computed(() => Number(verifierValues[verifierThresholdKey.value] ?? verifierThresholdDefault.value));
 const verifierThresholdPercent = computed(() => Math.round(verifierThreshold.value * 100));
+const verifierTimingFields = computed<JsonRow[]>(() => ["wake_verifier_window_ms", "wake_verifier_timeout_ms"].map((key) => verifierFields.value[key]).filter(Boolean));
 const verifierResults = computed<JsonRow>(() => Object.values(verifierFields.value).find((field) => String(field.type || "") === "table") || {});
 const verifierSummary = computed(() => String(Object.values(verifierFields.value).find((field) => String(field.key || "").includes("summary"))?.value || "No checks recorded yet"));
 const verifierStt = computed(() => String(Object.values(verifierFields.value).find((field) => String(field.key || "").includes("stt_engine"))?.value || stat("STT Backend") || "Unavailable"));
@@ -153,6 +154,9 @@ function chooseDetectorMode(value: string) { update(wakeValues, "wake_detector_m
 function chooseVerifierMode(value: string) { update(verifierValues, verifierModeKey.value, value); }
 function setVerifierThreshold(event: Event) { update(verifierValues, verifierThresholdKey.value, Number((event.target as HTMLInputElement).value)); }
 function resetVerifierThreshold() { update(verifierValues, verifierThresholdKey.value, verifierThresholdDefault.value); }
+function verifierTimingValue(field: JsonRow): number { return Number(verifierValues[String(field.key)] ?? field.default); }
+function setVerifierTiming(field: JsonRow, event: Event) { update(verifierValues, String(field.key), Number((event.target as HTMLInputElement).value)); }
+function resetVerifierTiming(field: JsonRow) { update(verifierValues, String(field.key), Number(field.default)); }
 
 function hydrate(form: JsonRow | null, target: JsonRow) {
   Object.keys(target).forEach((key) => delete target[key]);
@@ -388,15 +392,18 @@ defineExpose({ apply, refresh });
     </article>
 
     <article v-if="trainerSettingsForm" class="tm-form-card tm-wake-training-card">
-      <header><div><span class="tv-eyebrow">Step 2 · Improve</span><h3>Wake Word Trainer</h3><p>Optionally send useful wake clips to your securely linked trainer.</p></div><span v-if="trainer" class="tv-live-pill" :class="{ warning: !trainer.linked }"><i />{{ trainer.status_label }}</span></header>
+      <header><div><span class="tv-eyebrow">Step 2 · Audio capture</span><h3>Send audio to trainer</h3><p>Satellites upload directly to the trainer URL. No link required.</p></div></header>
       <div class="tm-wake-feedback-grid">
         <label class="tm-wake-toggle-card"><span><strong>Good wakes</strong><small>Send confirmed wakes to improve recognition.</small></span><input v-model="trainerSettingsValues.capture_wake_audio" type="checkbox" :disabled="Boolean(busy)" @change="update(trainerSettingsValues, 'capture_wake_audio', trainerSettingsValues.capture_wake_audio)" /></label>
         <label class="tm-wake-toggle-card"><span><strong>Close misses</strong><small>Send near-wakes that can improve model tuning.</small></span><input v-model="trainerSettingsValues.capture_close_misses" type="checkbox" :disabled="Boolean(busy)" @change="update(trainerSettingsValues, 'capture_close_misses', trainerSettingsValues.capture_close_misses)" /></label>
       </div>
-      <label class="tm-field tm-field-wide"><span class="tm-field-label">Trainer App URL</span><input v-model="trainerSettingsValues.trainer_app_url" type="url" :placeholder="String(trainerSettingsFields.trainer_app_url?.placeholder || 'http://trainer.local:8789')" :disabled="Boolean(busy)" @input="update(trainerSettingsValues, 'trainer_app_url', trainerSettingsValues.trainer_app_url)" /><small>The destination used by satellites when wake-clip sharing is enabled.</small></label>
+      <label class="tm-field tm-field-wide"><span class="tm-field-label">Trainer URL for audio</span><input v-model="trainerSettingsValues.trainer_app_url" type="url" :placeholder="String(trainerSettingsFields.trainer_app_url?.placeholder || 'http://trainer.local:8789')" :disabled="Boolean(busy)" @input="update(trainerSettingsValues, 'trainer_app_url', trainerSettingsValues.trainer_app_url)" /><small>The destination for the wake clips selected above.</small></label>
+    </article>
 
+    <article v-if="trainer" class="tm-form-card tm-wake-auto-training-card">
+      <header><div><span class="tv-eyebrow">Optional · Auto-training</span><h3>Auto-training link</h3><p>Automatically apply newly trained wake models. Audio uploads do not need this link.</p></div><span class="tm-speech-status-chip">{{ trainer.status_label }}</span></header>
       <div v-if="trainer?.linked" class="tm-wake-trainer-linked"><div><i>✓</i><span><strong>{{ trainer.trainer_name }}</strong><small>Last model: {{ trainer.last_wake_word || "No model published yet" }} · {{ trainer.last_publish_at || "Waiting for first publish" }}</small></span></div><button class="tv-button danger" type="button" :disabled="Boolean(busy)" @click="unlinkTrainer">Unlink</button></div>
-      <div v-else class="tm-wake-trainer-link"><div><i>↗</i><span><strong>Link the trainer securely</strong><small>A short pairing code ensures only your trainer can publish wake models.</small></span></div><div class="tm-inline-actions"><button class="tv-button" type="button" :disabled="Boolean(busy)" @click="startPairing">{{ pairing ? "Restart pairing" : "Link trainer" }}</button><button v-if="pairing && pairingState === 'waiting'" class="tv-button" type="button" :disabled="Boolean(busy)" @click="checkPairing">Check link</button></div></div>
+      <div v-else class="tm-wake-trainer-link"><div><i>↗</i><span><strong>Allow model updates from your trainer</strong><small>Use the trainer’s Auto tab and a short pairing code.</small></span></div><div class="tm-inline-actions"><button class="tv-button" type="button" :disabled="Boolean(busy)" @click="startPairing">{{ pairing ? "Restart pairing" : "Link for auto-training" }}</button><button v-if="pairing && pairingState === 'waiting'" class="tv-button" type="button" :disabled="Boolean(busy)" @click="checkPairing">Check link</button></div></div>
       <div v-if="pairing && !trainer?.linked" class="tm-pairing-box" :class="{ expired: pairingState === 'expired' }"><span>Pairing code</span><strong>{{ pairingState === "expired" ? "Expired" : pairingCode || "Creating…" }}</strong><small v-if="pairingState === 'waiting'">Expires in {{ formatPairingTime(pairingRemaining) }}</small><small v-else-if="pairingState === 'expired'">Restart pairing to create a new code.</small><a v-if="pairing.pairing_url || pairing.url" :href="String(pairing.pairing_url || pairing.url)" target="_blank" rel="noreferrer">Open trainer pairing</a></div>
     </article>
 
@@ -443,6 +450,12 @@ defineExpose({ apply, refresh });
         <input type="range" :min="Number(verifierThresholdField.min ?? 0.5)" :max="Number(verifierThresholdField.max ?? 1)" :step="Number(verifierThresholdField.step ?? 0.01)" :value="verifierThreshold" :disabled="Boolean(busy)" aria-label="STT match threshold" @input="setVerifierThreshold" />
         <div class="tm-wake-verifier-scale"><span>50% · more tolerant</span><span>100% · exact match</span></div>
         <footer><small>{{ verifierThresholdField.description || "Higher is stricter; lower tolerates harmless STT substitutions. The on-device wake model remains the first check." }}</small><button class="tv-button" type="button" :disabled="Boolean(busy) || verifierThreshold === verifierThresholdDefault" @click="resetVerifierThreshold">Reset to {{ Math.round(verifierThresholdDefault * 100) }}%</button></footer>
+      </section>
+      <section v-for="field in verifierTimingFields" :key="String(field.key)" class="tm-wake-verifier-threshold tm-wake-verifier-timing">
+        <header><div><span>{{ field.label }}</span><strong>{{ field.key === 'wake_verifier_window_ms' ? 'How much audio should STT check?' : 'How long should the satellite wait?' }}</strong></div><output>{{ verifierTimingValue(field) }} ms</output></header>
+        <input type="range" :min="Number(field.min)" :max="Number(field.max)" :step="Number(field.step)" :value="verifierTimingValue(field)" :disabled="Boolean(busy)" :aria-label="String(field.label)" :aria-valuetext="`${verifierTimingValue(field)} ms`" @input="setVerifierTiming(field, $event)" />
+        <div class="tm-wake-verifier-scale"><span>{{ field.min }} ms · {{ field.min_label }}</span><span>{{ field.max }} ms · {{ field.max_label }}</span></div>
+        <footer><small>{{ field.description }}</small><button class="tv-button" type="button" :disabled="Boolean(busy) || verifierTimingValue(field) === Number(field.default)" @click="resetVerifierTiming(field)">Reset to {{ field.default }} ms</button></footer>
       </section>
       <div class="tm-wake-verifier-summary"><div><span>Current results</span><strong>{{ verifierSummary }}</strong></div><div><span>Configured STT</span><strong>{{ verifierStt }}</strong></div></div>
 

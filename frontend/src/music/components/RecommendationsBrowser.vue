@@ -100,7 +100,7 @@ async function playPlaylist(item: MusicItem): Promise<void> {
           >
             {{ busy(`recommendations:${playlist.id}`) ? 'Starting…' : `▶ ${playlist.run_label || 'Play Playlist'}` }}
           </button>
-          <small>Plays on the destinations selected above.</small>
+          <small>Plays on the speakers selected in the player.</small>
         </footer>
       </article>
     </div>

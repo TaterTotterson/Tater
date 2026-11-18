@@ -66,6 +66,7 @@ export interface MusicTrack {
   active?: boolean;
   image_src?: string;
   image_alt?: string;
+  duration_seconds?: number;
 }
 
 export interface MusicPlayerRow {
@@ -73,6 +74,8 @@ export interface MusicPlayerRow {
   label?: string;
   meta?: string;
   selected?: boolean;
+  speaker_count?: number;
+  members?: Array<{ selector: string; label: string; channel: string }>;
   kind?: string;
   sync_quality?: "precise" | "automatic" | "bridge" | "best_effort" | string;
   volume_percent?: number;
@@ -97,6 +100,17 @@ export interface MusicRecommendationEntry {
 export interface MusicItem {
   id: string;
   group?: string;
+  browse_action?: string;
+  browse_values?: Record<string, unknown>;
+  now_playing?: { title?: string; artist?: string; album?: string };
+  timeline?: MusicTimeline;
+  repeat?: string;
+  repeat_action?: string;
+  seek_action?: string;
+  continuous_radio?: boolean;
+  continuation_pending?: boolean;
+  warnings?: string[];
+  playback_error?: string;
   card_variant?: string;
   assistant_name?: string;
   title?: string;
@@ -152,10 +166,16 @@ export interface ManagerTab {
 }
 
 export interface MusicUi {
-  workspace?:Record<string,any>;
+  workspace?: Record<string, any>;
   kind?: string;
   title?: string;
   appearance?: string;
+  experience_version?: number;
+  provider_connected?: boolean;
+  browse_action?: string;
+  track_play_action?: string;
+  selection_play_action?: string;
+  recent_tracks?: MusicTrack[];
   default_tab?: string;
   manager_tabs?: ManagerTab[];
   item_forms?: MusicItem[];
@@ -176,7 +196,7 @@ export interface CoreTabPayload {
 }
 
 export interface MusicCoreMountOptions {
-  embedded?:boolean;
+  embedded?: boolean;
   initialPayload: CoreTabPayload;
   coreKey: string;
   tabEndpoint: string;
@@ -188,4 +208,21 @@ export interface MusicCoreMountOptions {
 export interface MusicCoreController {
   update: (payload: CoreTabPayload) => void;
   unmount: () => void;
+}
+
+export interface MusicTimeline {
+  track_id?: string;
+  status?: string;
+  position_offset_seconds?: number;
+  started_at?: number;
+  duration_seconds?: number;
+  seekable?: boolean;
+}
+export interface MusicBrowseResult {
+  ok: boolean;
+  title?: string;
+  tracks: MusicTrack[];
+  total: number;
+  offset: number;
+  limit: number;
 }

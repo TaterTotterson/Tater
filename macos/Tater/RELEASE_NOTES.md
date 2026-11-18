@@ -1,33 +1,38 @@
-# Tater v3.0.1
+# Tater v3.0.2
 
-Tater 3.0.1 brings the Library first design inside all twelve built-in Core
-workspaces, with clearer details, focused editors, and layouts suited to each Core.
+Tater 3.0.2 introduces the Music workspace and improves satellite music playback
+and STT wake verification.
 
-## What's New
+## What's Changed
 
-- **Tasks, automations, and feeds:** searchable lists with selected details and
-  clear editing controls. Automation editing follows the trigger, optional
-  conditions, action, and audio flow.
-- **Awareness and Guardian:** readable event timelines, camera media previews,
-  network briefings, and device review.
-- **Environment:** native current conditions, room readings, and forecasts beside
-  weather context. Original source tables and generated charts remain available.
-- **Memory and Personal:** remembered context, people, agendas, insights, and
-  account management in the shared workspace style.
-- **Meshtastic:** channel messaging beside radio context, with nodes and pairing
-  controls still accessible.
-- **Music:** the library and persistent player now include an upcoming queue that
-  follows the current track. Fix a missing component import in player settings.
-- **Reachy and Tater Tube:** focused behavior controls, media context, pick cards,
-  and viewing history using the same theme.
-- Responsive layouts for desktop, tablet, and phone widths, with light and dark
-  theme support.
+- **Music workspace:** Listen, Library, Tater’s picks, Queue, Speakers, and
+  Settings use the updated Tater style. A persistent player provides progress,
+  seek, shuffle, repeat, volume, and speaker selection.
+- **Browse before playing:** search and inspect albums, artists, genres, and
+  songs without changing playback. Queue tracks play with a single click.
+  Category selections keep similarly named album editions separate, and
+  multi-disc albums follow disc and track order.
+- **Clearer speaker controls:** stereo pairs appear as one destination with two
+  named left/right speakers. Per-player volume, timing offsets, playback routes,
+  and sync tests remain available on the Speakers page.
+- **Focused music settings:** connection, playback, library sync, and
+  personalization have separate sections. Edits survive tab switches and live
+  refreshes, and existing settings remain available.
+- **ThirdReality stereo playback:** fix FLAC audio framing that could leave a
+  stereo pair silent when playing alone, while preserving Echo’s legacy audio
+  format.
+- **STT wake verification:** separate millisecond controls for the verification
+  audio window and maximum response wait. Settings apply to connected satellites
+  and persist for reconnects. Empty transcripts, provider failures, and timeouts
+  allow listening; response timing reserves time for transport.
+- **Wake Word Trainer:** clarify that direct satellite audio uploads use the
+  trainer URL. The optional auto-training link lets the trainer publish new wake
+  models and is not required for audio uploads.
+- **Internal cleanup:** organize Python implementations into feature packages
+  while retaining compatibility imports and worker entry points for installed
+  extensions.
 
-Existing settings, actions, popup controls, pagination, and draft preservation
-remain available. New or unrecognized settings remain reachable in the editor,
-and credentials stay out of summary previews. Core backend functions are unchanged.
+Update Music Core to **3.6.6** from Tater Shop for the complete Music workspace.
+The existing Music Core interface remains compatible with older Tater versions.
 
-Update Tater to 3.0.1 and install the matching Core updates from Tater Shop for the
-complete workspace refresh. Older installed Cores retain compatible app defaults.
-
-**Full Changelog**: [v3.0.0...v3.0.1](https://github.com/TaterTotterson/Tater/compare/v3.0.0...v3.0.1)
+**Full Changelog**: [v3.0.1...v3.0.2](https://github.com/TaterTotterson/Tater/compare/v3.0.1...v3.0.2)

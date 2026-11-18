@@ -16,6 +16,7 @@ PACKET_HEADER = struct.Struct("<4sBBHIII")
 MAX_PACKET_SAMPLES = 16000 * 2
 DEFAULT_MATCH_THRESHOLD = 0.85
 DEFAULT_TIMEOUT_MS = 500
+_TRANSPORT_ALLOWANCE_MS = 250
 
 
 def _text(value: Any) -> str:
@@ -146,6 +147,16 @@ async def _verify_pcm(
         selector=selector,
     )
     elapsed_ms = (time.perf_counter() - started) * 1000.0
+    transcript = _text(transcript)
+    if not transcript:
+        return {
+            "accepted": True,
+            "available": False,
+            "transcript": "",
+            "score": 0.0,
+            "stt_ms": round(elapsed_ms, 1),
+            "reason": "stt_no_text_fail_open",
+        }
     score = transcript_match_score(transcript, phrase)
     return {
         "accepted": bool(score >= threshold),
@@ -179,6 +190,10 @@ async def verify_packet(data: bytes, *, selector: str = "") -> Dict[str, Any]:
         minimum=100,
         maximum=2000,
     )
+    # The device's deadline also covers uploading the clip and returning the
+    # decision. Match the bridge's transport allowance instead of spending the
+    # full device wait on STT alone.
+    stt_budget_ms = max(100, timeout_ms - _TRANSPORT_ALLOWANCE_MS)
     selected_stt_engine = vp._selected_stt_backend()
     effective_stt_engine, stt_fallback_reason = vp._resolve_stt_backend()
     result: Dict[str, Any]
@@ -191,17 +206,17 @@ async def verify_packet(data: bytes, *, selector: str = "") -> Dict[str, Any]:
                 stt_engine=effective_stt_engine,
                 selector=selector,
             ),
-            timeout=float(timeout_ms) / 1000.0,
+            timeout=float(stt_budget_ms) / 1000.0,
         )
-        result["available"] = True
-        result["reason"] = "matched" if result.get("accepted") else "transcript_mismatch"
+        result.setdefault("available", True)
+        result.setdefault("reason", "matched" if result.get("accepted") else "transcript_mismatch")
     except asyncio.TimeoutError:
         result = {
             "accepted": True,
             "available": False,
             "transcript": "",
             "score": 0.0,
-            "stt_ms": float(timeout_ms),
+            "stt_ms": float(stt_budget_ms),
             "reason": "server_timeout_fail_open",
         }
     except Exception as exc:
@@ -219,6 +234,8 @@ async def verify_packet(data: bytes, *, selector: str = "") -> Dict[str, Any]:
             "enforce": bool(packet["enforce"]),
             "phrase": phrase,
             "threshold": threshold,
+            "timeout_ms": timeout_ms,
+            "stt_budget_ms": stt_budget_ms,
             "sample_count": packet["sample_count"],
             "audio_sha256": hashlib.sha256(packet["pcm"]).hexdigest(),
             "stt_engine": effective_stt_engine,
