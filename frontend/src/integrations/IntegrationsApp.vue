@@ -392,7 +392,12 @@ draftRepos.value = Array.isArray(shop.value.repos?.additional) ? shop.value.repo
     <nav class="tv-tabs" aria-label="Integration sections"><button v-for="tab in [{id:'manager',label:'Manager'},{id:'devices',label:'Devices'},{id:'rooms',label:'Organize'},{id:'runtime',label:'Activity'}]" :key="tab.id" type="button" :class="{ active: activeTab === tab.id }" @click="selectTab(tab.id)">{{ tab.label }}</button></nav>
 
     <section v-if="activeTab === 'manager'" class="ti-manager">
-      <div class="workspace-manager-toolbar"><CatalogToolbar v-if="shopTab !== 'repos'" v-model="searchQuery" label="Search integrations" :count="shopTab === 'installed' ? filteredInstalledRows.length : shopTab === 'store' ? filteredAvailable.length : filteredManaged.length" /><label class="workspace-view-picker"><span>View</span><select v-model="shopTab" aria-label="Integration management view"><option v-for="tab in shopTabs" :key="tab.id" :value="tab.id">{{ tab.label }}{{ tab.id === 'manage' && updates.length ? ` (${updates.length})` : '' }}</option></select></label></div>
+      <div class="workspace-manager-toolbar">
+        <nav class="tv-mini-tabs" aria-label="Integration management views">
+          <button v-for="tab in shopTabs" :key="tab.id" type="button" :class="{ active: shopTab === tab.id }" :aria-current="shopTab === tab.id ? 'page' : undefined" @click="shopTab = tab.id">{{ tab.label }}<span v-if="tab.id === 'manage' && updates.length">{{ updates.length }}</span></button>
+        </nav>
+        <CatalogToolbar v-if="shopTab !== 'repos'" v-model="searchQuery" label="Search integrations" :count="shopTab === 'installed' ? filteredInstalledRows.length : shopTab === 'store' ? filteredAvailable.length : filteredManaged.length" />
+      </div>
       <div v-if="shop.errors?.length" class="tv-notice error">{{ shop.errors.join(' • ') }}</div>
       <div v-if="shopTab === 'installed'" class="ti-card-grid">
         <article v-for="row in filteredInstalledRows" :key="row.id" class="tv-panel ti-integration-card"><span class="workspace-item-icon"><UiIcon name="plug" /></span>

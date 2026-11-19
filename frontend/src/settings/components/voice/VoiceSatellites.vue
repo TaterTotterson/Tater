@@ -6,7 +6,7 @@ import FocusedWorkspace from "../FocusedWorkspace.vue";
 import type { JsonRow } from "../../types";
 import ModelFields from "../models/ModelFields.vue";
 import { fieldsToValues, itemForms, voiceAction } from "./runtime";
-import { satelliteSettingsTab, satelliteWorkspaceTabs } from "./satelliteWorkspace";
+import { satelliteSettingsChange, satelliteSettingsTab, satelliteWorkspaceTabs } from "./satelliteWorkspace";
 import type { SatelliteWorkspaceTab } from "./satelliteWorkspace";
 
 const props = defineProps<{ payload: JsonRow; actionEndpoint: string }>();
@@ -171,7 +171,9 @@ function closeSettings() { settingsItemId.value = ""; }
 function deviceDirty(item: JsonRow) { const token = id(item); return Boolean(dirty[token] || settingsDirty[token] || displayDirty[token]); }
 function updateActiveSettings(field: string, value: unknown) {
   const item = settingsItem.value;
-  if (item) update(settingsDrafts, settingsDirty, item, field, value);
+  if (!item) return;
+  const patch = satelliteSettingsChange(Array.isArray(item.popup_fields) ? item.popup_fields : [], field, value);
+  Object.entries(patch).forEach(([key, next]) => update(settingsDrafts, settingsDirty, item, key, next));
 }
 function updateActiveDisplay(field: string, value: unknown) {
   const item = settingsItem.value;

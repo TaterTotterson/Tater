@@ -165,7 +165,9 @@ function setEqualizerBand(field: JsonRow, index: number, event: Event) {
 }
 
 function resetEqualizer(field: JsonRow) {
-  emit("change", keyOf(field), equalizerBands(field).map(() => 0));
+  const preset = rows.value.flatMap(fields).find(candidate => candidate.key === "eq_preset");
+  if (preset) emit("change", "eq_preset", "flat");
+  else emit("change", keyOf(field), equalizerBands(field).map(() => 0));
 }
 
 function ledAnimation(state: JsonRow): string {

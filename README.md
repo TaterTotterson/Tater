@@ -11,10 +11,10 @@
 
 **Tater** is a local-first AI platform that can run local models through **llama.cpp**, or connect to remote OpenAI-compatible and llama.cpp APIs. It supports voice satellites like **VoicePE**, **Sat1**, **S3Box**, and **ReSpeaker XVF3800**, plus portals for **Discord**, **Home Assistant**, **HomeKit**, **IRC**, **macOS**, **Matrix**, **Meshtastic**, **Telegram**, and **XBMC4Xbox**.
 
-**New in 3.0.2:** a refreshed Music workspace with browse-first library pages,
-a persistent player, and dedicated speaker controls. This release also fixes
-ThirdReality stereo playback and adds STT wake-check timing controls. Update
-Music Core to **3.6.6** from Tater Shop for the complete music experience.
+**New in 3.0.3:** Flat, Warm, Voice, and Manual sound presets in satellite EQ
+settings, with existing tuning preserved and device changes kept in sync.
+The Integrations manager now uses visible Installed, Store, Manage, and
+Repositories tabs, matching the other sections.
 [Read the release notes](macos/Tater/RELEASE_NOTES.md).
 
 ---

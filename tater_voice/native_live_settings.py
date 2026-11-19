@@ -3458,6 +3458,19 @@ def settings_fields(
             "description": "Tune this satellite's speaker response. Its hardware speaker filter remains active underneath these controls.",
         },
         {
+            "key": "eq_preset",
+            "label": "Sound Preset",
+            "type": "select",
+            "value": current["eq_preset"],
+            "default": DEFAULTS["eq_preset"],
+            "options": [
+                {"value": preset, "label": preset.title()}
+                for preset in (*EQ_PRESETS, "manual")
+            ],
+            "presets": {key: list(bands) for key, bands in EQ_PRESETS.items()},
+            "description": "Warm adds gentle bass and softer highs. Voice emphasizes speech. Manual keeps your own curve. Selecting a preset resets Presence Boost.",
+        },
+        {
             "key": "eq_bands",
             "label": "Eight-Band Equalizer",
             "type": "equalizer",

@@ -8,6 +8,18 @@ export const satelliteWorkspaceTabs = [
 ] as const;
 export type SatelliteWorkspaceTab = typeof satelliteWorkspaceTabs[number]["id"];
 
+export function satelliteSettingsChange(fields: JsonRow[], key: string, value: unknown): JsonRow {
+  const patch: JsonRow = { [key]: value };
+  if (key === "eq_preset") {
+    const presets = fields.find(field => field.key === "eq_preset")?.presets;
+    const bands = presets?.[String(value)];
+    if (Array.isArray(bands)) Object.assign(patch, { eq_bands: [...bands], eq_loudness: false });
+  } else if (key === "eq_bands" || key === "eq_loudness") {
+    patch.eq_preset = "manual";
+  }
+  return patch;
+}
+
 // Classify whole groups so descriptions, previews, and dependent fields stay
 // together. Unrecognized groups remain accessible under Voice & lights.
 export function satelliteSettingsTab(group: JsonRow): SatelliteWorkspaceTab {

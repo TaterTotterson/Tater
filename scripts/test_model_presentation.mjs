@@ -8,7 +8,21 @@ const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.Modu
 const { modelPresentation, splitListeningSections } = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString("base64")}`);
 const workspaceSource = await readFile(new URL("../frontend/src/settings/components/voice/satelliteWorkspace.ts", import.meta.url), "utf8");
 const workspaceCompiled = ts.transpileModule(workspaceSource, { compilerOptions: { module: ts.ModuleKind.ESNext } }).outputText;
-const { satelliteSettingsTab, satelliteWorkspaceTabs } = await import(`data:text/javascript;base64,${Buffer.from(workspaceCompiled).toString("base64")}`);
+const { satelliteSettingsChange, satelliteSettingsTab, satelliteWorkspaceTabs } = await import(`data:text/javascript;base64,${Buffer.from(workspaceCompiled).toString("base64")}`);
+
+test("satellite preset selection updates every band and boost while manual edits preserve the curve", () => {
+  const warm = [3, 3, -1, -3, -2, -1, -2, -3];
+  const fields = [{ key: "eq_preset", presets: { warm, flat: Array(8).fill(0) } }];
+  const draft = { eq_bands: Array(8).fill(2), eq_loudness: true };
+  Object.assign(draft, satelliteSettingsChange(fields, "eq_preset", "warm"));
+  assert.deepEqual(draft, { eq_preset: "warm", eq_bands: warm, eq_loudness: false });
+  draft.eq_bands[0] = 4;
+  assert.equal(warm[0], 3, "a manual edit must not mutate the preset definition");
+  assert.deepEqual(satelliteSettingsChange(fields, "eq_bands", draft.eq_bands), { eq_preset: "manual", eq_bands: draft.eq_bands });
+  assert.deepEqual(satelliteSettingsChange(fields, "eq_loudness", true), { eq_preset: "manual", eq_loudness: true });
+  assert.deepEqual(satelliteSettingsChange(fields, "eq_preset", "manual"), { eq_preset: "manual" });
+  assert.deepEqual(satelliteSettingsChange(fields, "volume_percent", 20), { volume_percent: 20 });
+});
 
 test("friendly model names preserve the exact identifier and quantization", () => {
   const id = "Example/Chat-GGUF::Chat-8B-Q4_K_M.gguf";
