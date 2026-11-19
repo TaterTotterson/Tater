@@ -5245,6 +5245,8 @@ async def _handle_text_message(
     reported_volume_board = ""
     reported_text_style: Any = None
     reported_text_style_board = ""
+    reported_equalizer: Dict[str, Any] | None = None
+    reported_equalizer_board = ""
     settings_result_changed = False
     ble_metadata: Optional[Dict[str, Any]] = None
     ble_owner: Optional[Dict[str, Any]] = None
@@ -5265,6 +5267,13 @@ async def _handle_text_message(
             if msg_type == "settings.changed":
                 settings_error = _text(payload.get("error"))
                 settings_ok = _as_bool(payload.get("ok"), not bool(settings_error))
+                if settings_ok and not settings_error and "eq_preset" in reported_settings:
+                    hello = row.get("hello") if isinstance(row.get("hello"), dict) else {}
+                    hello_values = _message_payload(hello)
+                    capabilities = hello_values.get("capabilities") or {}
+                    if isinstance(capabilities, dict) and capabilities.get("eq_presets") is True:
+                        reported_equalizer = dict(reported_settings)
+                        reported_equalizer_board = _text(hello_values.get("board"))
                 if settings_ok and not settings_error and "screen_text_style" in reported_settings:
                     hello = row.get("hello") if isinstance(row.get("hello"), dict) else {}
                     hello_values = _message_payload(hello)
@@ -5432,6 +5441,16 @@ async def _handle_text_message(
             reported_text_style,
             selector=selector,
             board=reported_text_style_board,
+        ):
+            _notify_state_change("settings", selector)
+    if reported_equalizer is not None:
+        from . import native_live_settings
+
+        if await asyncio.to_thread(
+            native_live_settings.adopt_reported_device_equalizer,
+            reported_equalizer,
+            selector=selector,
+            board=reported_equalizer_board,
         ):
             _notify_state_change("settings", selector)
     if msg_type == "camera.stream.ended":
@@ -5761,6 +5780,19 @@ async def handle_websocket(websocket: WebSocket) -> None:
         )
 
         await send_json(_envelope("state", {"state": "idle"}))
+        # An older screen may have a local custom curve that Tater has never
+        # stored. Adopt it before the first defaults can overwrite that file.
+        restored_equalizer = payload.get("eq_settings")
+        if _capabilities(payload).get("eq_presets") is True and isinstance(restored_equalizer, dict):
+            from . import native_live_settings
+
+            await asyncio.to_thread(
+                native_live_settings.adopt_reported_device_equalizer,
+                restored_equalizer,
+                selector=selector,
+                board=_text(payload.get("board")),
+                only_if_missing=True,
+            )
         initial_firmware_settings = _firmware_settings_payload(
             selector,
             board=_text(payload.get("board")),

@@ -27,6 +27,14 @@ WAKE_FAMILY_SETTINGS_MIGRATION_KEY = "_wake_family_settings_v1"
 UNIFIED_WAKE_SETTINGS_MIGRATION_KEY = "_unified_wake_settings_v1"
 WAKE_PROFILE_FETCH_TIMEOUT_S = 4.0
 
+# Keep aligned with firmware internal/outchain/presets.go. These are tone
+# choices, independent of each board's bass protection and limiter settings.
+EQ_PRESETS = {
+    "flat": [0.0] * 8,
+    "warm": [3.0, 3.0, -1.0, -3.0, -2.0, -1.0, -2.0, -3.0],
+    "voice": [-3.0, -2.0, -1.0, 0.0, 2.0, 1.0, 0.0, -1.0],
+}
+
 DEFAULTS: Dict[str, Any] = {
     "wake_engine": "micro_wake_word",
     "wake_mww_enabled": True,
@@ -101,7 +109,8 @@ DEFAULTS: Dict[str, Any] = {
     "dnd_schedule_enabled": False,
     "dnd_start": "22:00",
     "dnd_end": "07:00",
-    "eq_bands": [0.0] * 8,
+    "eq_preset": "warm",
+    "eq_bands": list(EQ_PRESETS["warm"]),
     "eq_loudness": False,
     "bass_guard_enabled": True,
     "bass_guard_db": -30.0,
@@ -1653,6 +1662,7 @@ _DND_SETTING_KEYS = {"dnd_enabled", "dnd_schedule_enabled", "dnd_start", "dnd_en
 _DND_FIELD_KEYS = _DND_SETTING_KEYS | {"dnd_section"}
 
 _OUTPUT_CHAIN_SETTING_KEYS = {
+    "eq_preset",
     "eq_bands",
     "eq_loudness",
     "bass_guard_enabled",
@@ -1665,6 +1675,7 @@ _OUTPUT_CHAIN_FIELD_KEYS = _OUTPUT_CHAIN_SETTING_KEYS | {
     "output_chain_section",
 }
 _OUTPUT_CHAIN_WIRE_KEYS = {
+    "eq_preset": "eqPreset",
     "eq_bands": "eqBands",
     "eq_loudness": "eqLoudness",
     "bass_guard_enabled": "bassGuardEnabled",
@@ -1696,11 +1707,37 @@ def _eq_bands_value(value: Any) -> List[float]:
         raw = []
     bands: List[float] = []
     for index in range(len(_EQ_BAND_LABELS)):
-        fallback = float(DEFAULTS["eq_bands"][index])
+        # A supplied manual curve still pads missing bands with zero.
+        fallback = 0.0
         candidate = raw[index] if index < len(raw) else fallback
         level = _as_float(candidate, fallback, minimum=-12.0, maximum=12.0)
         bands.append(round(level * 2.0) / 2.0 if math.isfinite(level) else fallback)
     return bands
+
+
+def _equalizer_settings(incoming: Dict[str, Any], base: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    source = {**(base or {}), **incoming}
+    edited = any(key in incoming for key in ("eq_bands", "eq_loudness"))
+    selected = "eq_preset" in incoming
+    preset = _lower(source.get("eq_preset"))
+    if edited and not selected:
+        preset = "manual"
+    elif not preset:
+        preset = "manual" if any(key in source for key in ("eq_bands", "eq_loudness")) else "warm"
+    if preset not in EQ_PRESETS:
+        preset = "manual"
+    if preset in EQ_PRESETS:
+        # A named selection replaces the previous curve, but conflicting
+        # explicit/stored bands always win over a stale preset label.
+        candidate = incoming if selected else source
+        bands = _eq_bands_value(candidate.get("eq_bands", EQ_PRESETS[preset]))
+        loudness = _as_bool(candidate.get("eq_loudness"), False)
+        if bands != EQ_PRESETS[preset] or loudness:
+            preset = "manual"
+    else:
+        bands = _eq_bands_value(source.get("eq_bands", DEFAULTS["eq_bands"]))
+        loudness = _as_bool(source.get("eq_loudness"), False)
+    return {"eq_preset": preset, "eq_bands": bands, "eq_loudness": loudness}
 
 
 def _audio_output_mode_value(value: Any) -> str:
@@ -2268,8 +2305,7 @@ def normalize_settings(values: Dict[str, Any], *, base: Dict[str, Any] | None = 
         ),
         "dnd_start": _time_value(source.get("dnd_start"), str(DEFAULTS["dnd_start"])),
         "dnd_end": _time_value(source.get("dnd_end"), str(DEFAULTS["dnd_end"])),
-        "eq_bands": _eq_bands_value(source.get("eq_bands")),
-        "eq_loudness": _as_bool(source.get("eq_loudness"), bool(DEFAULTS["eq_loudness"])),
+        **_equalizer_settings(incoming, base),
         "bass_guard_enabled": _as_bool(
             source.get("bass_guard_enabled"),
             bool(DEFAULTS["bass_guard_enabled"]),
@@ -3435,7 +3471,7 @@ def settings_fields(
             "max": 12,
             "step": 0.5,
             "full_width": True,
-            "description": "Changes apply on the satellite without a firmware rebuild. Reset returns every band to 0 dB.",
+            "description": "Changes apply on the satellite without a firmware rebuild. Moving a slider selects Manual; Flat returns every band to 0 dB.",
         },
         {
             "key": "eq_loudness",
@@ -4289,6 +4325,13 @@ def save_settings(values: Dict[str, Any], *, selector: Any = "", board: Any = ""
         for key, value in _board_speaker_defaults(board).items():
             if key not in device_raw:
                 current_base[key] = value
+    # A full host form can repeat unchanged faders while saving another field.
+    # Retain the current name in that case; actual EQ edits select Manual.
+    if "eq_preset" not in incoming and any(key in incoming for key in ("eq_bands", "eq_loudness")):
+        same_bands = "eq_bands" not in incoming or _eq_bands_value(incoming["eq_bands"]) == current["eq_bands"]
+        same_boost = "eq_loudness" not in incoming or _as_bool(incoming["eq_loudness"], False) == current["eq_loudness"]
+        if same_bands and same_boost:
+            incoming["eq_preset"] = current["eq_preset"]
     normalized = normalize_settings(incoming, base={**current_base, **profile, **oww_profile})
     changed = [key for key, value in normalized.items() if current.get(key) != value]
     if ssh_password_changed:
@@ -4354,6 +4397,44 @@ def adopt_reported_device_text_style(value: Any, *, selector: Any = "", board: A
         if _raw_settings(token).get("screen_text_style") == style:
             return False
         redis_client.hset(settings_hash_key(token), mapping={"screen_text_style": style})
+    except Exception:
+        return False
+    return True
+
+
+def adopt_reported_device_equalizer(
+    values: Dict[str, Any], *, selector: Any = "", board: Any = "", only_if_missing: bool = False,
+) -> bool:
+    """Keep a local EQ choice across the next controller reconnect."""
+    token = _selector_token(selector)
+    preset = values.get("eq_preset")
+    if not token or not isinstance(preset, str) or preset not in {*EQ_PRESETS, "manual"}:
+        return False
+    if "eq_bands" in values:
+        bands = values["eq_bands"]
+        if not isinstance(bands, list) or len(bands) != 8 or any(
+            isinstance(value, bool) or not isinstance(value, (int, float))
+            or not math.isfinite(value) or not -12 <= value <= 12 for value in bands
+        ):
+            return False
+    if "eq_loudness" in values and not isinstance(values["eq_loudness"], bool):
+        return False
+    selected = {key: values[key] for key in ("eq_preset", "eq_bands", "eq_loudness") if key in values}
+    try:
+        if only_if_missing:
+            saved = {**_global_settings_with_migration(), **_raw_settings(token)}
+            if any(key in saved for key in ("eq_preset", "eq_bands", "eq_loudness")):
+                return False
+        current = settings_snapshot(token, board=board)
+        normalized = _equalizer_settings(selected, current)
+        raw = _raw_settings(token)
+        if raw.get("eq_preset") == normalized["eq_preset"] and all(current[key] == value for key, value in normalized.items()):
+            return False
+        redis_client.hset(settings_hash_key(token), mapping={
+            "eq_preset": normalized["eq_preset"],
+            "eq_bands": json.dumps(normalized["eq_bands"]),
+            "eq_loudness": "true" if normalized["eq_loudness"] else "false",
+        })
     except Exception:
         return False
     return True

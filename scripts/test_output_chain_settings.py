@@ -42,7 +42,7 @@ class OutputChainSettingsTests(unittest.TestCase):
         unsupported_keys = {str(field.get("key") or "") for field in unsupported}
         self.assertEqual("equalizer", supported_by_key["eq_bands"]["type"])
         self.assertEqual(8, len(supported_by_key["eq_bands"]["bands"]))
-        self.assertEqual([0.0] * 8, supported_by_key["eq_bands"]["value"])
+        self.assertEqual(native_live_settings.EQ_PRESETS["warm"], supported_by_key["eq_bands"]["value"])
         self.assertIn("bass_guard_enabled", supported_by_key)
         self.assertIn("limiter_enabled", supported_by_key)
         self.assertTrue(native_live_settings._OUTPUT_CHAIN_FIELD_KEYS.isdisjoint(unsupported_keys))
@@ -82,7 +82,7 @@ class OutputChainSettingsTests(unittest.TestCase):
                 capabilities={},
             )
 
-        self.assertEqual([0.0] * 8, capable["eqBands"])
+        self.assertEqual(native_live_settings.EQ_PRESETS["warm"], capable["eqBands"])
         self.assertFalse(capable["eqLoudness"])
         self.assertTrue(capable["bassGuardEnabled"])
         # Radar has a larger speaker, so its board default floor is -10 dB.
