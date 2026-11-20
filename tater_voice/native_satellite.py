@@ -5180,6 +5180,9 @@ async def _mark_disconnected(selector: str, reason: str, *, websocket: Optional[
     for future in pending_futures:
         future.set_exception(RuntimeError(f"Native satellite disconnected: {selector}"))
     if connection_changed:
+        from . import native_bluetooth
+
+        native_bluetooth.disconnected(selector)
         _schedule_media_disconnect_abort(selector, reason=reason)
     if hello_payload:
         _upsert_registry_from_hello(selector, hello_payload, connected=False)
@@ -5443,11 +5446,15 @@ async def _handle_text_message(
     if response_future is not None and not response_future.done():
         response_future.set_result(payload)
         return None
+    if msg_type == "ble.gatt.event":
+        from . import native_bluetooth
+
+        native_bluetooth.ingest_event(selector, payload)
     if ble_metadata is not None:
-        from . import native_ble
+        from . import native_bluetooth
 
         ble_result = await asyncio.to_thread(
-            native_ble.ingest_advertisements, selector, payload, metadata=ble_metadata
+            native_bluetooth.ingest_advertisements, selector, payload, metadata=ble_metadata
         )
         async with _clients_lock:
             current = _clients.get(selector)

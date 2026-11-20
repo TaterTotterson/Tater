@@ -261,8 +261,7 @@ defineExpose({ select: (tab: string, childTab = "") => select(tab, false, childT
               embedded
               :runtime-endpoint="options.endpoints.voiceRuntime"
               :action-endpoint="options.endpoints.voiceAction"
-              :presence-endpoint="options.endpoints.voicePresence"
-              :presence-events-endpoint="options.endpoints.voicePresenceEvents"
+              :bluetooth-endpoint="options.endpoints.voiceBluetooth"
               :initial-tab="activePage.child"
               :on-tab-change="voiceTabChanged"
               @notify="notify"

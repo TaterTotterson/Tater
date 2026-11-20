@@ -5,7 +5,7 @@ import type { JsonRow } from "../types";
 import VoiceFirmware from "./voice/VoiceFirmware.vue";
 import VoiceAirPlay from "./voice/VoiceAirPlay.vue";
 import VoicePlatform from "./voice/VoicePlatform.vue";
-import VoicePresence from "./voice/VoicePresence.vue";
+import VoiceBluetooth from "./voice/VoiceBluetooth.vue";
 import VoiceSatellites from "./voice/VoiceSatellites.vue";
 import VoiceStats from "./voice/VoiceStats.vue";
 import VoiceStereo from "./voice/VoiceStereo.vue";
@@ -13,8 +13,7 @@ import VoiceStereo from "./voice/VoiceStereo.vue";
 const props = defineProps<{
   runtimeEndpoint: string;
   actionEndpoint: string;
-  presenceEndpoint: string;
-  presenceEventsEndpoint: string;
+  bluetoothEndpoint: string;
   initialTab?: string;
   onTabChange?: (tab: string) => void;
   embedded?: boolean;
@@ -27,7 +26,7 @@ const tabs = [
   { id: "firmware", label: "Firmware", description: "Install official firmware over OTA or USB and follow progress live." },
   { id: "stereo", label: "Stereo Pairs", description: "Create synchronized left and right playback destinations." },
   { id: "airplay", label: "AirPlay Input", description: "Send audio from Apple devices into Tater satellites and speaker groups." },
-  { id: "presence", label: "Presence", description: "Watch nearby Bluetooth devices move between the rooms covered by native satellites." },
+  { id: "bluetooth", label: "Bluetooth", description: "Discover and pair devices through a satellite. Bluetooth sleeps when it is not needed." },
   { id: "stats", label: "Stats", description: "Live voice quality, latency, fallbacks, and per-satellite outcomes." },
   { id: "platform", label: "Settings", description: "Shared satellite behavior and native voice-pipeline settings." },
 ] as const;
@@ -48,7 +47,7 @@ let requestSequence = 0;
 
 const activeSpec = computed(() => tabs.find((tab) => tab.id === activeTab.value) || tabs[0]);
 const headerStats = computed<JsonRow[]>(() => Array.isArray(payload.value.header_stats) ? payload.value.header_stats : []);
-const requestPanel = computed(() => ["platform", "presence"].includes(activeTab.value) ? "satellites" : activeTab.value);
+const requestPanel = computed(() => ["platform", "bluetooth"].includes(activeTab.value) ? "satellites" : activeTab.value);
 
 async function refresh(silent = false) {
   const sequence = ++requestSequence;
@@ -123,7 +122,7 @@ onBeforeUnmount(() => {
     <div v-if="loading" class="tv-notice">Loading {{ activeSpec.label }}…</div>
 
     <VoiceSatellites v-if="activeTab === 'satellites' && !loading" ref="satellitePanel" :payload="payload" :action-endpoint="actionEndpoint" @refresh="refresh(true)" @notify="notify" />
-    <VoicePresence v-else-if="activeTab === 'presence' && !loading" :snapshot-endpoint="presenceEndpoint" :events-endpoint="presenceEventsEndpoint" @notify="notify" />
+    <VoiceBluetooth v-else-if="activeTab === 'bluetooth' && !loading" :endpoint="bluetoothEndpoint" @notify="notify" />
     <VoiceFirmware v-else-if="activeTab === 'firmware' && !loading" :payload="payload" :action-endpoint="actionEndpoint" @refresh="refresh(true)" @notify="notify" />
     <VoiceStereo v-else-if="activeTab === 'stereo' && !loading" :payload="payload" :action-endpoint="actionEndpoint" @refresh="refresh(true)" @notify="notify" />
     <VoiceAirPlay v-else-if="activeTab === 'airplay' && !loading" :payload="payload" :action-endpoint="actionEndpoint" @refresh="refresh(true)" @notify="notify" />

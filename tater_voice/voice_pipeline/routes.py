@@ -507,131 +507,32 @@ async def native_sat_chat_action(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-@router.get("/api/tater/satellite/v1/presence")
-@router.get("/api/tater/satellite/v1/ble", include_in_schema=False)
-async def native_satellite_ble(
-    selector: str = "",
-    address: str = "",
-    device_id: str = "",
-    limit: int = 200,
-    max_age_s: float = 300.0,
-    include_observations: bool = True,
-    history_limit: int = 80,
-    x_tater_token: Optional[str] = Header(None),
-) -> Dict[str, Any]:
-    vp = _vp()
-    vp._require_api_auth(x_tater_token)
-    from .. import native_ble
-
-    return native_ble.snapshot(
-        selector=selector,
-        address=address,
-        device_id=device_id,
-        limit=limit,
-        max_age_s=max_age_s,
-        include_observations=include_observations,
-        history_limit=history_limit,
-    )
+@router.get("/api/tater/satellite/v1/bluetooth")
+async def native_satellite_bluetooth(x_tater_token: Optional[str] = Header(None)) -> Dict[str, Any]:
+    _vp()._require_api_auth(x_tater_token)
+    from .. import native_bluetooth
+    return native_bluetooth.snapshot()
 
 
-@router.get("/api/tater/satellite/v1/presence/config")
-async def native_satellite_presence_config(x_tater_token: Optional[str] = Header(None)) -> Dict[str, Any]:
-    vp = _vp()
-    vp._require_api_auth(x_tater_token)
-    from .. import native_ble
-
-    return native_ble.configuration_snapshot()
-
-
-@router.post("/api/tater/satellite/v1/presence/config")
-async def native_satellite_presence_config_save(
-    payload: Dict[str, Any],
-    x_tater_token: Optional[str] = Header(None),
-) -> Dict[str, Any]:
-    vp = _vp()
-    vp._require_api_auth(x_tater_token)
-    from .. import native_ble
-
+@router.post("/api/tater/satellite/v1/bluetooth/{action}")
+async def native_satellite_bluetooth_action(action: str, body: Dict[str, Any], x_tater_token: Optional[str] = Header(None)) -> Dict[str, Any]:
+    _vp()._require_api_auth(x_tater_token)
+    from .. import native_bluetooth
+    selector = str(body.get("selector") or "")
     try:
-        return native_ble.configure(payload.get("action"), payload.get("payload"))
-    except ValueError as exc:
+        if action == "scan":
+            return await native_bluetooth.scan(selector=selector, duration_s=body.get("duration_s", 15))
+        if action == "stop":
+            return await native_bluetooth.stop_scan(selector)
+        if action == "pair":
+            return await native_bluetooth.pair(selector, body.get("address"), body.get("pin"))
+        if action == "unpair":
+            return await native_bluetooth.unpair(selector, body.get("address"))
+        raise ValueError("Unknown Bluetooth action")
+    except (ValueError, TypeError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@router.get("/api/tater/satellite/v1/presence/history")
-async def native_satellite_presence_history(
-    device_id: str = "",
-    limit: int = 80,
-    since_ts: float = 0.0,
-    x_tater_token: Optional[str] = Header(None),
-) -> Dict[str, Any]:
-    vp = _vp()
-    vp._require_api_auth(x_tater_token)
-    from .. import native_ble
-
-    return native_ble.history_snapshot(device_id=device_id, limit=limit, since_ts=since_ts)
-
-
-@router.get("/api/tater/satellite/v1/presence/events")
-@router.get("/api/tater/satellite/v1/ble/events", include_in_schema=False)
-async def native_satellite_presence_events(
-    request: Request,
-    selector: str = "",
-    address: str = "",
-    device_id: str = "",
-    limit: int = 500,
-    max_age_s: float = 60.0,
-    x_tater_token: Optional[str] = Header(None),
-) -> StreamingResponse:
-    vp = _vp()
-    vp._require_api_auth(x_tater_token)
-    from .. import native_ble
-
-    async def stream():
-        last_revision = -1
-        last_emit = 0.0
-        last_event_id = ""
-        yield "retry: 1500\n\n"
-        while not await request.is_disconnected():
-            now = asyncio.get_running_loop().time()
-            payload = native_ble.snapshot(
-                selector=selector,
-                address=address,
-                device_id=device_id,
-                limit=limit,
-                max_age_s=max_age_s,
-                include_observations=False,
-                history_limit=80,
-            )
-            revision = int(payload.get("revision") or 0)
-            if revision != last_revision or now - last_emit >= 5.0:
-                history = payload.get("history") if isinstance(payload.get("history"), list) else []
-                newest_event_id = str((history[0] if history else {}).get("id") or "")
-                if last_event_id and newest_event_id and newest_event_id != last_event_id:
-                    fresh_events = []
-                    for event in history:
-                        if str(event.get("id") or "") == last_event_id:
-                            break
-                        fresh_events.append(event)
-                    for event in reversed(fresh_events):
-                        event_data = json.dumps(event, separators=(",", ":"), ensure_ascii=False)
-                        yield f"event: presence.event\ndata: {event_data}\n\n"
-                data = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
-                yield f"event: presence.snapshot\ndata: {data}\n\n"
-                last_event_id = newest_event_id or last_event_id
-                last_revision = revision
-                last_emit = now
-            await asyncio.sleep(1.0)
-
-    return StreamingResponse(
-        stream(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache, no-transform",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
-    )
+    except (RuntimeError, TimeoutError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.get("/api/tater/satellite/v1/firmware/{artifact_id}/{relative_path:path}")

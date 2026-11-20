@@ -11,10 +11,10 @@
 
 **Tater** is a local-first AI platform that can run local models through **llama.cpp**, or connect to remote OpenAI-compatible and llama.cpp APIs. It supports voice satellites like **VoicePE**, **Sat1**, **S3Box**, and **ReSpeaker XVF3800**, plus portals for **Discord**, **Home Assistant**, **HomeKit**, **IRC**, **macOS**, **Matrix**, **Meshtastic**, **Telegram**, and **XBMC4Xbox**.
 
-**New in 3.0.4:** Change a connected satellite's name and room directly in
-Voice settings. Supported firmware saves both values on the satellite and
-applies them live, preserving pairing, device IDs, and stereo groups.
-Requires Native 0.6.6, Echo 5.0.2, or ThirdReality S420 0.2.26 firmware.
+**New in 3.0.5:** Bluetooth discovery now starts only when requested and stops
+automatically. Active device connections keep the radio enabled while needed.
+The new Bluetooth workspace replaces room presence tracking. Requires matching
+satellite firmware; see the [Bluetooth guide](docs/native_bluetooth_api.md).
 [Read the release notes](macos/Tater/RELEASE_NOTES.md).
 
 ---
@@ -61,6 +61,13 @@ installation. Empty STT results, provider errors, and timeouts allow listening.
 **Send audio to trainer** uses the trainer URL for direct satellite uploads.
 The separate **Auto-training link** is optional and lets the trainer publish
 new wake models back to Tater. Linking is not required to send audio.
+
+In **Voice & devices → Satellites → Bluetooth**, choose **Scan for devices**
+for a 15-second discovery window. Opening the page does not scan. Updated
+firmware keeps Bluetooth off when unused, while active connections such as
+Meshtastic keep it enabled until disconnected. Automatic room presence tracking
+has been removed. See the [Bluetooth guide](docs/native_bluetooth_api.md) for
+firmware requirements, pairing, and API details.
 
 Choose the firmware or runtime for your hardware:
 

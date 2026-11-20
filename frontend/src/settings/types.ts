@@ -185,8 +185,7 @@ export interface SettingsMountOptions {
     modelsCloneAudio: string;
     voiceRuntime: string;
     voiceAction: string;
-    voicePresence: string;
-    voicePresenceEvents: string;
+    voiceBluetooth: string;
     redisStatus: string;
     redisConfigure: string;
     redisMigrateInternal: string;

@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from tater_voice import native_ble, native_satellite
+from tater_voice import native_bluetooth as native_ble, native_satellite
 
 
 class NativeBLEPerformanceTests(unittest.IsolatedAsyncioTestCase):
