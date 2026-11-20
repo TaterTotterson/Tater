@@ -1392,8 +1392,8 @@ def _firmware_settings_payload(
     family = native_live_settings.wake_family_for(capabilities=capabilities, board=board)
     if family != "echo":
         # A shared matched wake bundle still supplies the model for MWW-only
-        # satellites. Resolve its manifest through Tater's package proxy, but
-        # never send any OWW setting to firmware that cannot consume it.
+        # satellites. Boundary-capable firmware needs the complete bundle;
+        # older firmware receives only its MWW manifest through the proxy.
         shared = native_live_settings.shared_wake_settings_snapshot()
         boundary_capable = _as_bool((capabilities or {}).get("wake_boundary"), False)
         try:
@@ -1402,7 +1402,7 @@ def _firmware_settings_payload(
             boundary_version = 0
         boundary_bundle = (
             (boundary_capable or boundary_version >= 1)
-            and _as_bool(shared.get("wake_boundary_available"), False)
+            and _as_bool(shared.get("bundle_has_boundary"), False)
             and _lower(shared.get("oww_wake_word")) == "custom_url"
             and bool(_text(shared.get("oww_wake_word_url")))
         )

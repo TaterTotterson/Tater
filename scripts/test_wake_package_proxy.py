@@ -88,7 +88,7 @@ class WakePackageProxyTests(unittest.TestCase):
             "wake_detector_mode": "mww",
             "oww_wake_word": "custom_url",
             "oww_wake_word_url": source_url,
-            "wake_boundary_available": True,
+            "bundle_has_boundary": True,
         }
         vp = mock.Mock()
         vp._service_base_url_for_peer.return_value = "http://10.4.20.210:8501"
@@ -117,7 +117,7 @@ class WakePackageProxyTests(unittest.TestCase):
             "wake_detector_mode": "mww_oww",
             "oww_wake_word": "custom_url",
             "oww_wake_word_url": source_url,
-            "wake_boundary_available": False,
+            "bundle_has_boundary": False,
         }
         vp = mock.Mock()
         vp._service_base_url_for_peer.return_value = "http://10.4.20.210:8501"
@@ -390,8 +390,6 @@ class WakePackageProxyTests(unittest.TestCase):
 
     def test_schema_four_boundary_model_is_rewritten_and_verified(self) -> None:
         source_url = "https://trainer.example/wakes/hey_tater.wake-bundle.json"
-        local_url = wake_package_proxy.register_bundle("http://10.4.20.210:8501", source_url)
-        package_id = urlsplit(local_url).path.split("/")[-2]
         tflite = b"\x1c\x00\x00\x00TFL3wake-model"
         boundary = b"\x1c\x00\x00\x00TFL3boundary-model"
         bundle = {
@@ -417,11 +415,41 @@ class WakePackageProxyTests(unittest.TestCase):
                 "search_before_ms": 700, "search_after_ms": 120,
             },
         }
+        raw = json.dumps(bundle).encode()
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = raw
+        with mock.patch.object(native_live_settings, "urlopen", return_value=response):
+            profile = native_live_settings._fetch_oww_profile_json(source_url)
+        shared = native_live_settings.normalize_settings({
+            **profile,
+            "wake_detector_mode": "mww",
+            "wake_word": "custom_url",
+            "wake_word_url": source_url,
+            "oww_wake_word": "custom_url",
+            "oww_wake_word_url": source_url,
+        })
+        vp = mock.Mock()
+        vp._service_base_url_for_peer.return_value = "http://10.4.20.210:8501"
+        with (
+            mock.patch.object(native_live_settings, "firmware_settings_snapshot", return_value={
+                "wake_word": "custom_url", "wake_word_url": source_url,
+            }),
+            mock.patch.object(native_live_settings, "shared_wake_settings_snapshot", return_value=shared),
+            mock.patch.object(native_satellite, "_vp", return_value=vp),
+        ):
+            output = native_satellite._firmware_settings_payload(
+                "native:voicepe-test",
+                board="voice-pe",
+                capabilities={"wake_boundary": True, "wake_boundary_version": 1},
+            )
+        self.assertTrue(output["wake_word_url"].endswith("/bundle.wake-bundle.json"))
+        self.assertNotIn("oww_wake_word", output)
+        package_id = urlsplit(output["wake_word_url"]).path.split("/")[-2]
         with mock.patch.object(
             wake_package_proxy,
             "_download",
             side_effect=[
-                (json.dumps(bundle).encode(), source_url),
+                (raw, source_url),
                 (boundary, "https://trainer.example/wakes/hey_tater.boundary.tflite"),
             ],
         ):
