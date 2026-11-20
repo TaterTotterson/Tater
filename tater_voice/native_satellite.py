@@ -1976,7 +1976,7 @@ def _authorize_websocket_hello(websocket: WebSocket, selector: str, payload: Dic
 
 def _registry_metadata_from_hello(payload: Dict[str, Any], *, connected: bool) -> Dict[str, Any]:
     board = _text(payload.get("board"))
-    room = _text(payload.get("room") or payload.get("area_name") or payload.get("room_name"))
+    room = _text(payload.get("room")) if "room" in payload else _text(payload.get("area_name") or payload.get("room_name"))
     caps = _capabilities(payload)
     meta: Dict[str, Any] = {
         "native_selected": True,
@@ -1991,7 +1991,7 @@ def _registry_metadata_from_hello(payload: Dict[str, Any], *, connected: bool) -
         "hardware_id": _hardware_id(payload.get("hardware_id")),
         "capabilities": caps,
     }
-    if room:
+    if room or "room" in payload:
         meta["room"] = room
         meta["room_name"] = room
         meta["area_name"] = room
@@ -2286,6 +2286,22 @@ async def logs(selector: str, *, after_seq: int = 0, limit: int = 100) -> Dict[s
         log_rows = list(row.get("logs") or [])
     rows = [item for item in log_rows if int((item or {}).get("seq") or 0) > int(after_seq or 0)]
     return {"ok": True, "selector": token, "logs": rows[:max_rows], "count": len(rows[:max_rows])}
+
+
+async def update_identity(selector: str, name: Any, room: Any) -> Dict[str, Any]:
+    """Persist editable identity on the satellite without replacing its ID."""
+    from .satellite_identity import identity_text
+
+    values = {"device_name": identity_text(name, required=True), "room": identity_text(room, required=False)}
+    if not await client_has_capability(selector, "identity_update"):
+        raise ValueError("Update this satellite's firmware to change its name and room")
+    try:
+        result = await send_request(selector, "identity.set", values, timeout_s=10.0)
+    except asyncio.TimeoutError as exc:
+        raise RuntimeError("Satellite did not confirm saving its name and room; refresh before retrying") from exc
+    if result.get("ok") is not True:
+        raise RuntimeError(_text(result.get("error")) or "Satellite could not save its name and room")
+    return {"ok": True, "device_name": identity_text(result.get("device_name"), required=True), "room": identity_text(result.get("room"), required=False)}
 
 
 async def send_command(selector: str, message_type: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -5248,6 +5264,7 @@ async def _handle_text_message(
     reported_equalizer: Dict[str, Any] | None = None
     reported_equalizer_board = ""
     settings_result_changed = False
+    identity_payload: Optional[Dict[str, Any]] = None
     ble_metadata: Optional[Dict[str, Any]] = None
     ble_owner: Optional[Dict[str, Any]] = None
     async with _clients_lock:
@@ -5258,6 +5275,22 @@ async def _handle_text_message(
             return None
         row["last_seen_ts"] = _now()
         row["last_message_type"] = msg_type
+        if msg_type == "identity.result" and payload.get("ok") is True:
+            from .satellite_identity import identity_text
+
+            try:
+                name = identity_text(payload.get("device_name"), required=True)
+                room = identity_text(payload.get("room"), required=False)
+            except ValueError:
+                pass
+            else:
+                hello = row.get("hello") if isinstance(row.get("hello"), dict) else {}
+                # Keep the live hello object shared by display/event tasks.
+                identity_payload = _message_payload(hello)
+                identity_payload.update(device_name=name, room=room, room_name=room, area_name=room)
+                hello["payload"] = identity_payload
+                row["hello"] = hello
+                row["name"] = name
         if msg_type in {"status", "settings.changed"}:
             reported_settings = (
                 payload.get("settings")
@@ -5404,6 +5437,9 @@ async def _handle_text_message(
                 candidate = pending.pop(reply_to, None)
                 if isinstance(candidate, asyncio.Future):
                     response_future = candidate
+    if identity_payload is not None:
+        await asyncio.to_thread(_upsert_registry_from_hello, selector, identity_payload, connected=True)
+        _notify_state_change("identity", selector)
     if response_future is not None and not response_future.done():
         response_future.set_result(payload)
         return None
@@ -5847,7 +5883,8 @@ async def handle_websocket(websocket: WebSocket) -> None:
                 previous = json.dumps(first_climate, sort_keys=True, separators=(",", ":"))
                 while True:
                     await asyncio.sleep(NATIVE_SCREEN_CLIMATE_REFRESH_S)
-                    climate = await asyncio.to_thread(_screen_climate_payload, selector, preferred_room)
+                    current_room = _text(payload.get("room"))
+                    climate = await asyncio.to_thread(_screen_climate_payload, selector, current_room)
                     encoded = json.dumps(climate, sort_keys=True, separators=(",", ":"))
                     if encoded == previous:
                         continue
@@ -5886,6 +5923,7 @@ async def handle_websocket(websocket: WebSocket) -> None:
             async def send_screen_notifications() -> None:
                 after_seq = initial_after_seq
                 while True:
+                    current_targets = _native_display_targets(selector, payload)
                     result = await asyncio.to_thread(
                         display_bus.list_display_events,
                         after_seq=after_seq,
@@ -5897,7 +5935,7 @@ async def handle_websocket(websocket: WebSocket) -> None:
                         if not isinstance(event, dict):
                             continue
                         after_seq = max(after_seq, _as_int(event.get("seq"), 0))
-                        if not _native_display_event_matches(event, display_targets):
+                        if not _native_display_event_matches(event, current_targets):
                             continue
                         notification = await asyncio.to_thread(_native_display_notification_payload, event)
                         await send_json(_envelope("display.notification", notification))

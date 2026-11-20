@@ -26490,7 +26490,7 @@ var ZY = { class: "tm-stack tvoice-satellites" }, QY = {
 						onClick: (t) => v.value = e.id
 					}, B(e.label), 9, vX))), 128))]),
 					v.value === "room" ? (K(), q("section", yX, [
-						n[22] ||= J("header", null, [J("h2", null, "Room and playback"), J("p", null, "Choose this satellite’s room and playback level.")], -1),
+						n[22] ||= J("header", null, [J("h2", null, "Name, room and playback"), J("p", null, "Save the name and room on this satellite, and choose its playback level.")], -1),
 						S.value.volume_control && Object.keys(S.value.volume_control).length ? (K(), q("label", bX, [
 							J("span", null, [n[19] ||= J("strong", null, "Volume", -1), J("output", null, B(c[I(S.value)] ?? S.value.volume_control.value) + "%", 1)]),
 							U(J("input", {

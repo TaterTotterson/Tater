@@ -2358,6 +2358,15 @@ def handle_runtime_action(*, action: str, payload: Dict[str, Any], redis_client:
         if not selector:
             raise ValueError("selector is required")
         metadata = dict(existing.get("metadata") or {})
+        if selector.startswith("native:"):
+            current_name = esphome_runtime.text(existing.get("name"))
+            current_room = esphome_runtime.text(metadata.get("room"))
+            name_value = values.get("name", current_name)
+            room_value = values.get("area_name", current_room)
+            if name_value != current_name or room_value != current_room:
+                result = native_satellite.run_on_runtime_loop(native_satellite.update_identity(selector, name_value, room_value), timeout=15.0)
+                values = {**values, "name": result["device_name"], "area_name": result["room"]}
+                metadata.update(room=result["room"], room_name=result["room"], area_name=result["room"])
         if "area_name" in values:
             metadata["area_name"] = esphome_runtime.text(values.get("area_name"))
         if "reply_playback_target" in values:

@@ -826,6 +826,17 @@ def satellite_item_forms(status: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "description": "Optional. Leave this on This device speaker to keep normal sat1 and VoicePE reply playback. Use Silent / display only when a device should act as a mic and screen.",
             },
         ]
+        if native_device:
+            identity_supported = native_capabilities.get("identity_update") is True
+            identity_hint = (
+                "Saved on the satellite and applied live. Leave the room blank to unassign it."
+                if identity_supported and connected
+                else "Connect this satellite before changing its name and room."
+                if identity_supported
+                else "Update this satellite's firmware to change its name and room."
+            )
+            fields[0].update(value=esphome_runtime.text(client_row.get("room") if "room" in client_row else meta.get("room")), disabled=not (identity_supported and connected), description=identity_hint)
+            fields.insert(0, {"key": "name", "label": "Satellite name", "type": "text", "value": name, "disabled": not (identity_supported and connected), "description": identity_hint})
         display_photos_supported = bool(
             native_device and native_live_settings._board_supports_display_photos(board)
         )

@@ -1,35 +1,34 @@
-# Tater v3.0.3
+# Tater v3.0.4
 
-Tater 3.0.3 adds satellite sound presets and makes the Integrations manager
-consistent with the other library sections.
+Change satellite names and rooms live from Tater, without resetting or pairing
+the device again.
 
 ## What's Changed
 
-- **Satellite sound presets:** choose Flat, Warm, Voice, or Manual in each
-  satellite's Speaker Equalizer. The selector updates all eight faders together.
-  Flat resets the curve, Warm adds gentle bass and softer highs, and Voice
-  emphasizes speech.
-- **Preserve your own tuning:** Warm is the default only when no EQ has been
-  saved. Existing curves remain Manual, including flat curves. Moving a fader
-  or changing Presence Boost selects Manual; choosing Flat, Warm, or Voice
-  applies its complete curve and turns Presence Boost off. Reset Flat follows
-  the same behavior.
-- **Keep satellite EQ in sync:** with Echo firmware 5.0.1 or newer, accepted EQ
-  changes made on the satellite are saved in Tater. On first connection, Tater
-  adopts the satellite's restored EQ before sending settings when no host EQ
-  has been saved. Existing host EQ takes priority on reconnect.
-- **Preserve speaker protection:** presets leave bass protection and the peak
-  limiter unchanged, including the -10 dB default on Radar, Crown, and Athena
-  and the -30 dB default on Biscuit, Checkers, Cronos, and Rook. Explicit user
-  overrides remain in place.
-- **Integration manager tabs:** replace the View dropdown with visible
-  Installed, Store, Manage, and Repositories tabs. Manage shows the number of
-  available updates; search, settings, downloads, updates, and repository
-  controls remain available.
+- **Edit names and rooms in Voice settings.** Open a connected satellite's
+  **Room & audio** section, change **Satellite name** or **Room / Area**, and
+  save. Clear the room field to remove its assignment.
+- **Save on the satellite.** Firmware confirms that both values were saved
+  before Tater applies the change. Reconnects and restarts retain the new
+  identity; failed writes report an error and preserve the last confirmed values.
+- **Refresh room context live.** Display targets, room sensors, and satellite
+  metadata follow confirmed changes, including edits made from another controller.
+  Pairing credentials, stable device IDs, and stereo-group membership stay intact.
+- **Show firmware requirements.** Name and room editing is available for connected
+  satellites that advertise support. Older firmware shows an update message.
 
-Warm uses the community EQ curve suggested by @MartyTremblay in
-[Echo Firmware issue #13](https://github.com/TaterTotterson/Tater-Echo-Firmware/issues/13).
-Preset controls work with Echo firmware that supports the speaker output chain;
-firmware 5.0.1 adds preset names and local EQ synchronization.
+## Companion satellite updates
 
-**Full Changelog**: [v3.0.2...v3.0.3](https://github.com/TaterTotterson/Tater/compare/v3.0.2...v3.0.3)
+Update Tater and install the matching firmware to enable live edits:
+
+- [Native 0.6.6](https://github.com/TaterTotterson/Tater-Native-Firmware/releases/tag/native-0.6.6): Voice PE, Sat1, ReSpeaker XVF3800, and ESP32-S3-BOX-3.
+- [Echo 5.0.2](https://github.com/TaterTotterson/Tater-Echo-Firmware/releases/tag/v5.0.2): all supported Echo satellites.
+- [ThirdReality S420 0.2.26](https://github.com/TaterTotterson/Tater-ThirdReality-Voice-Firmware/releases/tag/s420-0.2.26).
+- Standalone Linux satellites: shared runtime `v1.1.13-tater3`.
+
+The [Home Assistant bridge 1.4.18](https://github.com/TaterTotterson/Tater-Home-Assistant-Satellites/releases/tag/v1.4.18)
+adds the same confirmed edits from its panel and Home Assistant's device editor.
+Use the satellite's connected controller; no reset or re-pairing is required.
+Echo devices must already be on the v5 hardware baseline to use application OTA.
+
+**Full Changelog**: [v3.0.3...v3.0.4](https://github.com/TaterTotterson/Tater/compare/v3.0.3...v3.0.4)

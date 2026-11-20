@@ -11,10 +11,10 @@
 
 **Tater** is a local-first AI platform that can run local models through **llama.cpp**, or connect to remote OpenAI-compatible and llama.cpp APIs. It supports voice satellites like **VoicePE**, **Sat1**, **S3Box**, and **ReSpeaker XVF3800**, plus portals for **Discord**, **Home Assistant**, **HomeKit**, **IRC**, **macOS**, **Matrix**, **Meshtastic**, **Telegram**, and **XBMC4Xbox**.
 
-**New in 3.0.3:** Flat, Warm, Voice, and Manual sound presets in satellite EQ
-settings, with existing tuning preserved and device changes kept in sync.
-The Integrations manager now uses visible Installed, Store, Manage, and
-Repositories tabs, matching the other sections.
+**New in 3.0.4:** Change a connected satellite's name and room directly in
+Voice settings. Supported firmware saves both values on the satellite and
+applies them live, preserving pairing, device IDs, and stereo groups.
+Requires Native 0.6.6, Echo 5.0.2, or ThirdReality S420 0.2.26 firmware.
 [Read the release notes](macos/Tater/RELEASE_NOTES.md).
 
 ---
@@ -44,6 +44,11 @@ detection, microphone capture and speaker playback run on the satellite;
 Tater handles speech recognition, conversation, tools and spoken replies.
 Pair and manage your devices from Tater's Voice settings, with wake words,
 volume, device preferences and firmware updates where supported.
+
+In **Voice & devices → Satellites → Room & audio**, edit **Satellite name** and
+**Room / Area**, then save. Updated Native, Echo, and ThirdReality firmware saves
+both values on the satellite and applies them live, without resetting or pairing
+again. The satellite must be connected; older firmware shows an update message.
 
 In **Model Settings → Wake Word → STT wake verification**, the **Verification
 audio window** chooses 500–2000 ms of buffered audio to check (default 1000 ms).

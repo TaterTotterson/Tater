@@ -92,7 +92,23 @@ class VoiceSatelliteVolumeUiTests(unittest.TestCase):
             ["voice_core:stereo:office", "sonos:kitchen"],
         )
         self.assertEqual(len(items), 2)
-        self.assertTrue(all(item["fields"][1]["options"] == options for item in items))
+        self.assertTrue(all(next(field for field in item["fields"] if field["key"] == "reply_playback_target")["options"] == options for item in items))
+
+    def test_live_identity_fields_require_a_connected_capable_satellite(self) -> None:
+        row = {"selector": "native:office", "source": "tater_native", "name": "Office Echo", "room": "Office", "connected": True, "capabilities": {"identity_update": True}, "metadata": {"room": "Office"}}
+        status = {"clients": {"native:office": row}}
+        item = ui_helpers.satellite_item_forms(status)[0]
+        fields = {field["key"]: field for field in item["fields"]}
+        self.assertEqual(fields["name"]["value"], "Office Echo")
+        self.assertEqual(fields["area_name"]["value"], "Office")
+        self.assertFalse(fields["name"]["disabled"])
+        row["connected"] = False
+        fields = {field["key"]: field for field in ui_helpers.satellite_item_forms(status)[0]["fields"]}
+        self.assertTrue(fields["name"]["disabled"])
+        self.assertIn("Connect", fields["area_name"]["description"])
+        row["capabilities"] = {}
+        fields = {field["key"]: field for field in ui_helpers.satellite_item_forms(status)[0]["fields"]}
+        self.assertIn("firmware", fields["name"]["description"])
 
     def test_native_volume_is_on_the_card_instead_of_the_settings_popup(self) -> None:
         status = {
