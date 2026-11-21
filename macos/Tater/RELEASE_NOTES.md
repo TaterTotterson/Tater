@@ -1,17 +1,31 @@
-# Tater v3.0.6
+# Tater v3.0.7
 
-Custom wake-word bundles now deliver their wake-boundary model to compatible
-native satellites, including Voice PE.
+Face ID now uses one local YuNet + SFace pipeline, with simpler settings and
+reference matching based on confirmed photos.
 
 ## What's Changed
 
-- **Send the complete wake bundle.** Tater now reads the boundary-model flag
-  produced by its bundle loader and sends the full schema-v4 bundle to native
-  satellites that advertise boundary support. Previously, those satellites
-  could receive only the main wake detector, leaving wake-boundary detection
-  disabled even though the selected bundle included it.
-- **Keep older satellites compatible.** Devices without boundary support
-  continue to receive the microWakeWord-only manifest. Satellites that already
-  support schema-v4 wake bundles do not need a firmware update for this fix.
+- **One local face pipeline.** YuNet detects faces and landmarks; OpenCV aligns
+  each face for SFace's normalized 128-dimensional embeddings. The worker uses
+  the CPU DNN backend on macOS and Linux, with a larger-resolution detection
+  retry when needed. Model weights are pinned and verified before loading.
+- **Simpler installation and settings.** Remove the Face ID model selector and
+  the DeepFace, TensorFlow, RetinaFace, and old model-specific requirements.
+  The macOS launcher and Linux setup checks now use OpenCV and NumPy for Face ID.
+- **Preserve existing people and captures.** Rebuild references from saved images
+  in the background while retaining people, links, trust flags, images, and old
+  embeddings. Show migration progress and captures needing another enrollment
+  photo. Old and new embeddings are never compared.
+- **Use confirmed references.** Named-person recognition uses trusted images,
+  SFace's reference cutoff, and a margin between competing people. Unknown-face
+  clustering stays stricter, and burst matching does not relax the SFace cutoff.
+  Add regression coverage for migration, matching, image alignment, model
+  integrity, and a non-writing planner for reviewing old assignments.
 
-**Full Changelog**: [v3.0.5...v3.0.6](https://github.com/TaterTotterson/Tater/compare/v3.0.5...v3.0.6)
+Spud Hubs and Spudlets using Face ID must run the same pipeline revision. Actual
+recognition accuracy still depends on camera images, lighting, and pose; this
+release does not automatically reset or delete anyone's face library.
+
+[Face ID documentation](https://github.com/TaterTotterson/Tater/blob/main/docs/face_id.md)
+
+**Full Changelog**: [v3.0.6...v3.0.7](https://github.com/TaterTotterson/Tater/compare/v3.0.6...v3.0.7)

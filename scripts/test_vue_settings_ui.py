@@ -544,9 +544,9 @@ class VueSettingsTests(unittest.TestCase):
         self.assertIn('@subtab="setSpeakerSubtab"', models)
         self.assertIn('speakerSubtab.value === "settings"', models)
         self.assertIn("<FaceModels v-else-if=\"activeTab === 'faceid'\"", models)
-        self.assertIn("tm-face-model-grid", face)
+        self.assertIn("YuNet + SFace", face)
         self.assertIn("Rebuilding face embeddings", face)
-        self.assertIn("function chooseModel", face)
+        self.assertNotIn("function chooseModel", face)
 
         for selector in (
             ".tm-model-area-hero",

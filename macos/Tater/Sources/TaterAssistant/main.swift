@@ -898,10 +898,7 @@ private final class BackendManager {
             appendLog("Private runtime uses the legacy firmware workspace name; setup will rename it.\n")
             return false
         }
-        var faceIDPackages = ["deepface", "tensorflow", "tf-keras", "opencv-python", "retina-face"]
-        if isAppleSilicon {
-            faceIDPackages.append("tensorflow-metal")
-        }
+        let faceIDPackages = ["opencv-python", "numpy"]
         for packageName in faceIDPackages where installedPackageVersion(packageName, using: python) == nil {
             appendLog("Private runtime is missing the Face ID dependency \(packageName).\n")
             return false

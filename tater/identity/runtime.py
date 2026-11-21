@@ -1,4 +1,4 @@
-"""Separate-process DeepFace runtime shared by Tater cores."""
+"""Separate-process YuNet + SFace runtime shared by Tater cores."""
 
 from __future__ import annotations
 
@@ -12,10 +12,8 @@ import base64
 import contextlib
 import json
 import os
-import platform
 import selectors
 import shutil
-import site
 import subprocess
 import sys
 import threading
@@ -28,55 +26,26 @@ from tater_paths import runtime_dir
 from spud_link_models import should_use_hub as spud_link_should_use_hub
 
 
+from tater.identity.model import (
+    DETECTOR_BACKEND, EMBEDDING_DIMENSIONS, MATCH_THRESHOLD, MODEL_ID,
+    MODEL_NAME, MODEL_REVISION, require_model,
+)
+
 ENABLED_KEY = "tater:face_id:enabled"
-MODEL_KEY = "tater:face_id:model"
-DEFAULT_MODEL_ID = "facenet512"
-# Kept as a compatibility constant for older callers and tests. Runtime code
-# should use selected_model() because the active recognizer is configurable.
-MODEL_NAME = "Facenet512"
-DETECTOR_BACKEND = "retinaface"
+MODEL_KEY = "tater:face_id:model"  # Legacy selection; only SFace is supported now.
+DEFAULT_MODEL_ID = MODEL_ID
 DISTANCE_METRIC = "cosine"
-# DeepFace's calibrated Facenet512 cosine threshold is 0.30. Keep the
-# recognition cutoff aligned with the model while Awareness compares against
-# several learned views of a person instead of only one averaged centroid.
-MATCH_THRESHOLD = 0.30
 MAX_FACES_PER_FRAME = 8
-DEEPFACE_VERSION = "0.0.100"
-TENSORFLOW_VERSION = "2.21.0"
-TENSORFLOW_MACOS_VERSION = "2.18.0"
-MODEL_PACK_VERSION = "6"
-EMBEDDING_DIMENSIONS = 512
-
-ADAFACE_REPO_ID = "minchul/cvlface_adaface_ir50_webface4m"
-ADAFACE_REVISION = "60a65befbcf7e19284c4f3ac730f56867ed29594"
-
-FACE_ID_MODELS: Dict[str, Dict[str, Any]] = {
-    DEFAULT_MODEL_ID: {
-        "id": DEFAULT_MODEL_ID,
-        "label": "FaceNet512",
-        "model_name": "Facenet512",
-        "engine": "deepface",
-        "match_threshold": MATCH_THRESHOLD,
-        "embedding_dimensions": EMBEDDING_DIMENSIONS,
+MODEL_PACK_VERSION = "7"
+FACE_ID_MODELS = {
+    MODEL_ID: {
+        "id": MODEL_ID, "label": MODEL_NAME, "model_name": MODEL_NAME,
+        "engine": "opencv", "match_threshold": MATCH_THRESHOLD,
+        "embedding_dimensions": EMBEDDING_DIMENSIONS, "revision": MODEL_REVISION,
         "experimental": False,
     },
-    "adaface_ir50_webface4m": {
-        "id": "adaface_ir50_webface4m",
-        "label": "AdaFace IR-50 · WebFace4M",
-        "model_name": "AdaFace IR-50 WebFace4M",
-        "engine": "cvlface",
-        # This is intentionally conservative until Tater's saved-image
-        # bakeoff can calibrate a household-specific cutoff.
-        "match_threshold": 0.40,
-        "embedding_dimensions": EMBEDDING_DIMENSIONS,
-        "repo_id": ADAFACE_REPO_ID,
-        "revision": ADAFACE_REVISION,
-        "experimental": True,
-    },
 }
-
-_RUNTIME_MODULES = ("cv2", "deepface", "retinaface", "tensorflow", "tf_keras")
-_ADAFACE_RUNTIME_MODULES = ("torch", "transformers", "huggingface_hub", "omegaconf", "fvcore")
+_RUNTIME_MODULES = ("cv2", "numpy")
 
 _TRUE_VALUES = {"1", "true", "yes", "on", "enabled"}
 _condition = threading.Condition(threading.RLock())
@@ -95,7 +64,7 @@ _loaded_at = 0.0
 _generation = 0
 _accelerator = ""
 _device_name = ""
-_tensorflow_version = ""
+_runtime_version = ""
 _gpu_count = 0
 _accelerator_warning = ""
 
@@ -126,27 +95,11 @@ def is_enabled(redis_client: Any = None) -> bool:
 
 
 def normalize_model_id(value: Any) -> str:
-    token = _text(value).lower().replace("-", "_").replace(" ", "_")
-    aliases = {
-        "facenet": DEFAULT_MODEL_ID,
-        "facenet_512": DEFAULT_MODEL_ID,
-        "adaface": "adaface_ir50_webface4m",
-        "adaface_ir50": "adaface_ir50_webface4m",
-    }
-    token = aliases.get(token, token)
-    return token if token in FACE_ID_MODELS else DEFAULT_MODEL_ID
+    return require_model(_text(value))
 
 
 def selected_model_id(redis_client: Any = None) -> str:
-    client = redis_client
-    if client is None:
-        with contextlib.suppress(Exception):
-            from helpers import redis_client as shared_redis
-
-            client = shared_redis
-    if client is not None:
-        with contextlib.suppress(Exception):
-            return normalize_model_id(client.get(MODEL_KEY))
+    # Old selections must never change the vectors this version produces.
     return DEFAULT_MODEL_ID
 
 
@@ -186,43 +139,9 @@ def _model_pack_ready_path(model_id: Any) -> Path:
     return model_pack_dir() / f"ready-{token}.json"
 
 
-def _nvidia_gpu_available() -> bool:
-    if sys.platform != "linux" or platform.machine().lower() not in {"x86_64", "amd64"}:
-        return False
-    visible = str(os.environ.get("NVIDIA_VISIBLE_DEVICES") or "").strip().lower()
-    if visible in {"none", "void"}:
-        return False
-    command = shutil.which("nvidia-smi")
-    if command:
-        try:
-            completed = subprocess.run(
-                [command, "-L"],
-                check=False,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                text=True,
-                timeout=5,
-            )
-            if completed.returncode == 0 and "gpu" in str(completed.stdout or "").lower():
-                return True
-        except Exception:
-            pass
-    return Path("/dev/nvidiactl").exists() and any(Path("/dev").glob("nvidia[0-9]*"))
-
-
 def desired_accelerator() -> str:
-    machine = platform.machine().lower()
-    if sys.platform == "darwin" and machine in {"arm64", "aarch64"}:
-        return "metal"
-    if _nvidia_gpu_available():
-        return "cuda"
+    # PyPI OpenCV uses its portable CPU DNN backend on every platform.
     return "cpu"
-
-
-def expected_tensorflow_version() -> str:
-    if sys.platform == "darwin" and platform.machine().lower() in {"arm64", "aarch64"}:
-        return TENSORFLOW_MACOS_VERSION
-    return TENSORFLOW_VERSION
 
 
 def _worker_path() -> Path:
@@ -232,11 +151,8 @@ def _worker_path() -> Path:
 def _missing_runtime_modules(model_id: Any = "") -> List[str]:
     import importlib.util
 
-    model = selected_model(model_id=model_id)
-    modules = list(_RUNTIME_MODULES)
-    if model.get("engine") == "cvlface":
-        modules.extend(_ADAFACE_RUNTIME_MODULES)
-    return [name for name in modules if importlib.util.find_spec(name) is None]
+    require_model(_text(model_id))
+    return [name for name in _RUNTIME_MODULES if importlib.util.find_spec(name) is None]
 
 
 def _runtime_dependencies_available(model_id: Any = "") -> bool:
@@ -264,7 +180,9 @@ def _model_pack_available(
         return False
     if not isinstance(ready, dict) or str(ready.get("model_pack_version") or "") != MODEL_PACK_VERSION:
         return False
-    if normalize_model_id(ready.get("model_id")) != model["id"]:
+    if _text(ready.get("model_id")) != model["id"]:
+        return False
+    if _text(ready.get("model_revision")) != model["revision"]:
         return False
     if str(ready.get("detector_backend") or "") != DETECTOR_BACKEND:
         return False
@@ -308,14 +226,13 @@ def status(redis_client: Any = None, *, force_local: bool = False) -> Dict[str, 
             "match_threshold": model["match_threshold"],
             "loaded_at": 0.0,
             "model_pack_version": MODEL_PACK_VERSION,
-            "deepface_version": DEEPFACE_VERSION,
             "model_pack_path": "",
             "accelerator": "Spud Hub",
             "accelerator_target": "remote",
             "device_name": "Spud Hub",
             "gpu_available": False,
             "gpu_count": 0,
-            "tensorflow_version": "",
+            "runtime_version": "",
             "accelerator_warning": "",
             "local_only": False,
             "routed_via": "spud_link",
@@ -329,7 +246,7 @@ def status(redis_client: Any = None, *, force_local: bool = False) -> Dict[str, 
         thread_alive = bool(_load_thread and _load_thread.is_alive())
         accelerator = _accelerator
         device_name = _device_name
-        tensorflow_version = _tensorflow_version
+        runtime_version = _runtime_version
         gpu_count = _gpu_count
         accelerator_warning = _accelerator_warning
     state = _public_state(redis_client)
@@ -356,14 +273,13 @@ def status(redis_client: Any = None, *, force_local: bool = False) -> Dict[str, 
         "match_threshold": model["match_threshold"],
         "loaded_at": loaded_at,
         "model_pack_version": MODEL_PACK_VERSION,
-        "deepface_version": DEEPFACE_VERSION,
         "model_pack_path": str(model_pack_dir()),
         "accelerator": accelerator or ("detecting" if enabled else "unloaded"),
         "accelerator_target": target,
         "device_name": device_name,
         "gpu_available": bool(gpu_count),
         "gpu_count": gpu_count,
-        "tensorflow_version": tensorflow_version,
+        "runtime_version": runtime_version,
         "accelerator_warning": accelerator_warning,
         "local_only": True,
     }
@@ -384,36 +300,16 @@ def embedding_model_metadata(redis_client: Any = None, *, model_id: Any = "") ->
         "match_threshold": model["match_threshold"],
         "embedding_dimensions": model["embedding_dimensions"],
         "model_pack_version": MODEL_PACK_VERSION,
-        "deepface_version": DEEPFACE_VERSION,
         "model_revision": _text(model.get("revision")),
     }
 
 
 def _worker_environment() -> Dict[str, str]:
-    environment = {
+    return {
         **os.environ,
         "PYTHONNOUSERSITE": "1",
-        "TF_CPP_MIN_LOG_LEVEL": "2",
-        "TF_USE_LEGACY_KERAS": "1",
-        "DEEPFACE_HOME": str(model_pack_dir()),
         "TATER_FACE_MODEL_DIR": str(model_pack_dir()),
-        "TATER_ADAFACE_REPO_ID": ADAFACE_REPO_ID,
-        "TATER_ADAFACE_REVISION": ADAFACE_REVISION,
     }
-    if sys.platform == "linux":
-        site_packages = [Path(path) for path in site.getsitepackages()]
-        library_dirs: List[str] = []
-        binary_dirs: List[str] = []
-        for site_dir in site_packages:
-            library_dirs.extend(str(path) for path in site_dir.glob("nvidia/*/lib") if path.is_dir())
-            binary_dirs.extend(str(path) for path in site_dir.glob("nvidia/*/bin") if path.is_dir())
-        if library_dirs:
-            existing = str(environment.get("LD_LIBRARY_PATH") or "").strip()
-            environment["LD_LIBRARY_PATH"] = os.pathsep.join([*library_dirs, *([existing] if existing else [])])
-        if binary_dirs:
-            existing = str(environment.get("PATH") or "").strip()
-            environment["PATH"] = os.pathsep.join([*binary_dirs, *([existing] if existing else [])])
-    return environment
 
 
 def _run_checked(command: List[str], *, timeout: float) -> str:
@@ -452,8 +348,7 @@ def _write_model_ready_marker(model: Dict[str, Any], warmup: Dict[str, Any]) -> 
         json.dumps(
             {
                 "model_pack_version": MODEL_PACK_VERSION,
-                "deepface_version": DEEPFACE_VERSION,
-                "tensorflow_version": _text(warmup.get("tensorflow_version")) or expected_tensorflow_version(),
+                "runtime_version": _text(warmup.get("runtime_version")),
                 "model_id": model["id"],
                 "model_name": model["model_name"],
                 "model_revision": _text(model.get("revision")),
@@ -622,16 +517,11 @@ def _worker_request(payload: Dict[str, Any], *, timeout: float = 240.0) -> Dict[
 
 def _perform_load(generation: int, redis_client: Any) -> bool:
     global _accelerator, _accelerator_warning, _device_name, _error, _gpu_count, _loaded_model_id
-    global _loaded_at, _message, _model_loaded, _state, _tensorflow_version
+    global _loaded_at, _message, _model_loaded, _state, _runtime_version
     model = selected_model(redis_client)
     try:
         if not _model_pack_available(redis_client=redis_client, model_id=model["id"]):
-            if model["id"] == DEFAULT_MODEL_ID:
-                # Preserve the legacy one-argument preparation hook used by
-                # existing installations and tests.
-                _prepare_model_pack(generation)
-            else:
-                _prepare_model_pack(generation, redis_client, model_id=model["id"])
+            _prepare_model_pack(generation)
         with _condition:
             if generation != _generation:
                 return True
@@ -663,11 +553,11 @@ def _perform_load(generation: int, redis_client: Any) -> bool:
             return True
         _accelerator = _text(warmup.get("accelerator")) or "cpu"
         _device_name = _text(warmup.get("device_name")) or ("CPU" if _accelerator == "cpu" else "GPU")
-        _tensorflow_version = _text(warmup.get("tensorflow_version"))
+        _runtime_version = _text(warmup.get("runtime_version"))
         _gpu_count = max(0, int(warmup.get("gpu_count") or 0))
         target = desired_accelerator()
         if target != "cpu" and _accelerator == "cpu":
-            _accelerator_warning = f"{target.title()} was requested but TensorFlow did not detect a GPU; using CPU."
+            _accelerator_warning = f"{target.title()} was requested but OpenCV is using its CPU backend; using CPU."
         else:
             _accelerator_warning = ""
         _model_loaded = True
@@ -742,7 +632,7 @@ def load_model(redis_client: Any = None, *, timeout: float = 2700.0, force_local
 
 def unload_model() -> Dict[str, Any]:
     global _accelerator, _accelerator_warning, _device_name, _error, _generation, _gpu_count, _loaded_model_id
-    global _loaded_at, _message, _model_loaded, _state, _tensorflow_version
+    global _loaded_at, _message, _model_loaded, _state, _runtime_version
     with _inference_lock:
         with _condition:
             _generation += 1
@@ -754,7 +644,7 @@ def unload_model() -> Dict[str, Any]:
             _state = "idle"
             _accelerator = ""
             _device_name = ""
-            _tensorflow_version = ""
+            _runtime_version = ""
             _gpu_count = 0
             _accelerator_warning = ""
             _condition.notify_all()
@@ -775,37 +665,11 @@ def set_enabled(redis_client: Any, enabled: bool) -> Dict[str, Any]:
 
 
 def set_model(redis_client: Any, model_id: Any, *, load: bool = True) -> Dict[str, Any]:
-    """Select a recognition model without touching saved identity vectors."""
-    global _loaded_at, _loaded_model_id, _model_loaded, _state
+    """Compatibility hook for automatic upgrades to the sole supported model."""
+    require_model(_text(model_id))
     if redis_client is None:
         raise RuntimeError("Redis is unavailable.")
-    token = normalize_model_id(model_id)
-    requested = _text(model_id).lower().replace("-", "_").replace(" ", "_")
-    if token == DEFAULT_MODEL_ID and requested not in {
-        "",
-        DEFAULT_MODEL_ID,
-        "facenet",
-        "facenet_512",
-    }:
-        raise ValueError(f"Unsupported Face ID model: {_text(model_id)}")
-    changed = selected_model_id(redis_client) != token
-    redis_client.set(MODEL_KEY, token)
-    if changed:
-        with _worker_lock:
-            can_reuse_worker = (
-                token in _worker_warmed_model_ids
-                and _worker_process is not None
-                and _worker_process.poll() is None
-            )
-        if can_reuse_worker:
-            with _condition:
-                _loaded_model_id = token
-                _model_loaded = True
-                _loaded_at = time.time()
-                _state = "ready"
-                _condition.notify_all()
-        else:
-            unload_model()
+    redis_client.set(MODEL_KEY, DEFAULT_MODEL_ID)
     if load and is_enabled(redis_client):
         return start_model_load(redis_client)
     return status(redis_client)
@@ -818,41 +682,21 @@ def analyze_image(
     force_local: bool = False,
     model_id: Any = "",
 ) -> List[Dict[str, Any]]:
+    require_model(_text(model_id))
     if not image_bytes:
         return []
-    requested_model = selected_model(redis_client, model_id=model_id)
-    active_model_id = selected_model_id(redis_client)
-    if requested_model["id"] == active_model_id:
-        load_model(redis_client, force_local=force_local)
+    load_model(redis_client, force_local=force_local)
     with _inference_lock:
         if not is_enabled(redis_client):
             raise RuntimeError("Face ID is disabled in Settings > Models.")
-        if requested_model["id"] != active_model_id and requested_model["id"] not in _worker_warmed_model_ids:
-            missing = _missing_runtime_modules(requested_model["id"])
-            if missing:
-                raise RuntimeError(
-                    "Face ID dependencies are missing from Tater's Python environment "
-                    f"({', '.join(missing)}). Rerun Tater setup."
-                )
-            warmup = _worker_request(
-                {
-                    "action": "warmup",
-                    "model_id": requested_model["id"],
-                    "detector_backend": DETECTOR_BACKEND,
-                },
-                timeout=1200,
-            )
-            _worker_warmed_model_ids.add(requested_model["id"])
-            _write_model_ready_marker(requested_model, warmup)
         result = _worker_request(
             {
                 "action": "represent",
                 "image_b64": base64.b64encode(bytes(image_bytes)).decode("ascii"),
                 "settings": {
-                    "model_id": requested_model["id"],
-                    "model_name": requested_model["model_name"],
+                    "model_id": DEFAULT_MODEL_ID,
                     "detector_backend": DETECTOR_BACKEND,
-                    "minimum_confidence": 0.0,
+                    "minimum_confidence": 0.65,
                     "max_faces": MAX_FACES_PER_FRAME,
                 },
             },

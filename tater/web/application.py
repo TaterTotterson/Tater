@@ -23826,12 +23826,6 @@ def update_settings(payload: AppSettingsRequest, response: Response) -> Dict[str
         )
         face_id_result = face_identity.service_status(redis_client)
 
-    if "face_id_model" in updates:
-        requested_face_model = str(updates.get("face_id_model") or "").strip()
-        if requested_face_model:
-            face_identity.start_model_switch(redis_client, requested_face_model)
-            face_id_result = face_identity.service_status(redis_client)
-
     system_task_manager.request_run_debounced(
         "runtime_model_snapshot",
         reason="settings-updated",

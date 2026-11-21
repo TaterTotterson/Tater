@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare Tater Face ID models on a labeled folder of face images.
+"""Evaluate Tater Face ID on a labeled folder of face images.
 
 Dataset layout::
 
@@ -13,7 +13,7 @@ Dataset layout::
 
 The tool is read-only with respect to Tater's Redis identity store. It reports
 same-person and different-person cosine distances plus a data-derived threshold
-for each model.
+for YuNet + SFace.
 """
 
 from __future__ import annotations
@@ -172,11 +172,6 @@ def evaluate_model(images: Iterable[Tuple[str, Path]], model_id: str) -> Dict[st
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("dataset", type=Path, help="Folder containing one subfolder per person")
-    parser.add_argument(
-        "--models",
-        default="facenet512,adaface_ir50_webface4m",
-        help="Comma-separated Face ID model IDs",
-    )
     parser.add_argument("--json-output", type=Path, help="Optional path for the full JSON report")
     args = parser.parse_args()
 
@@ -190,12 +185,11 @@ def main() -> int:
     if len(labels) < 2:
         parser.error("add at least two different person subfolders to measure false matches")
 
-    model_ids = [face_id_runtime.normalize_model_id(value) for value in args.models.split(",") if value.strip()]
     report = {
         "dataset": str(dataset),
         "people": len(labels),
         "images": len(images),
-        "models": [evaluate_model(images, model_id) for model_id in dict.fromkeys(model_ids)],
+        "models": [evaluate_model(images, face_id_runtime.DEFAULT_MODEL_ID)],
     }
     rendered = json.dumps(report, indent=2)
     print(rendered)

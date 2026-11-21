@@ -14,6 +14,7 @@ _expose_legacy(__name__)
 import contextlib
 import base64
 import json
+import hashlib
 import math
 import threading
 import time
@@ -22,6 +23,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import face_id_runtime
+from tater.identity.model import ANONYMOUS_MATCH_THRESHOLD, MATCH_MIN_MARGIN
 from spud_link_models import allow_local_fallback as spud_link_allow_local_fallback
 from spud_link_models import request_json as spud_link_request_json
 from spud_link_models import should_use_hub as spud_link_should_use_hub
@@ -63,6 +65,7 @@ REFERENCE_STATUSES = {
 _identity_lock = threading.RLock()
 _model_switch_lock = threading.RLock()
 _model_switch_thread: Optional[threading.Thread] = None
+_migration_attempted_sources: set[str] = set()
 
 
 def _text(value: Any) -> str:
@@ -253,6 +256,8 @@ def valid_embedding(raw: Any, dimensions: int = 0) -> List[float]:
         return []
     if dimensions and len(embedding) != dimensions:
         return []
+    if not all(math.isfinite(value) for value in embedding):
+        return []
     return embedding
 
 
@@ -265,7 +270,10 @@ def _embedding_model_metadata(
     source = raw if isinstance(raw, dict) else {}
     local = face_id_runtime.embedding_model_metadata(redis_client)
     metadata = {
-        "model_id": _text(source.get("model_id")) or _text(local.get("model_id")),
+        "model_id": _text(source.get("model_id")) or (
+            "facenet512" if _text(source.get("model_name")).lower() == "facenet512"
+            else _text(local.get("model_id"))
+        ),
         "model_name": _text(source.get("model_name")) or _text(local.get("model_name")),
         "detector_backend": _text(source.get("detector_backend")) or _text(local.get("detector_backend")),
         "distance_metric": _text(source.get("distance_metric")) or _text(local.get("distance_metric")),
@@ -276,7 +284,7 @@ def _embedding_model_metadata(
         ),
         "model_pack_version": _text(source.get("model_pack_version")) or _text(local.get("model_pack_version")),
         "deepface_version": _text(source.get("deepface_version")) or _text(local.get("deepface_version")),
-        "model_revision": _text(source.get("model_revision")) or _text(local.get("model_revision")),
+        "model_revision": _text(source.get("model_revision")) if source else _text(local.get("model_revision")),
     }
     return metadata
 
@@ -289,7 +297,7 @@ def _embedding_model_signature(metadata: Any, *, dimensions: int = 0) -> str:
         str(_int(dimensions or normalized.get("embedding_dimensions"), minimum=0)),
     ]
     revision = _text(normalized.get("model_revision"))
-    if revision and _text(normalized.get("model_id")) != face_id_runtime.DEFAULT_MODEL_ID:
+    if revision and _text(normalized.get("model_id")) != "facenet512":
         parts.append(revision[:12].lower())
     return "|".join(parts)
 
@@ -566,13 +574,29 @@ def match_identity(
     # Once a profile is linked to a Person, a nearby anonymous cluster should
     # not steal future observations from it. Prefer a valid named match first;
     # anonymous clusters are still used when no named profile is convincing.
+    signature = _text(model_signature).lower()
     if known and float(known[0]["distance"]) <= maximum:
-        return _text(known[0]["id"]), float(known[0]["distance"])
+        best = known[0]
+        person = (
+            _text(best["identity"].get("person_id"))
+            or _text(best["identity"].get("person_name"))
+            or _text(best["identity"].get("name"))
+        )
+        rivals = [
+            row for row in known[1:]
+            if (
+                _text(row["identity"].get("person_id"))
+                or _text(row["identity"].get("person_name"))
+                or _text(row["identity"].get("name"))
+            ) != person
+        ]
+        runner_distance = float(rivals[0]["distance"]) if rivals else float("inf")
+        if not signature.startswith("sface|") or runner_distance - float(best["distance"]) >= MATCH_MIN_MARGIN:
+            return _text(best["id"]), float(best["distance"])
 
     # General model cutoffs remain strict for anonymous clustering. A linked
     # person can accept wider pose and lighting variation only when multiple
     # user-confirmed references agree and the next person is clearly farther.
-    signature = _text(model_signature).lower()
     if "facenet512" in signature:
         known_maximum = FACENET_KNOWN_MATCH_THRESHOLD
     elif "adaface" in signature:
@@ -599,7 +623,8 @@ def match_identity(
         ):
             return _text(best_known["id"]), float(best_known["distance"])
 
-    if unknown and float(unknown[0]["distance"]) <= maximum:
+    anonymous_maximum = min(maximum, ANONYMOUS_MATCH_THRESHOLD) if signature.startswith("sface|") else maximum
+    if unknown and float(unknown[0]["distance"]) <= anonymous_maximum:
         return _text(unknown[0]["id"]), float(unknown[0]["distance"])
 
     return "", float(candidates[0]["distance"])
@@ -734,8 +759,11 @@ def match_identity_burst(
 
     model = selected[0].get("embedding_model") if isinstance(selected[0].get("embedding_model"), dict) else {}
     maximum = _float(threshold, _float(model.get("match_threshold"), face_id_runtime.MATCH_THRESHOLD))
-    extended_maximum = min(0.75, maximum + BURST_DISTANCE_EXTENSION)
-    centroid_maximum = min(0.70, maximum + BURST_CENTROID_EXTENSION)
+    if wanted_signature.lower().startswith("sface|"):
+        extended_maximum = centroid_maximum = maximum
+    else:
+        extended_maximum = min(0.75, maximum + BURST_DISTANCE_EXTENSION)
+        centroid_maximum = min(0.70, maximum + BURST_CENTROID_EXTENSION)
     centroid = [sum(values) / len(embeddings) for values in zip(*embeddings)]
     centroid_norm = math.sqrt(sum(value * value for value in centroid))
     if centroid_norm <= 0.0:
@@ -1185,6 +1213,8 @@ def runtime_status(redis_client: Any = None) -> Dict[str, Any]:
 
 def _save_model_switch_state(client: Any, state: Dict[str, Any]) -> Dict[str, Any]:
     payload = dict(state)
+    total = _int(payload.get("total"))
+    payload["progress"] = min(100, round(100 * _int(payload.get("processed")) / total)) if total else 0
     payload["updated_at"] = _now_iso()
     with contextlib.suppress(Exception):
         client.set(MODEL_SWITCH_STATE_KEY, json.dumps(payload, separators=(",", ":")))
@@ -1238,7 +1268,7 @@ def _cache_model_embeddings(
             for identity_id, identity in snapshot.items()
             if _text(identity.get("person_id"))
         }
-    total = sum(len(image_backed_observations(identity)) for identity in snapshot.values())
+    total = sum(len(stored_face_observations(identity)) for identity in snapshot.values())
     processed = 0
     generated = 0
     failed = 0
@@ -1260,7 +1290,7 @@ def _cache_model_embeddings(
     for identity_id, identity in snapshot.items():
         cached_by_observation: Dict[str, Dict[str, Any]] = {}
         fallback_signature = _text(identity.get("embedding_model_signature"))
-        for observation in image_backed_observations(identity):
+        for observation in stored_face_observations(identity):
             observation_id = _text(observation.get("id"))
             if observation_embedding(observation, signature, fallback_signature=fallback_signature):
                 processed += 1
@@ -1281,6 +1311,7 @@ def _cache_model_embeddings(
                         timeout=180.0,
                     )
                     result = remote.get("result") if isinstance(remote.get("result"), dict) else {}
+                    _require_sface_metadata(result.get("model"))
                     detections = result.get("detections") if isinstance(result.get("detections"), list) else []
                 else:
                     detections = list(
@@ -1326,24 +1357,26 @@ def _cache_model_embeddings(
                 continue
             current_rows = observations(current)
             for row in current_rows:
+                # Freeze legacy provenance before changing the profile's
+                # preferred signature. Old captures may rely on its fallback.
+                if not _text(row.get("embedding_model_signature")) and valid_embedding(row.get("embedding")):
+                    row["embedding_model_signature"] = _text(current.get("embedding_model_signature"))
                 entry = cached_by_observation.get(_text(row.get("id")))
                 if not entry:
                     continue
                 cached = dict(row.get("embeddings")) if isinstance(row.get("embeddings"), dict) else {}
                 cached[signature] = entry
                 row["embeddings"] = cached
-            save_identity(rebuild_identity(current, current_rows, keep_name=True), client)
+            rebuilt = rebuild_identity(current, current_rows, keep_name=True)
+            if signature in _embedding_profiles(rebuilt):
+                rebuilt["embedding_model_signature"] = signature
+                rebuilt = rebuild_identity(rebuilt, current_rows, keep_name=True)
+            save_identity(rebuilt, client)
 
     missing_linked = []
     for identity in identity_rows(client).values():
         if _text(identity.get("person_id")) and not reference_embeddings(identity, signature):
             missing_linked.append(display_name(identity, client) or _text(identity.get("id")))
-    if missing_linked:
-        raise RuntimeError(
-            "Could not create a usable "
-            f"{model['label']} embedding for: {', '.join(missing_linked[:5])}. "
-            "The current Face ID model was left active."
-        )
     return {
         "target_model_id": model["id"],
         "target_model": model["label"],
@@ -1352,95 +1385,82 @@ def _cache_model_embeddings(
         "processed": processed,
         "generated": generated,
         "failed": failed,
+        "missing_profiles": missing_linked,
     }
 
 
-def _model_switch_main(client: Any, target_model_id: str) -> None:
+def _require_sface_metadata(raw: Any) -> Dict[str, Any]:
+    metadata = raw if isinstance(raw, dict) else {}
+    face_id_runtime.normalize_model_id(metadata.get("model_id") or metadata.get("model_name"))
+    if (
+        _text(metadata.get("model_revision")) != face_id_runtime.MODEL_REVISION
+        or _int(metadata.get("embedding_dimensions")) != face_id_runtime.EMBEDDING_DIMENSIONS
+        or _text(metadata.get("detector_backend")) != face_id_runtime.DETECTOR_BACKEND
+        or _text(metadata.get("distance_metric")) != face_id_runtime.DISTANCE_METRIC
+    ):
+        raise RuntimeError("Update the Spud Hub to this Tater version before using Face ID.")
+    return metadata
+
+
+def _reference_migration_main(client: Any, source: str) -> None:
     global _model_switch_thread
     try:
-        result = _cache_model_embeddings(client, target_model_id)
-        face_id_runtime.set_model(client, target_model_id, load=True)
-        _save_model_switch_state(
-            client,
-            {
-                **result,
-                "state": "complete",
-                "active_model_id": target_model_id,
-                "active_model": result["target_model"],
-                "message": f"{result['target_model']} is active. Cached embeddings are ready for rollback.",
-            },
-        )
+        result = _cache_model_embeddings(client, face_id_runtime.DEFAULT_MODEL_ID)
+        _save_model_switch_state(client, {
+            **result, "migration_source": source,
+            "state": "partial" if result["failed"] or result["missing_profiles"] else "complete",
+            "message": (
+                "Saved face references updated. Some photos could not be converted; add clear photos for affected people."
+                if result["failed"] or result["missing_profiles"]
+                else "Saved face references are ready for YuNet + SFace."
+            ),
+        })
     except Exception as exc:
-        active = face_id_runtime.selected_model(client)
-        previous = model_switch_status(client)
-        _save_model_switch_state(
-            client,
-            {
-                **previous,
-                "state": "error",
-                "active_model_id": active["id"],
-                "active_model": active["label"],
-                "error": _text(exc) or exc.__class__.__name__,
-                "message": _text(exc) or "Face ID model switch failed.",
-            },
-        )
+        _save_model_switch_state(client, {
+            "state": "error", "migration_source": source,
+            "target_model_id": face_id_runtime.DEFAULT_MODEL_ID,
+            "error": _text(exc) or exc.__class__.__name__,
+            "message": "Saved face references could not be updated. " + _text(exc),
+        })
     finally:
         with _model_switch_lock:
             if _model_switch_thread is threading.current_thread():
                 _model_switch_thread = None
 
 
-def start_model_switch(redis_client: Any, model_id: Any) -> Dict[str, Any]:
+def start_reference_migration(redis_client: Any) -> Dict[str, Any]:
+    """Automatically upgrade saved images once; never reinterpret old vectors."""
     global _model_switch_thread
     client = _client(redis_client)
-    requested = _text(model_id)
-    target = face_id_runtime.normalize_model_id(requested)
-    normalized_requested = requested.lower().replace("-", "_").replace(" ", "_")
-    if target == face_id_runtime.DEFAULT_MODEL_ID and normalized_requested not in {
-        "facenet",
-        "facenet_512",
-        face_id_runtime.DEFAULT_MODEL_ID,
-    }:
-        raise ValueError(f"Unsupported Face ID model: {requested}")
-    if target == face_id_runtime.selected_model_id(client):
-        active = face_id_runtime.selected_model(client)
-        return _save_model_switch_state(
-            client,
-            {
-                "state": "complete",
-                "active_model_id": active["id"],
-                "active_model": active["label"],
-                "target_model_id": active["id"],
-                "target_model": active["label"],
-                "message": f"{active['label']} is already active.",
-            },
-        )
-    if not face_id_runtime.is_enabled(client):
-        raise RuntimeError("Enable Face ID before switching recognition models so saved faces can be migrated safely.")
+    metadata = face_id_runtime.embedding_model_metadata(client)
+    signature = _embedding_model_signature(metadata)
+    rows = identity_rows(client)
+    source_rows = []
+    needs_migration = False
+    for identity_id, identity in rows.items():
+        fallback = _text(identity.get("embedding_model_signature"))
+        for observation in stored_face_observations(identity):
+            if not observation_embedding(observation, signature, fallback_signature=fallback):
+                source_rows.append((identity_id, _text(observation.get("id"))))
+                needs_migration = True
+    if not needs_migration:
+        return {"state": "complete", "target_model_id": face_id_runtime.DEFAULT_MODEL_ID}
+    source = hashlib.sha256(json.dumps([signature, sorted(source_rows)]).encode()).hexdigest()
     with _model_switch_lock:
+        state = model_switch_status(client)
         if _model_switch_thread is not None and _model_switch_thread.is_alive():
-            state = model_switch_status(client)
-            if _text(state.get("target_model_id")) != target:
-                raise RuntimeError("Another Face ID model switch is already running.")
             return state
-        target_model = face_id_runtime.selected_model(client, model_id=target)
-        active_model = face_id_runtime.selected_model(client)
-        _save_model_switch_state(
-            client,
-            {
-                "state": "queued",
-                "target_model_id": target_model["id"],
-                "target_model": target_model["label"],
-                "active_model_id": active_model["id"],
-                "active_model": active_model["label"],
-                "message": f"Waiting to prepare saved faces for {target_model['label']}.",
-            },
-        )
+        if source in _migration_attempted_sources:
+            return state
+        _migration_attempted_sources.add(source)
+        _save_model_switch_state(client, {
+            "state": "queued", "migration_source": source,
+            "target_model_id": face_id_runtime.DEFAULT_MODEL_ID,
+            "message": "Updating saved face references to YuNet + SFace.",
+        })
         _model_switch_thread = threading.Thread(
-            target=_model_switch_main,
-            args=(client, target),
-            name="tater-face-id-model-switch",
-            daemon=True,
+            target=_reference_migration_main, args=(client, source),
+            name="tater-face-reference-migration", daemon=True,
         )
         _model_switch_thread.start()
     return model_switch_status(client)
@@ -1481,38 +1501,21 @@ def _analyze_face_image(
                 raise RuntimeError(
                     "The Spud Hub needs the stateless Face ID embedding update before this Spudlet can use Hub Face ID."
                 )
+            _require_sface_metadata(result.get("model"))
+            if any(
+                not valid_embedding(row.get("embedding"), face_id_runtime.EMBEDDING_DIMENSIONS)
+                for row in result["detections"] if isinstance(row, dict)
+            ):
+                raise RuntimeError("The Spud Hub returned an invalid SFace embedding.")
             model = _embedding_model_metadata(result.get("model"), redis_client=client)
             detections = [
                 _annotate_detection(row, model)
                 for row in result.get("detections") or []
                 if isinstance(row, dict)
             ]
-            model_signature = _embedding_model_signature(
-                model,
-                dimensions=_int(model.get("embedding_dimensions"), minimum=0),
-            )
-            linked_missing = [
-                identity
-                for identity in identity_rows(client).values()
-                if _text(identity.get("person_id"))
-                and not reference_embeddings(identity, model_signature)
-            ]
-            if linked_missing and _text(model.get("model_id")):
-                migrated = _cache_model_embeddings(
-                    client,
-                    _text(model.get("model_id")),
-                    linked_only=True,
-                )
-                _save_model_switch_state(
-                    client,
-                    {
-                        **migrated,
-                        "state": "complete",
-                        "active_model_id": _text(model.get("model_id")),
-                        "active_model": _text(model.get("model_name")),
-                        "message": "Local linked face profiles are compatible with the Spud Hub model.",
-                    },
-                )
+            migration = start_reference_migration(client)
+            if migration.get("state") in {"queued", "embedding", "rebuilding"}:
+                return [], {}, {"status": "not_ready", "warning": "Updating saved face references to SFace."}
             return detections, {
                 "routed_via": "spud_link",
                 "loaded_on": "Spud Hub",
@@ -1540,6 +1543,9 @@ def _analyze_face_image(
             "identity_ids": [],
         }
     try:
+        migration = start_reference_migration(client)
+        if migration.get("state") in {"queued", "embedding", "rebuilding"}:
+            return [], {}, {"status": "not_ready", "warning": "Updating saved face references to SFace."}
         model = _embedding_model_metadata(redis_client=client)
         detections = [
             _annotate_detection(row, model)
@@ -2177,10 +2183,13 @@ def ui_rows(redis_client: Any = None, *, include_gallery: bool = True) -> List[D
 
 def service_status(redis_client: Any = None) -> Dict[str, Any]:
     runtime = runtime_status(redis_client)
+    migration = model_switch_status(redis_client)
+    if runtime.get("enabled") and runtime.get("loaded"):
+        migration = start_reference_migration(_client(redis_client))
     rows = identity_rows(redis_client)
     return {
         **runtime,
-        "model_switch": model_switch_status(redis_client),
+        "model_switch": migration,
         "identity_count": len(rows),
         "known_identity_count": len([row for row in rows.values() if display_name(row, redis_client)]),
         "storage_key": SHARED_IDENTITIES_KEY,

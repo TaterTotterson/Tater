@@ -336,7 +336,6 @@ class AppSettingsRequest(BaseModel):
     video_understanding_api_key: Optional[str] = None
     video_understanding_max_seconds: Optional[int] = None
     face_id_enabled: Optional[bool] = None
-    face_id_model: Optional[str] = None
     speech_stt_backend: Optional[str] = None
     speech_qwen3_asr_model: Optional[str] = None
     speech_acceleration: Optional[str] = None

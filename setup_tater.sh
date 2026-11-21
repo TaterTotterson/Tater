@@ -1452,8 +1452,6 @@ install_nvidia() {
   "${venv_python}" -m pip install "nvidia-cublas-cu12" "nvidia-cudnn-cu12==9.*"
   info "Installing Tater dependencies"
   pip_install_requirements "${venv_python}" "${tmp_req}"
-  info "Installing NVIDIA TensorFlow CUDA extras for Face ID"
-  "${venv_python}" -m pip install --upgrade "tensorflow[and-cuda]==2.21.0"
   install_llama_cpp_native nvidia
   info "Switching ONNX Runtime to GPU build"
   "${venv_python}" -m pip uninstall -y onnxruntime >/dev/null 2>&1 || true
@@ -1681,7 +1679,7 @@ if remote_only:
         raise SystemExit("Remote-only profile unexpectedly installed local model packages: " + ", ".join(unexpectedly_installed))
     print("remote_only_dependency_boundary ok")
 else:
-    face_id_required = ["cv2", "deepface", "retinaface", "tensorflow", "tf_keras", "torch", "transformers", "huggingface_hub", "omegaconf", "fvcore"]
+    face_id_required = ["cv2", "numpy"]
     face_id_missing = [name for name in face_id_required if importlib.util.find_spec(name) is None]
     if face_id_missing:
         raise SystemExit("Missing Face ID packages: " + ", ".join(face_id_missing))

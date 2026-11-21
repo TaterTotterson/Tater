@@ -80,15 +80,11 @@ const actionSpec = computed(() => {
     case "audio-understanding": return { label: "Save & Apply Audio and Video", note: "Saves both media configurations and loads selected local models." };
     case "speakerid": return speakerSubtab.value === "settings" ? { label: "Save Speaker ID Settings", note: "Applies the runtime settings above; individual speaker actions remain on their cards." } : null;
     case "emotionid": return { label: "Save Emotion ID Settings", note: "Applies the voice-tone runtime settings above." };
-    case "faceid": return { label: "Apply Face ID Settings", note: "Updates the recognition model and live runtime state." };
+    case "faceid": return { label: "Apply Face ID Settings", note: "Updates face recognition and live runtime state." };
     default: return null;
   }
 });
 const faceSettings = computed<JsonRow>(() => draft.face_id && typeof draft.face_id === "object" ? draft.face_id as JsonRow : {});
-const faceModels = computed<JsonRow[]>(() => Array.isArray(faceSettings.value.available_models) ? faceSettings.value.available_models : [
-  { id: "facenet512", label: "FaceNet512" },
-  { id: "adaface_ir50_webface4m", label: "AdaFace IR-50 · WebFace4M", experimental: true },
-]);
 const pocketSetupReady = computed(() => Boolean(pocketSetupStatus.value.ready) && !pocketSetupLoading.value && !pocketSetupError.value);
 
 function normalizeTab(value: unknown): string {
@@ -461,7 +457,7 @@ async function runPrimaryAction() {
       acceptLocalModelWarmup(result);
     }
     else if (activeTab.value === "faceid") {
-      result = await saveStatic({ face_id_enabled: Boolean(faceSettings.value.enabled), face_id_model: String(faceSettings.value.model_id || "facenet512") }, "Face ID settings applied.");
+      result = await saveStatic({ face_id_enabled: Boolean(faceSettings.value.enabled) }, "Face ID settings applied.");
       await refreshFaceStatus();
     } else if (activeTab.value === "wake") result = await wakePanel.value?.apply?.() || { ok: false, error: "Wake Word settings are not ready." };
     else if (activeTab.value === "speakerid") result = await speakerPanel.value?.apply?.() || { ok: false, error: "Speaker ID settings are not ready." };
@@ -530,7 +526,7 @@ defineExpose({ hasUnsavedChanges: () => Object.values(dirty).some(Boolean) });
     <section v-else-if="activeTab === 'audio-understanding'" class="tm-stack"><MediaModelCard kind="audio" :draft="draft" :local-models="localModels" @dirty="markDirty" /><MediaModelCard kind="video" :draft="draft" :local-models="localModels" @dirty="markDirty" /></section>
     <IdentityModels v-else-if="activeTab === 'speakerid'" ref="speakerPanel" kind="speakerid" :runtime-endpoint="endpoints.modelsVoiceRuntime" :action-endpoint="endpoints.modelsVoiceAction" @dirty="markDirty" @subtab="setSpeakerSubtab" @notify="(message, tone) => emit('notify', message, tone)" />
     <IdentityModels v-else-if="activeTab === 'emotionid'" ref="emotionPanel" kind="emotionid" :runtime-endpoint="endpoints.modelsVoiceRuntime" :action-endpoint="endpoints.modelsVoiceAction" @dirty="markDirty" @notify="(message, tone) => emit('notify', message, tone)" />
-    <FaceModels v-else-if="activeTab === 'faceid'" :settings="faceSettings" :status="faceStatus" :models="faceModels" :busy="saving" @dirty="markDirty" />
+    <FaceModels v-else-if="activeTab === 'faceid'" :settings="faceSettings" :status="faceStatus" :busy="saving" @dirty="markDirty" />
 
     <footer v-if="actionSpec" class="tset-save-bar tmodels-save-bar">
       <div><strong>{{ dirty[activeTab] ? "Unsaved changes" : `${activeSpec.label} settings are synchronized` }}</strong><span>{{ actionSpec.note }}</span></div>

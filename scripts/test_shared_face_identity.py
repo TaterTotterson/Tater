@@ -54,6 +54,9 @@ class FakeRedis:
 class SharedFaceIdentityTests(unittest.TestCase):
     def setUp(self):
         self.redis = FakeRedis()
+        self.migration_patch = patch.object(face_identity, "start_reference_migration", return_value={"state": "complete"})
+        self.migration_patch.start()
+        self.addCleanup(self.migration_patch.stop)
 
     @staticmethod
     def detection(embedding):
@@ -72,14 +75,17 @@ class SharedFaceIdentityTests(unittest.TestCase):
 
         self.assertEqual(face_identity.identity_rows(self.redis), {})
 
-    def test_adaface_ir50_is_a_versioned_selectable_model(self):
-        model = face_identity.face_id_runtime.selected_model(model_id="adaface_ir50_webface4m")
-        metadata = face_identity.face_id_runtime.embedding_model_metadata(model_id=model["id"])
-
-        self.assertEqual(model["label"], "AdaFace IR-50 · WebFace4M")
-        self.assertEqual(model["match_threshold"], 0.40)
-        self.assertEqual(metadata["embedding_dimensions"], 512)
-        self.assertEqual(metadata["model_revision"], face_identity.face_id_runtime.ADAFACE_REVISION)
+    def test_sface_is_the_only_supported_model(self):
+        runtime = face_identity.face_id_runtime
+        self.redis.set(runtime.MODEL_KEY, "adaface_ir50_webface4m")
+        self.assertEqual(runtime.selected_model_id(self.redis), "sface")
+        self.assertEqual([row["id"] for row in runtime.available_models()], ["sface"])
+        self.assertEqual(runtime.DETECTOR_BACKEND, "yunet")
+        self.assertEqual(runtime.embedding_model_metadata()["embedding_dimensions"], 128)
+        self.assertTrue(runtime.embedding_model_metadata()["model_revision"])
+        for legacy in ("facenet512", "adaface_ir50_webface4m"):
+            with self.assertRaises(ValueError):
+                runtime.selected_model(model_id=legacy)
 
     @staticmethod
     def burst_detection(embedding, *, x=100, y=100, threshold=0.40):
@@ -565,7 +571,7 @@ class SharedFaceIdentityTests(unittest.TestCase):
     def test_spudlet_face_id_uses_hub_embeddings_with_local_people(self):
         person = people.create_person("Fred", self.redis)
         identity = face_identity.record_detection(
-            self.detection([1.0, 0.0]),
+            self.detection([1.0, *([0.0] * 127)]),
             event_id="local-enrollment",
             reference_status=face_identity.REFERENCE_STATUS_TRUSTED,
             redis_client=self.redis,
@@ -574,13 +580,8 @@ class SharedFaceIdentityTests(unittest.TestCase):
         remote_result = {
             "result": {
                 "status": "embedded",
-                "detections": [self.detection([0.999, 0.001])],
-                "model": {
-                    "model_name": "Facenet512",
-                    "distance_metric": "cosine",
-                    "embedding_dimensions": 2,
-                    "match_threshold": 0.30,
-                },
+                "detections": [self.detection([0.999, 0.001, *([0.0] * 126)])],
+                "model": face_identity.face_id_runtime.embedding_model_metadata(),
                 "stored": False,
             }
         }
@@ -614,13 +615,8 @@ class SharedFaceIdentityTests(unittest.TestCase):
         remote_result = {
             "result": {
                 "status": "embedded",
-                "detections": [self.detection([1.0, 0.0])],
-                "model": {
-                    "model_name": "Facenet512",
-                    "distance_metric": "cosine",
-                    "embedding_dimensions": 2,
-                    "match_threshold": 0.30,
-                },
+                "detections": [self.detection([1.0, *([0.0] * 127)])],
+                "model": face_identity.face_id_runtime.embedding_model_metadata(),
                 "stored": False,
             }
         }
@@ -644,48 +640,29 @@ class SharedFaceIdentityTests(unittest.TestCase):
         self.assertEqual(saved["person_id"], person["id"])
         self.assertEqual(saved["observations"][0]["source"]["kind"], "people_face_enrollment")
 
-    def test_spudlet_backfills_linked_faces_when_hub_model_changes(self):
+    def test_spudlet_migrates_legacy_references_using_hub(self):
+        self.migration_patch.stop()
         person = people.create_person("Fred", self.redis)
-        facenet_embedding = [1.0, *([0.0] * 511)]
-        identity = face_identity.record_detection(
-            self.detection(facenet_embedding),
-            event_id="local-facenet-enrollment",
-            reference_status=face_identity.REFERENCE_STATUS_TRUSTED,
-            redis_client=self.redis,
-        )
+        detection = self.detection([1.0, *([0.0] * 511)])
+        detection["embedding_model"] = {"model_id": "facenet512", "model_name": "Facenet512", "embedding_dimensions": 512}
+        identity = face_identity.record_detection(detection, event_id="legacy", reference_status="trusted", redis_client=self.redis)
         face_identity.save_profile(identity["id"], person_id=person["id"], redis_client=self.redis)
-        adaface_embedding = [0.0, 1.0, *([0.0] * 510)]
-        remote_result = {
-            "result": {
-                "status": "embedded",
-                "detections": [self.detection(adaface_embedding)],
-                "model": face_identity.face_id_runtime.embedding_model_metadata(
-                    self.redis,
-                    model_id="adaface_ir50_webface4m",
-                ),
-                "stored": False,
-            }
-        }
-
+        vector = [0.0, 1.0, *([0.0] * 126)]
+        remote = {"result": {"detections": [self.detection(vector)], "model": face_identity.face_id_runtime.embedding_model_metadata()}}
         with (
             patch.object(face_identity, "runtime_status", return_value={"enabled": True, "loaded": True}),
             patch.object(face_identity, "spud_link_should_use_hub", return_value=True),
-            patch.object(face_identity, "spud_link_request_json", return_value=remote_result) as request,
+            patch.object(face_identity, "spud_link_request_json", return_value=remote) as request,
         ):
-            result = face_identity.recognize_image(
-                b"jpeg",
-                event_id="hub-now-uses-adaface",
-                record=False,
-                redis_client=self.redis,
-            )
-
-        self.assertEqual(result["status"], "recognized")
+            face_identity.start_reference_migration(self.redis)
+            thread = face_identity._model_switch_thread
+            if thread is not None:
+                thread.join(timeout=3)
+            self.assertEqual(face_identity.model_switch_status(self.redis)["state"], "complete")
+            result = face_identity.recognize_image(b"jpeg", record=False, redis_client=self.redis)
         self.assertEqual(result["people"], ["Fred"])
         self.assertEqual(request.call_count, 2)
-        self.assertEqual(
-            request.call_args_list[1].kwargs["payload"]["model_id"],
-            "adaface_ir50_webface4m",
-        )
+        self.assertEqual(request.call_args_list[0].kwargs["payload"]["model_id"], "sface")
 
     def test_face_matching_does_not_mix_incompatible_embedding_models(self):
         identity = face_identity.record_detection(
@@ -712,66 +689,80 @@ class SharedFaceIdentityTests(unittest.TestCase):
         self.assertTrue(identity["embedding_model_signature"])
         self.assertEqual(matched_id, "")
 
-    def test_model_switch_caches_new_embeddings_and_keeps_facenet_rollback(self):
+    def test_failed_migration_retains_references_and_retries_after_restart(self):
+        self.migration_patch.stop()
+        detection = self.detection([1.0, *([0.0] * 511)])
+        detection["embedding_model"] = {"model_id": "facenet512", "model_name": "Facenet512", "embedding_dimensions": 512}
+        identity = face_identity.record_detection(detection, event_id="legacy-failure", redis_client=self.redis)
+        # This older format relied on the profile for its vector provenance.
+        row = face_identity.identity_rows(self.redis)[identity["id"]]
+        row["observations"][0].pop("embedding_model_signature")
+        face_identity.save_identity(row, self.redis)
+
+        with patch.object(face_identity.face_id_runtime, "analyze_image", side_effect=RuntimeError("temporarily unavailable")) as analyze:
+            face_identity.start_reference_migration(self.redis)
+            thread = face_identity._model_switch_thread
+            if thread is not None:
+                thread.join(timeout=3)
+            state = face_identity.model_switch_status(self.redis)
+            self.assertEqual(state["state"], "partial")
+            face_identity.start_reference_migration(self.redis)
+            self.assertEqual(analyze.call_count, 1)
+        saved = face_identity.identity_rows(self.redis)[identity["id"]]
+        self.assertEqual(saved["observations"][0]["embedding"], detection["embedding"])
+
+        # A new process has no in-memory attempts and must resume even if the
+        # previous process stopped with a queued/embedding state in Redis.
+        face_identity._migration_attempted_sources.clear()
+        state["state"] = "embedding"
+        face_identity._save_model_switch_state(self.redis, state)
+        with patch.object(face_identity.face_id_runtime, "analyze_image", return_value=[self.detection([1.0, *([0.0] * 127)])]):
+            face_identity.start_reference_migration(self.redis)
+            thread = face_identity._model_switch_thread
+            if thread is not None:
+                thread.join(timeout=3)
+        self.assertEqual(face_identity.model_switch_status(self.redis)["state"], "complete")
+        saved = face_identity.identity_rows(self.redis)[identity["id"]]
+        self.assertEqual(saved["observations"][0]["embedding_model_signature"], identity["embedding_model_signature"])
+        self.assertEqual(len(saved["observations"][0]["embedding"]), 512)
+
+    def test_outdated_hub_cannot_label_legacy_vectors_as_sface(self):
+        metadata = face_identity.face_id_runtime.embedding_model_metadata()
+        with self.assertRaises(ValueError):
+            face_identity._require_sface_metadata({**metadata, "model_id": "facenet512"})
+        with self.assertRaises(RuntimeError):
+            face_identity._require_sface_metadata({**metadata, "model_revision": "outdated"})
+        with self.assertRaises(RuntimeError):
+            face_identity._require_sface_metadata({**metadata, "embedding_dimensions": 512})
+
+    def test_automatic_migration_preserves_people_trust_and_original_vectors(self):
+        self.migration_patch.stop()
         person = people.create_person("Fred", self.redis)
-        facenet_embedding = [1.0, *([0.0] * 511)]
+        old_vector = [1.0, *([0.0] * 511)]
+        detection = self.detection(old_vector)
+        detection["embedding_model"] = {"model_id": "facenet512", "model_name": "Facenet512", "embedding_dimensions": 512}
         identity = face_identity.record_detection(
-            self.detection(facenet_embedding),
-            event_id="facenet-enrollment",
-            reference_status=face_identity.REFERENCE_STATUS_TRUSTED,
-            redis_client=self.redis,
+            detection, event_id="legacy", reference_status="trusted", redis_client=self.redis,
         )
         face_identity.save_profile(identity["id"], person_id=person["id"], redis_client=self.redis)
-        self.redis.set(face_identity.face_id_runtime.ENABLED_KEY, "true")
-        adaface_embedding = [0.0, 1.0, *([0.0] * 510)]
-
-        def activate_model(client, model_id, *, load=True):
-            del load
-            client.set(face_identity.face_id_runtime.MODEL_KEY, model_id)
-            return {"model_id": model_id}
-
-        with (
-            patch.object(
-                face_identity.face_id_runtime,
-                "analyze_image",
-                return_value=[self.detection(adaface_embedding)],
-            ),
-            patch.object(face_identity.face_id_runtime, "set_model", side_effect=activate_model),
-        ):
-            face_identity.start_model_switch(self.redis, "adaface_ir50_webface4m")
-            deadline = time.monotonic() + 3.0
-            while face_identity.model_switch_status(self.redis).get("state") not in {"complete", "error"} and time.monotonic() < deadline:
-                time.sleep(0.01)
-
-        state = face_identity.model_switch_status(self.redis)
-        self.assertEqual(state["state"], "complete")
+        new_vector = [0.0, 1.0, *([0.0] * 126)]
+        with patch.object(face_identity.face_id_runtime, "analyze_image", return_value=[self.detection(new_vector)]) as analyze:
+            face_identity.start_reference_migration(self.redis)
+            thread = face_identity._model_switch_thread
+            if thread is not None:
+                thread.join(timeout=3)
+            state = face_identity.model_switch_status(self.redis)
+            self.assertEqual(state["state"], "complete")
+            face_identity.start_reference_migration(self.redis)
+            self.assertEqual(analyze.call_count, 1)
         saved = face_identity.identity_rows(self.redis)[identity["id"]]
-        adaface_model = face_identity.face_id_runtime.embedding_model_metadata(
-            self.redis,
-            model_id="adaface_ir50_webface4m",
-        )
-        adaface_signature = face_identity._embedding_model_signature(adaface_model, dimensions=512)
-        facenet_signature = identity["embedding_model_signature"]
-
-        self.assertIn(adaface_signature, saved["embedding_profiles"])
-        self.assertEqual(
-            face_identity.match_identity(
-                {identity["id"]: saved},
-                adaface_embedding,
-                threshold=0.40,
-                model_signature=adaface_signature,
-            )[0],
-            identity["id"],
-        )
-        self.assertEqual(
-            face_identity.match_identity(
-                {identity["id"]: saved},
-                facenet_embedding,
-                threshold=0.30,
-                model_signature=facenet_signature,
-            )[0],
-            identity["id"],
-        )
+        signature = face_identity._embedding_model_signature(face_identity.face_id_runtime.embedding_model_metadata())
+        self.assertEqual(saved["person_id"], person["id"])
+        self.assertEqual(saved["observations"][0]["reference_status"], "trusted")
+        self.assertEqual(saved["observations"][0]["embedding"], old_vector)
+        self.assertIn(identity["embedding_model_signature"], saved["embedding_profiles"])
+        self.assertEqual(saved["embedding_model_signature"], signature)
+        self.assertEqual(face_identity.match_identity({saved["id"]: saved}, new_vector, model_signature=signature)[0], saved["id"])
 
     def test_moving_images_keeps_event_identity_resolution_current(self):
         source = face_identity.record_detection(
@@ -974,15 +965,14 @@ class SharedFaceIdentityTests(unittest.TestCase):
         self.assertIn("people-face-gallery", app)
         self.assertIn("people-face-enroll-dialog", app)
 
-    def test_face_id_settings_support_safe_model_switching(self):
-        app = (ROOT / "frontend" / "src" / "settings" / "components" / "ModelsSettings.vue").read_text(encoding="utf-8")
-        face = (ROOT / "frontend" / "src" / "settings" / "components" / "models" / "FaceModels.vue").read_text(encoding="utf-8")
-
+    def test_face_id_settings_have_one_fixed_model(self):
+        app = (ROOT / "frontend/src/settings/components/ModelsSettings.vue").read_text()
+        face = (ROOT / "frontend/src/settings/components/models/FaceModels.vue").read_text()
         self.assertIn("<FaceModels", app)
-        self.assertIn("adaface_ir50_webface4m", app)
-        self.assertIn("function chooseModel", face)
+        self.assertIn("YuNet + SFace", face)
+        self.assertNotIn("chooseModel", face)
+        self.assertNotIn("face_id_model:", app)
         self.assertIn("Rebuilding face embeddings", face)
-        self.assertIn("face_id_model:", app)
 
 
 class PeopleResolutionTests(unittest.TestCase):

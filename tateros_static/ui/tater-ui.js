@@ -14108,12 +14108,12 @@ var Rw = {
 		id: "faceid",
 		category: "people",
 		section: "faceid",
-		sectionLabel: "Face model",
+		sectionLabel: "Face recognition",
 		panel: "models",
 		child: "faceid",
-		label: "Face recognition model",
-		description: "Face ID model selection and processing status.",
-		keywords: "face id facenet adaface model enabled recognition"
+		label: "Face recognition",
+		description: "Face ID and processing status.",
+		keywords: "face id yunet sface enabled recognition"
 	},
 	{
 		id: "models",
@@ -16506,23 +16506,21 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 	}
 }), uj = { class: "tm-stack tm-face-workspace" }, dj = { class: "tm-form-card tm-model-area-hero tm-face-hero" }, fj = { class: "tm-model-area-status" }, pj = { class: "tm-form-card tm-face-runtime-card" }, mj = { class: "tm-identity-master-toggle tm-face-master-toggle" }, hj = ["checked", "disabled"], gj = {
 	key: 0,
-	class: "tm-face-model-section"
-}, _j = { class: "tm-speech-section-heading compact" }, vj = {
-	class: "tm-choice-grid tm-face-model-grid",
-	role: "group",
-	"aria-label": "Face recognition model"
-}, yj = ["disabled", "onClick"], bj = { key: 0 }, xj = {
+	class: "tm-media-route-summary"
+}, _j = {
 	key: 1,
 	class: "tm-media-route-summary"
-}, Sj = {
+}, vj = {
 	key: 0,
 	class: "tm-form-card tm-face-rebuild-card"
-}, Cj = { class: "tm-face-progress" }, wj = /* @__PURE__ */ fr({
+}, yj = { class: "tm-face-progress" }, bj = {
+	key: 1,
+	class: "tm-status-card error"
+}, xj = /* @__PURE__ */ fr({
 	__name: "FaceModels",
 	props: {
 		settings: {},
 		status: {},
-		models: { default: () => [] },
 		busy: {
 			type: Boolean,
 			default: !1
@@ -16530,27 +16528,15 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 	},
 	emits: ["dirty"],
 	setup(e, { emit: t }) {
-		let n = e, r = t, i = Q(() => !!n.settings.enabled), a = Q(() => String(n.settings.model_id || "facenet512")), o = Q(() => n.status.model_switch && typeof n.status.model_switch == "object" ? n.status.model_switch : {}), s = Q(() => String(o.value.state || "")), c = Q(() => [
+		let n = e, r = t, i = Q(() => !!n.settings.enabled), a = Q(() => n.status.model_switch && typeof n.status.model_switch == "object" ? n.status.model_switch : {}), o = Q(() => String(a.value.state || "")), s = Q(() => [
 			"queued",
 			"embedding",
 			"rebuilding"
-		].includes(s.value)), l = Q(() => Math.max(0, Math.min(100, Number(o.value.progress || n.status.progress || 0)))), u = Q(() => {
+		].includes(o.value)), c = Q(() => Math.max(0, Math.min(100, Number(a.value.progress || n.status.progress || 0)))), l = Q(() => {
 			let e = String(n.status.state || (i.value ? "idle" : "disabled"));
-			return c.value ? "Rebuilding face embeddings" : e === "loading" ? "Loading model" : e === "error" ? "Runtime error" : e === "disabled" ? "Disabled" : "Ready";
-		}), d = Q(() => String(n.status.accelerator || n.status.accelerator_target || "CPU")), f = Q(() => n.status.identity_count ?? n.status.face_count ?? "—"), p = {
-			facenet512: {
-				mark: "FN",
-				short: "Reliable default with broad compatibility and strong local recognition."
-			},
-			adaface_ir50_webface4m: {
-				mark: "ADA",
-				short: "Experimental newer embedding model for varied faces and lighting."
-			}
-		};
-		function m(e) {
-			n.settings.model_id = e, r("dirty");
-		}
-		function h(e) {
+			return s.value ? "Rebuilding face embeddings" : e === "loading" ? "Loading model" : e === "error" ? "Runtime error" : e === "disabled" ? "Disabled" : "Ready";
+		}), u = Q(() => String(n.status.accelerator || n.status.accelerator_target || "CPU")), d = Q(() => n.status.identity_count ?? n.status.face_count ?? "—");
+		function f(e) {
 			n.settings.enabled = e.target.checked, r("dirty");
 		}
 		return (t, n) => (K(), q("section", uj, [
@@ -16568,94 +16554,81 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 					J("p", null, "Face images and embeddings stay in Tater data. Awareness can attach a known identity without sending the camera image to a recognition service.")
 				], -1),
 				J("div", fj, [
-					J("span", null, [J("i", { class: z({ ready: i.value && u.value !== "Runtime error" }) }, null, 2), X(B(u.value), 1)]),
-					J("span", null, B(d.value), 1),
-					J("span", null, B(f.value) + " known", 1)
+					J("span", null, [J("i", { class: z({ ready: i.value && l.value !== "Runtime error" }) }, null, 2), X(B(l.value), 1)]),
+					J("span", null, B(u.value), 1),
+					J("span", null, B(d.value) + " known", 1)
 				])
 			]),
 			J("article", pj, [
 				J("header", null, [n[2] ||= J("div", null, [
 					J("span", { class: "tv-eyebrow" }, "Runtime"),
 					J("h3", null, "Face recognition"),
-					J("p", null, "Enable recognition, then choose the embedding model used for every saved person.")
+					J("p", null, "Recognize saved people with YuNet + SFace. Tater manages the model automatically.")
 				], -1), J("span", { class: z(["tm-speech-status-chip", { ready: i.value }]) }, B(i.value ? "Enabled" : "Off"), 3)]),
 				J("label", mj, [n[3] ||= J("span", null, [J("i", null, "☺"), J("span", null, [J("strong", null, "Enable Face ID"), J("small", null, "Load the model and recognize faces from Awareness camera bursts.")])], -1), J("input", {
 					type: "checkbox",
 					checked: i.value,
 					disabled: e.busy,
-					onChange: h
+					onChange: f
 				}, null, 40, hj)]),
-				i.value ? (K(), q("section", gj, [J("div", _j, [n[4] ||= J("div", null, [J("h3", null, "Recognition model"), J("p", null, "Changing models rebuilds every saved face embedding in the background.")], -1), J("span", null, B(e.status.model || a.value), 1)]), J("div", vj, [(K(!0), q(G, null, W(e.models, (t) => (K(), q("button", {
-					key: String(t.id),
-					type: "button",
-					class: z({ active: a.value === String(t.id) }),
-					disabled: e.busy,
-					onClick: (e) => m(String(t.id))
-				}, [
-					J("i", null, B(p[String(t.id)]?.mark || "FACE"), 1),
-					J("span", null, [
-						J("strong", null, B(t.label || t.id), 1),
-						J("small", null, B(p[String(t.id)]?.short || "Local face embedding model."), 1),
-						t.experimental ? (K(), q("em", bj, "Experimental")) : Z("", !0)
-					]),
-					n[5] ||= J("b", null, "✓", -1)
-				], 10, yj))), 128))])])) : (K(), q("div", xj, [...n[6] ||= [J("i", null, "OFF", -1), J("span", null, [J("strong", null, "Recognition is disabled"), J("small", null, "Existing people and face images remain saved and can be used again when enabled.")], -1)]]))
+				i.value ? (K(), q("div", gj, [...n[4] ||= [J("i", null, "SF", -1), J("span", null, [J("strong", null, "YuNet + SFace"), J("small", null, "The same recognition model is used for every saved person.")], -1)]])) : (K(), q("div", _j, [...n[5] ||= [J("i", null, "OFF", -1), J("span", null, [J("strong", null, "Recognition is disabled"), J("small", null, "Existing people and face images remain saved and can be used again when enabled.")], -1)]]))
 			]),
-			c.value ? (K(), q("article", Sj, [J("header", null, [n[7] ||= J("div", null, [
+			s.value ? (K(), q("article", vj, [J("header", null, [n[6] ||= J("div", null, [
 				J("span", { class: "tv-eyebrow" }, "Background task"),
 				J("h3", null, "Rebuilding face embeddings"),
-				J("p", null, "Tater is converting saved face images for the selected model. Recognition resumes automatically when this finishes.")
-			], -1), J("strong", null, B(Math.round(l.value)) + "%", 1)]), J("div", Cj, [J("i", { style: ne({ width: `${l.value}%` }) }, null, 4)])])) : Z("", !0),
+				J("p", null, "Tater is updating saved face references to SFace. Recognition resumes automatically when this finishes.")
+			], -1), J("strong", null, B(Math.round(c.value)) + "%", 1)]), J("div", yj, [J("i", { style: ne({ width: `${c.value}%` }) }, null, 4)])])) : Z("", !0),
+			["partial", "error"].includes(o.value) ? (K(), q("article", bj, [J("div", null, [n[7] ||= J("strong", null, "Some saved faces need attention", -1), J("span", null, B(a.value.message || a.value.error), 1)])])) : Z("", !0),
 			e.status.message || e.status.error ? (K(), q("article", {
-				key: 1,
+				key: 2,
 				class: z(["tm-status-card", { error: e.status.error }])
-			}, [J("div", null, [J("strong", null, B(e.status.error ? "Face ID needs attention" : u.value), 1), J("span", null, B(e.status.error || e.status.message), 1)])], 2)) : Z("", !0)
+			}, [J("div", null, [J("strong", null, B(e.status.error ? "Face ID needs attention" : l.value), 1), J("span", null, B(e.status.error || e.status.message), 1)])], 2)) : Z("", !0)
 		]));
 	}
-}), Tj = {
+}), Sj = {
 	key: 0,
 	class: "tv-notice"
-}, Ej = {
+}, Cj = {
 	key: 1,
 	class: "tv-notice error"
-}, Dj = { class: "tm-form-card tm-model-area-hero tm-identity-hero" }, Oj = { class: "tm-identity-hero-mark" }, kj = { class: "tm-model-area-hero-copy" }, Aj = { class: "tv-eyebrow" }, jj = { class: "tm-model-area-status" }, Mj = {
+}, wj = { class: "tm-form-card tm-model-area-hero tm-identity-hero" }, Tj = { class: "tm-identity-hero-mark" }, Ej = { class: "tm-model-area-hero-copy" }, Dj = { class: "tv-eyebrow" }, Oj = { class: "tm-model-area-status" }, kj = {
 	key: 2,
 	class: "tm-metrics tm-identity-metrics"
-}, Nj = {
+}, Aj = {
 	key: 4,
 	class: "tv-tabs tm-inner-tabs tm-identity-tabs",
 	"aria-label": "Speaker ID sections"
-}, Pj = {
+}, jj = {
 	key: 5,
 	class: "tm-form-card tm-identity-runtime-card"
-}, Fj = { class: "tm-speech-status-chip" }, Ij = { class: "tm-identity-master-toggle" }, Lj = ["checked", "disabled"], Rj = { class: "tm-identity-section" }, zj = { class: "tm-speech-section-heading compact" }, Bj = { class: "tm-wake-toggle-card tm-identity-option-card" }, Vj = ["checked", "disabled"], Hj = {
+}, Mj = { class: "tm-speech-status-chip" }, Nj = { class: "tm-identity-master-toggle" }, Pj = ["checked", "disabled"], Fj = { class: "tm-identity-section" }, Ij = { class: "tm-speech-section-heading compact" }, Lj = { class: "tm-wake-toggle-card tm-identity-option-card" }, Rj = ["checked", "disabled"], zj = {
 	key: 0,
 	class: "tm-field-grid"
-}, Uj = { class: "tm-field" }, Wj = ["value", "disabled"], Gj = { class: "tm-field" }, Kj = ["value", "disabled"], qj = {
+}, Bj = { class: "tm-field" }, Vj = ["value", "disabled"], Hj = { class: "tm-field" }, Uj = ["value", "disabled"], Wj = {
 	key: 1,
 	class: "tm-identity-warning"
-}, Jj = { class: "tm-identity-section" }, Yj = { class: "tm-field-grid" }, Xj = { class: "tm-field" }, Zj = ["value", "disabled"], Qj = { class: "tm-field" }, $j = ["value", "disabled"], eM = {
+}, Gj = { class: "tm-identity-section" }, Kj = { class: "tm-field-grid" }, qj = { class: "tm-field" }, Jj = ["value", "disabled"], Yj = { class: "tm-field" }, Xj = ["value", "disabled"], Zj = {
 	key: 1,
 	class: "tm-identity-section"
-}, tM = { class: "tm-speech-section-heading compact" }, nM = { class: "tm-wake-feedback-grid" }, rM = { class: "tm-wake-toggle-card" }, iM = ["checked", "disabled"], aM = {
+}, Qj = { class: "tm-speech-section-heading compact" }, $j = { class: "tm-wake-feedback-grid" }, eM = { class: "tm-wake-toggle-card" }, tM = ["checked", "disabled"], nM = {
 	key: 0,
 	class: "tm-wake-toggle-card"
-}, oM = ["checked", "disabled"], sM = { class: "tm-field-grid" }, cM = {
+}, rM = ["checked", "disabled"], iM = { class: "tm-field-grid" }, aM = {
 	key: 0,
 	class: "tm-field"
-}, lM = ["value", "disabled"], uM = { class: "tm-field" }, dM = ["value", "disabled"], fM = {
+}, oM = ["value", "disabled"], sM = { class: "tm-field" }, cM = ["value", "disabled"], lM = {
 	key: 2,
 	class: "tm-media-route-summary"
-}, pM = {
+}, uM = {
 	key: 0,
 	class: "tm-status-card live tm-identity-capture-live"
-}, mM = ["disabled"], hM = { class: "tm-form-card tm-identity-add-card" }, gM = { class: "tm-field tm-field-wide" }, _M = { class: "tm-inline-actions" }, vM = ["disabled"], yM = { class: "tm-card-grid tm-identity-speaker-grid" }, bM = { class: "tm-speaker-heading" }, xM = { class: "tm-field-grid" }, SM = { class: "tm-field" }, CM = ["onUpdate:modelValue"], wM = { class: "tm-field" }, TM = ["onUpdate:modelValue"], EM = ["value"], DM = { class: "tm-inline-actions" }, OM = ["disabled", "onClick"], kM = ["disabled", "onClick"], AM = ["disabled", "onClick"], jM = {
+}, dM = ["disabled"], fM = { class: "tm-form-card tm-identity-add-card" }, pM = { class: "tm-field tm-field-wide" }, mM = { class: "tm-inline-actions" }, hM = ["disabled"], gM = { class: "tm-card-grid tm-identity-speaker-grid" }, _M = { class: "tm-speaker-heading" }, vM = { class: "tm-field-grid" }, yM = { class: "tm-field" }, bM = ["onUpdate:modelValue"], xM = { class: "tm-field" }, SM = ["onUpdate:modelValue"], CM = ["value"], wM = { class: "tm-inline-actions" }, TM = ["disabled", "onClick"], EM = ["disabled", "onClick"], DM = ["disabled", "onClick"], OM = {
 	key: 0,
 	class: "tm-identity-empty"
-}, MM = {
+}, kM = {
 	key: 7,
 	class: "tm-form-card tm-emotion-result-card"
-}, NM = { class: "tm-speech-status-chip" }, PM = { class: "tm-emotion-result" }, FM = { class: "tm-emotion-copy" }, IM = /* @__PURE__ */ fr({
+}, AM = { class: "tm-speech-status-chip" }, jM = { class: "tm-emotion-result" }, MM = { class: "tm-emotion-copy" }, NM = /* @__PURE__ */ fr({
 	__name: "IdentityModels",
 	props: {
 		kind: {},
@@ -16828,23 +16801,23 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 			apply: ie,
 			refresh: ee
 		}), (e, t) => (K(), q("section", { class: z(["tm-stack tm-identity-workspace", g.value ? "tm-identity-speaker" : "tm-identity-emotion"]) }, [
-			l.value ? (K(), q("div", Tj, "Loading live " + B(g.value ? "Speaker" : "Emotion") + " ID settings…", 1)) : Z("", !0),
-			d.value ? (K(), q("div", Ej, B(d.value), 1)) : Z("", !0),
-			J("article", Dj, [
-				J("div", Oj, B(g.value ? "ID" : "♪"), 1),
-				J("div", kj, [
-					J("span", Aj, B(g.value ? "Voice identity" : "Voice tone"), 1),
+			l.value ? (K(), q("div", Sj, "Loading live " + B(g.value ? "Speaker" : "Emotion") + " ID settings…", 1)) : Z("", !0),
+			d.value ? (K(), q("div", Cj, B(d.value), 1)) : Z("", !0),
+			J("article", wj, [
+				J("div", Tj, B(g.value ? "ID" : "♪"), 1),
+				J("div", Ej, [
+					J("span", Dj, B(g.value ? "Voice identity" : "Voice tone"), 1),
 					J("h3", null, B(g.value ? "Know who is speaking" : "Understand how it was said"), 1),
 					J("p", null, B(g.value ? "Match each voice turn against enrolled local profiles before Hydra responds." : "Classify vocal emotion and optionally add a subtle tone hint to Hydra's prompt."), 1)
 				]),
-				J("div", jj, [J("span", null, [J("i", { class: z({ ready: T.value }) }, null, 2), X(B(T.value ? "Enabled" : "Disabled"), 1)]), J("span", null, B(x.value.available === !1 ? "Needs attention" : "Runtime ready"), 1)])
+				J("div", Oj, [J("span", null, [J("i", { class: z({ ready: T.value }) }, null, 2), X(B(T.value ? "Enabled" : "Disabled"), 1)]), J("span", null, B(x.value.available === !1 ? "Needs attention" : "Runtime ready"), 1)])
 			]),
-			k.value.length ? (K(), q("div", Mj, [(K(!0), q(G, null, W(k.value, (e) => (K(), q("article", { key: String(e.label) }, [J("span", null, B(e.label), 1), J("strong", null, B(e.value), 1)]))), 128))])) : Z("", !0),
+			k.value.length ? (K(), q("div", kj, [(K(!0), q(G, null, W(k.value, (e) => (K(), q("article", { key: String(e.label) }, [J("span", null, B(e.label), 1), J("strong", null, B(e.value), 1)]))), 128))])) : Z("", !0),
 			x.value.detail || x.value.error ? (K(), q("article", {
 				key: 3,
 				class: z(["tm-status-card", { error: x.value.error || x.value.available === !1 }])
 			}, [J("strong", null, B(x.value.available === !1 ? "Runtime needs attention" : "Runtime ready"), 1), J("span", null, B(x.value.detail || x.value.error), 1)], 2)) : Z("", !0),
-			g.value ? (K(), q("nav", Nj, [J("button", {
+			g.value ? (K(), q("nav", Aj, [J("button", {
 				type: "button",
 				class: z({ active: m.value === "people" }),
 				onClick: t[0] ||= (e) => F("people")
@@ -16853,27 +16826,27 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 				class: z({ active: m.value === "settings" }),
 				onClick: t[1] ||= (e) => F("settings")
 			}, "Settings", 2)])) : Z("", !0),
-			!g.value || m.value === "settings" ? (K(), q("article", Pj, [
+			!g.value || m.value === "settings" ? (K(), q("article", jj, [
 				J("header", null, [J("div", null, [
 					t[13] ||= J("span", { class: "tv-eyebrow" }, "Runtime", -1),
 					J("h3", null, B(g.value ? "Speaker matching" : "Emotion classification"), 1),
 					J("p", null, B(g.value ? "Choose how strict matching should be. Enrollment controls remain with each person below." : "Choose when tone context is useful and how confident the model must be."), 1)
-				]), J("span", Fj, B(T.value ? "Active" : "Off"), 1)]),
-				J("label", Ij, [J("span", null, [J("i", null, B(g.value ? "ID" : "♪"), 1), J("span", null, [J("strong", null, "Enable " + B(g.value ? "Speaker" : "Emotion") + " ID", 1), J("small", null, B(A(w.value).description), 1)])]), J("input", {
+				]), J("span", Mj, B(T.value ? "Active" : "Off"), 1)]),
+				J("label", Nj, [J("span", null, [J("i", null, B(g.value ? "ID" : "♪"), 1), J("span", null, [J("strong", null, "Enable " + B(g.value ? "Speaker" : "Emotion") + " ID", 1), J("small", null, B(A(w.value).description), 1)])]), J("input", {
 					type: "checkbox",
 					checked: T.value,
 					disabled: j(w.value),
 					onChange: t[2] ||= (e) => M(w.value, P(e))
-				}, null, 40, Lj)]),
-				T.value && g.value ? (K(), q(G, { key: 0 }, [J("section", Rj, [
-					J("div", zj, [t[14] ||= J("div", null, [J("h3", null, "Matching strategy"), J("p", null, "Threshold mode is safer; Best Match is more aggressive with known households.")], -1), J("span", null, B(E.value ? "Best match" : "Threshold"), 1)]),
-					J("label", Bj, [J("span", null, [t[15] ||= J("strong", null, "Best Match Mode", -1), J("small", null, B(A("VOICE_SPEAKER_ID_BEST_MATCH").description), 1)]), J("input", {
+				}, null, 40, Pj)]),
+				T.value && g.value ? (K(), q(G, { key: 0 }, [J("section", Fj, [
+					J("div", Ij, [t[14] ||= J("div", null, [J("h3", null, "Matching strategy"), J("p", null, "Threshold mode is safer; Best Match is more aggressive with known households.")], -1), J("span", null, B(E.value ? "Best match" : "Threshold"), 1)]),
+					J("label", Lj, [J("span", null, [t[15] ||= J("strong", null, "Best Match Mode", -1), J("small", null, B(A("VOICE_SPEAKER_ID_BEST_MATCH").description), 1)]), J("input", {
 						type: "checkbox",
 						checked: E.value,
 						disabled: j("VOICE_SPEAKER_ID_BEST_MATCH"),
 						onChange: t[3] ||= (e) => M("VOICE_SPEAKER_ID_BEST_MATCH", P(e))
-					}, null, 40, Vj)]),
-					E.value ? (K(), q("div", qj, [...t[18] ||= [J("i", null, "!", -1), J("span", null, [J("strong", null, "Best Match always picks someone"), J("small", null, "An unknown voice can be assigned to the closest enrolled speaker.")], -1)]])) : (K(), q("div", Hj, [J("label", Uj, [
+					}, null, 40, Rj)]),
+					E.value ? (K(), q("div", Wj, [...t[18] ||= [J("i", null, "!", -1), J("span", null, [J("strong", null, "Best Match always picks someone"), J("small", null, "An unknown voice can be assigned to the closest enrolled speaker.")], -1)]])) : (K(), q("div", zj, [J("label", Bj, [
 						t[16] ||= J("span", { class: "tm-field-label" }, "Match threshold", -1),
 						J("input", {
 							type: "number",
@@ -16883,9 +16856,9 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 							step: "0.01",
 							disabled: j("VOICE_SPEAKER_ID_MATCH_THRESHOLD"),
 							onInput: t[4] ||= (e) => M("VOICE_SPEAKER_ID_MATCH_THRESHOLD", N(e))
-						}, null, 40, Wj),
+						}, null, 40, Vj),
 						J("small", null, B(A("VOICE_SPEAKER_ID_MATCH_THRESHOLD").description), 1)
-					]), J("label", Gj, [
+					]), J("label", Hj, [
 						t[17] ||= J("span", { class: "tm-field-label" }, "Runner-up margin", -1),
 						J("input", {
 							type: "number",
@@ -16895,10 +16868,10 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 							step: "0.01",
 							disabled: j("VOICE_SPEAKER_ID_MATCH_MARGIN"),
 							onInput: t[5] ||= (e) => M("VOICE_SPEAKER_ID_MATCH_MARGIN", N(e))
-						}, null, 40, Kj),
+						}, null, 40, Uj),
 						J("small", null, B(A("VOICE_SPEAKER_ID_MATCH_MARGIN").description), 1)
 					])]))
-				]), J("section", Jj, [t[21] ||= J("div", { class: "tm-speech-section-heading compact" }, [J("div", null, [J("h3", null, "Voice length"), J("p", null, "Skip clips that are too short for a reliable embedding.")]), J("span", null, "Seconds")], -1), J("div", Yj, [J("label", Xj, [
+				]), J("section", Gj, [t[21] ||= J("div", { class: "tm-speech-section-heading compact" }, [J("div", null, [J("h3", null, "Voice length"), J("p", null, "Skip clips that are too short for a reliable embedding.")]), J("span", null, "Seconds")], -1), J("div", Kj, [J("label", qj, [
 					t[19] ||= J("span", { class: "tm-field-label" }, "Minimum for matching", -1),
 					J("input", {
 						type: "number",
@@ -16908,9 +16881,9 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 						step: "0.05",
 						disabled: j("VOICE_SPEAKER_ID_MIN_SPEECH_S"),
 						onInput: t[6] ||= (e) => M("VOICE_SPEAKER_ID_MIN_SPEECH_S", N(e))
-					}, null, 40, Zj),
+					}, null, 40, Jj),
 					J("small", null, B(A("VOICE_SPEAKER_ID_MIN_SPEECH_S").description), 1)
-				]), J("label", Qj, [
+				]), J("label", Yj, [
 					t[20] ||= J("span", { class: "tm-field-label" }, "Minimum for enrollment", -1),
 					J("input", {
 						type: "number",
@@ -16920,22 +16893,22 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 						step: "0.05",
 						disabled: j("VOICE_SPEAKER_ID_ENROLL_MIN_SPEECH_S"),
 						onInput: t[7] ||= (e) => M("VOICE_SPEAKER_ID_ENROLL_MIN_SPEECH_S", N(e))
-					}, null, 40, $j),
+					}, null, 40, Xj),
 					J("small", null, B(A("VOICE_SPEAKER_ID_ENROLL_MIN_SPEECH_S").description), 1)
-				])])])], 64)) : T.value ? (K(), q("section", eM, [
-					J("div", tM, [t[22] ||= J("div", null, [J("h3", null, "Prompt behavior"), J("p", null, "Classification can run quietly or provide tone context to Hydra.")], -1), J("span", null, B(D.value ? "Prompt hints on" : "Classify only"), 1)]),
-					J("div", nM, [J("label", rM, [J("span", null, [t[23] ||= J("strong", null, "Add To Prompt", -1), J("small", null, B(A("VOICE_EMOTION_ID_PROMPT_HINT_ENABLED").description), 1)]), J("input", {
+				])])])], 64)) : T.value ? (K(), q("section", Zj, [
+					J("div", Qj, [t[22] ||= J("div", null, [J("h3", null, "Prompt behavior"), J("p", null, "Classification can run quietly or provide tone context to Hydra.")], -1), J("span", null, B(D.value ? "Prompt hints on" : "Classify only"), 1)]),
+					J("div", $j, [J("label", eM, [J("span", null, [t[23] ||= J("strong", null, "Add To Prompt", -1), J("small", null, B(A("VOICE_EMOTION_ID_PROMPT_HINT_ENABLED").description), 1)]), J("input", {
 						type: "checkbox",
 						checked: D.value,
 						disabled: j("VOICE_EMOTION_ID_PROMPT_HINT_ENABLED"),
 						onChange: t[8] ||= (e) => M("VOICE_EMOTION_ID_PROMPT_HINT_ENABLED", P(e))
-					}, null, 40, iM)]), D.value ? (K(), q("label", aM, [J("span", null, [t[24] ||= J("strong", null, "Use Neutral Context", -1), J("small", null, B(A("VOICE_EMOTION_ID_INCLUDE_NEUTRAL").description), 1)]), J("input", {
+					}, null, 40, tM)]), D.value ? (K(), q("label", nM, [J("span", null, [t[24] ||= J("strong", null, "Use Neutral Context", -1), J("small", null, B(A("VOICE_EMOTION_ID_INCLUDE_NEUTRAL").description), 1)]), J("input", {
 						type: "checkbox",
 						checked: !!o.VOICE_EMOTION_ID_INCLUDE_NEUTRAL,
 						disabled: j("VOICE_EMOTION_ID_INCLUDE_NEUTRAL"),
 						onChange: t[9] ||= (e) => M("VOICE_EMOTION_ID_INCLUDE_NEUTRAL", P(e))
-					}, null, 40, oM)])) : Z("", !0)]),
-					J("div", sM, [D.value ? (K(), q("label", cM, [
+					}, null, 40, rM)])) : Z("", !0)]),
+					J("div", iM, [D.value ? (K(), q("label", aM, [
 						t[25] ||= J("span", { class: "tm-field-label" }, "Prompt confidence threshold", -1),
 						J("input", {
 							type: "number",
@@ -16945,9 +16918,9 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 							step: "0.01",
 							disabled: j("VOICE_EMOTION_ID_CONFIDENCE_THRESHOLD"),
 							onInput: t[10] ||= (e) => M("VOICE_EMOTION_ID_CONFIDENCE_THRESHOLD", N(e))
-						}, null, 40, lM),
+						}, null, 40, oM),
 						J("small", null, B(A("VOICE_EMOTION_ID_CONFIDENCE_THRESHOLD").description), 1)
-					])) : Z("", !0), J("label", uM, [
+					])) : Z("", !0), J("label", sM, [
 						t[26] ||= J("span", { class: "tm-field-label" }, "Minimum speech length", -1),
 						J("input", {
 							type: "number",
@@ -16957,46 +16930,46 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 							step: "0.05",
 							disabled: j("VOICE_EMOTION_ID_MIN_SPEECH_S"),
 							onInput: t[11] ||= (e) => M("VOICE_EMOTION_ID_MIN_SPEECH_S", N(e))
-						}, null, 40, dM),
+						}, null, 40, cM),
 						J("small", null, B(A("VOICE_EMOTION_ID_MIN_SPEECH_S").description), 1)
 					])])
-				])) : (K(), q("div", fM, [...t[27] ||= [J("i", null, "OFF", -1), J("span", null, [J("strong", null, "Runtime disabled"), J("small", null, "Turn it on to reveal its matching and tuning controls.")], -1)]]))
+				])) : (K(), q("div", lM, [...t[27] ||= [J("i", null, "OFF", -1), J("span", null, [J("strong", null, "Runtime disabled"), J("small", null, "Turn it on to reveal its matching and tuning controls.")], -1)]]))
 			])) : Z("", !0),
 			g.value && m.value === "people" ? (K(), q(G, { key: 6 }, [
-				b.value ? (K(), q("article", pM, [J("div", null, [t[28] ||= J("i", { class: "tm-identity-pulse" }, null, -1), J("span", null, [J("strong", null, "Listening for " + B(b.value.speaker_name || "speaker"), 1), J("small", null, "Speak one clear sentence from " + B(b.value.selector_label || "a satellite") + ". The next complete voice turn becomes a sample.", 1)])]), J("button", {
+				b.value ? (K(), q("article", uM, [J("div", null, [t[28] ||= J("i", { class: "tm-identity-pulse" }, null, -1), J("span", null, [J("strong", null, "Listening for " + B(b.value.speaker_name || "speaker"), 1), J("small", null, "Speak one clear sentence from " + B(b.value.selector_label || "a satellite") + ". The next complete voice turn becomes a sample.", 1)])]), J("button", {
 					class: "tv-button",
 					type: "button",
 					disabled: !!u.value,
 					onClick: ue
-				}, "Cancel capture", 8, mM)])) : Z("", !0),
-				J("article", hM, [
+				}, "Cancel capture", 8, dM)])) : Z("", !0),
+				J("article", fM, [
 					t[30] ||= J("header", null, [J("div", null, [
 						J("span", { class: "tv-eyebrow" }, "New profile"),
 						J("h3", null, "Add a speaker"),
 						J("p", null, "Create the person first, then capture one or more clear voice samples.")
 					]), J("i", { class: "tm-identity-add-mark" }, "+")], -1),
-					J("label", gM, [t[29] ||= J("span", { class: "tm-field-label" }, "Speaker name", -1), U(J("input", {
+					J("label", pM, [t[29] ||= J("span", { class: "tm-field-label" }, "Speaker name", -1), U(J("input", {
 						"onUpdate:modelValue": t[12] ||= (e) => c.speaker_name = e,
 						type: "text",
 						placeholder: "Name"
 					}, null, 512), [[$, c.speaker_name]])]),
-					J("div", _M, [J("button", {
+					J("div", mM, [J("button", {
 						class: "tv-button",
 						type: "button",
 						disabled: !!u.value,
 						onClick: ae
-					}, "Add speaker", 8, vM)])
+					}, "Add speaker", 8, hM)])
 				]),
-				J("section", yM, [(K(!0), q(G, null, W(y.value, (e) => (K(), q("article", {
+				J("section", gM, [(K(!0), q(G, null, W(y.value, (e) => (K(), q("article", {
 					key: String(e.speaker_id),
 					class: "tm-form-card tm-speaker-card"
 				}, [
-					J("header", null, [J("div", bM, [J("i", null, B(String(e.name || "?").charAt(0).toUpperCase()), 1), J("div", null, [J("h3", null, B(e.name || "Speaker"), 1), J("p", null, B(e.sample_count || 0) + " voice sample" + B(Number(e.sample_count || 0) === 1 ? "" : "s") + " · Updated " + B(e.updated_at || "—"), 1)])]), J("span", { class: z(["tm-speech-status-chip", { ready: Number(e.sample_count || 0) > 0 }]) }, B(Number(e.sample_count || 0) > 0 ? "Ready" : "Needs sample"), 3)]),
-					J("div", xM, [J("label", SM, [t[31] ||= J("span", { class: "tm-field-label" }, "Speaker name", -1), U(J("input", {
+					J("header", null, [J("div", _M, [J("i", null, B(String(e.name || "?").charAt(0).toUpperCase()), 1), J("div", null, [J("h3", null, B(e.name || "Speaker"), 1), J("p", null, B(e.sample_count || 0) + " voice sample" + B(Number(e.sample_count || 0) === 1 ? "" : "s") + " · Updated " + B(e.updated_at || "—"), 1)])]), J("span", { class: z(["tm-speech-status-chip", { ready: Number(e.sample_count || 0) > 0 }]) }, B(Number(e.sample_count || 0) > 0 ? "Ready" : "Needs sample"), 3)]),
+					J("div", vM, [J("label", yM, [t[31] ||= J("span", { class: "tm-field-label" }, "Speaker name", -1), U(J("input", {
 						"onUpdate:modelValue": (t) => s[String(e.speaker_id)].speaker_name = t,
 						type: "text",
 						onInput: se
-					}, null, 40, CM), [[$, s[String(e.speaker_id)].speaker_name]])]), J("label", wM, [
+					}, null, 40, bM), [[$, s[String(e.speaker_id)].speaker_name]])]), J("label", xM, [
 						t[32] ||= J("span", { class: "tm-field-label" }, "Capture from satellite", -1),
 						U(J("select", {
 							"onUpdate:modelValue": (t) => s[String(e.speaker_id)].preferred_selector = t,
@@ -17004,56 +16977,56 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 						}, [(K(!0), q(G, null, W(a.value.selector_options || [], (e) => (K(), q("option", {
 							key: String(e.value),
 							value: e.value
-						}, B(e.label), 9, EM))), 128))], 40, TM), [[_s, s[String(e.speaker_id)].preferred_selector]]),
+						}, B(e.label), 9, CM))), 128))], 40, SM), [[_s, s[String(e.speaker_id)].preferred_selector]]),
 						t[33] ||= J("small", null, "Used for the next voice sample. Leave on Any satellite to capture from whichever device hears the speaker.", -1)
 					])]),
-					J("div", DM, [
+					J("div", wM, [
 						J("button", {
 							class: "tv-button primary",
 							type: "button",
 							disabled: !!u.value,
 							onClick: (t) => ce(e)
-						}, "Capture voice sample", 8, OM),
+						}, "Capture voice sample", 8, TM),
 						J("button", {
 							class: "tv-button",
 							type: "button",
 							disabled: !!u.value,
 							onClick: (t) => oe(e)
-						}, "Save profile", 8, kM),
+						}, "Save profile", 8, EM),
 						J("button", {
 							class: "tv-button danger",
 							type: "button",
 							disabled: !!u.value,
 							onClick: (t) => le(e)
-						}, "Delete", 8, AM)
+						}, "Delete", 8, DM)
 					])
-				]))), 128)), y.value.length ? Z("", !0) : (K(), q("div", jM, [...t[34] ||= [
+				]))), 128)), y.value.length ? Z("", !0) : (K(), q("div", OM, [...t[34] ||= [
 					J("i", null, "ID", -1),
 					J("strong", null, "No speakers enrolled yet", -1),
 					J("span", null, "Add a profile above, then capture a clear sentence.", -1)
 				]]))])
 			], 64)) : Z("", !0),
-			g.value ? Z("", !0) : (K(), q("article", MM, [J("header", null, [t[35] ||= J("div", null, [
+			g.value ? Z("", !0) : (K(), q("article", kM, [J("header", null, [t[35] ||= J("div", null, [
 				J("span", { class: "tv-eyebrow" }, "Live result"),
 				J("h3", null, "Latest voice tone"),
 				J("p", null, "Updates automatically after a long enough voice turn is classified.")
-			], -1), J("span", NM, B(S.value.updated_at || "Waiting"), 1)]), J("div", PM, [J("div", {
+			], -1), J("span", AM, B(S.value.updated_at || "Waiting"), 1)]), J("div", jM, [J("div", {
 				class: "tm-emotion-score",
 				style: ne({ "--tm-score": `${O.value * 3.6}deg` })
-			}, [J("span", null, [J("strong", null, B(O.value) + "%", 1), t[36] ||= J("small", null, "confidence", -1)])], 4), J("div", FM, [
+			}, [J("span", null, [J("strong", null, B(O.value) + "%", 1), t[36] ||= J("small", null, "confidence", -1)])], 4), J("div", MM, [
 				t[37] ||= J("span", null, "Detected tone", -1),
 				J("strong", null, B(S.value.emotion || "No result yet"), 1),
 				J("p", null, B(S.value.prompt_hint || "No prompt hint was added for the latest turn."), 1)
 			])])]))
 		], 2));
 	}
-}), LM = ["aria-labelledby"], RM = { class: "tset-workspace-heading" }, zM = {
+}), PM = ["aria-labelledby"], FM = { class: "tset-workspace-heading" }, IM = {
 	key: 0,
 	class: "tv-eyebrow"
-}, BM = ["id"], VM = { key: 1 }, HM = {
+}, LM = ["id"], RM = { key: 1 }, zM = {
 	key: 0,
 	class: "tset-workspace-footer"
-}, UM = /* @__PURE__ */ fr({
+}, BM = /* @__PURE__ */ fr({
 	__name: "FocusedWorkspace",
 	props: {
 		open: { type: Boolean },
@@ -17108,39 +17081,39 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 				type: "button",
 				onClick: n[0] ||= (e) => r("close")
 			}, [Y(Cc, { name: "back" }), X(B(e.backLabel), 1)]),
-			J("header", RM, [J("div", null, [
-				e.eyebrow ? (K(), q("span", zM, B(e.eyebrow), 1)) : Z("", !0),
+			J("header", FM, [J("div", null, [
+				e.eyebrow ? (K(), q("span", IM, B(e.eyebrow), 1)) : Z("", !0),
 				J("h1", {
 					id: `${Ut(a)}-title`,
 					ref_key: "heading",
 					ref: o,
 					tabindex: "-1"
-				}, B(e.title), 9, BM),
-				e.description ? (K(), q("p", VM, B(e.description), 1)) : Z("", !0)
+				}, B(e.title), 9, LM),
+				e.description ? (K(), q("p", RM, B(e.description), 1)) : Z("", !0)
 			]), Kr(t.$slots, "status")]),
 			Kr(t.$slots, "default"),
-			t.$slots.footer ? (K(), q("footer", HM, [Kr(t.$slots, "footer")])) : Z("", !0)
-		], 40, LM)) : Z("", !0)], 8, ["to", "disabled"]));
+			t.$slots.footer ? (K(), q("footer", zM, [Kr(t.$slots, "footer")])) : Z("", !0)
+		], 40, PM)) : Z("", !0)], 8, ["to", "disabled"]));
 	}
-}), WM = ["onKeydown"], GM = { class: "tm-model-selection" }, KM = { class: "tm-model-selection-copy" }, qM = { key: 0 }, JM = { key: 1 }, YM = [
+}), VM = ["onKeydown"], HM = { class: "tm-model-selection" }, UM = { class: "tm-model-selection-copy" }, WM = { key: 0 }, GM = { key: 1 }, KM = [
 	"disabled",
 	"aria-controls",
 	"aria-label"
-], XM = ["id", "aria-label"], ZM = { class: "tm-model-current" }, QM = { class: "tm-model-search" }, $M = ["aria-label"], eN = { class: "tm-model-options" }, tN = [
+], qM = ["id", "aria-label"], JM = { class: "tm-model-current" }, YM = { class: "tm-model-search" }, XM = ["aria-label"], ZM = { class: "tm-model-options" }, QM = [
 	"name",
 	"value",
 	"disabled"
-], nN = { key: 0 }, rN = { key: 1 }, iN = { key: 2 }, aN = {
+], $M = { key: 0 }, eN = { key: 1 }, tN = { key: 2 }, nN = {
 	key: 0,
 	class: "tm-model-current"
-}, oN = {
+}, rN = {
 	key: 0,
 	class: "tv-empty",
 	role: "status"
-}, sN = { role: "status" }, cN = ["aria-pressed"], lN = { class: "tm-inline-actions" }, uN = ["disabled"], dN = {
+}, iN = { role: "status" }, aN = ["aria-pressed"], oN = { class: "tm-inline-actions" }, sN = ["disabled"], cN = {
 	key: 0,
 	class: "tm-model-identifier"
-}, fN = ["aria-expanded"], pN = { key: 0 }, mN = /* @__PURE__ */ fr({
+}, lN = ["aria-expanded"], uN = { key: 0 }, dN = /* @__PURE__ */ fr({
 	__name: "ModelSelect",
 	props: {
 		label: {},
@@ -17194,7 +17167,7 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 			ref: t,
 			class: "tm-model-select-native"
 		}, [Kr(m.$slots, "default")], 512), [[Po, !s.value]]), s.value ? (K(), q(G, { key: 0 }, [
-			J("div", GM, [J("div", KM, [J("strong", null, B(_.value.name), 1), _.value.detail ? (K(), q("small", qM, B(_.value.detail), 1)) : (K(), q("small", JM, B(e.label), 1))]), J("button", {
+			J("div", HM, [J("div", UM, [J("strong", null, B(_.value.name), 1), _.value.detail ? (K(), q("small", WM, B(_.value.detail), 1)) : (K(), q("small", GM, B(e.label), 1))]), J("button", {
 				ref_key: "trigger",
 				ref: n,
 				class: "tv-button",
@@ -17203,8 +17176,8 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 				"aria-controls": `${Ut(p)}-choices`,
 				"aria-label": `${e.actionLabel}: ${e.label}`,
 				onClick: S
-			}, [X(B(e.actionLabel), 1), Y(Hc, { name: "chevron" })], 8, YM)]),
-			Y(UM, {
+			}, [X(B(e.actionLabel), 1), Y(Hc, { name: "chevron" })], 8, KM)]),
+			Y(BM, {
 				open: c.value,
 				title: "Choose a model",
 				eyebrow: e.label,
@@ -17212,7 +17185,7 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 				"back-label": "Back to model settings",
 				onClose: C
 			}, {
-				footer: En(() => [h[4] ||= J("span", null, "Your choice updates the form. It is applied when you save the model settings.", -1), J("div", lN, [J("button", {
+				footer: En(() => [h[4] ||= J("span", null, "Your choice updates the form. It is applied when you save the model settings.", -1), J("div", oN, [J("button", {
 					class: "tv-button",
 					type: "button",
 					onClick: C
@@ -17221,22 +17194,22 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 					type: "button",
 					disabled: !y.value,
 					onClick: w
-				}, "Use this model", 8, uN)])]),
+				}, "Use this model", 8, sN)])]),
 				default: En(() => [J("section", {
 					id: `${Ut(p)}-choices`,
 					class: "tm-model-chooser tm-model-choice-workspace",
 					"aria-label": `Choose ${e.label}`
 				}, [
-					J("header", null, [J("div", null, [J("h2", null, B(e.label), 1), J("p", null, "Current: " + B(_.value.name), 1)]), J("span", ZM, B(i.value.length) + " " + B(i.value.length === 1 ? "option" : "options"), 1)]),
-					J("label", QM, [Y(Hc, { name: "search" }), U(J("input", {
+					J("header", null, [J("div", null, [J("h2", null, B(e.label), 1), J("p", null, "Current: " + B(_.value.name), 1)]), J("span", JM, B(i.value.length) + " " + B(i.value.length === 1 ? "option" : "options"), 1)]),
+					J("label", YM, [Y(Hc, { name: "search" }), U(J("input", {
 						ref_key: "searchInput",
 						ref: r,
 						"onUpdate:modelValue": h[0] ||= (e) => l.value = e,
 						type: "search",
 						"aria-label": `Search ${e.label}`,
 						placeholder: "Search by name or model ID…"
-					}, null, 8, $M), [[$, l.value]])]),
-					J("div", eN, [(K(!0), q(G, null, W(v.value, (e, t) => (K(), q("label", {
+					}, null, 8, XM), [[$, l.value]])]),
+					J("div", ZM, [(K(!0), q(G, null, W(v.value, (e, t) => (K(), q("label", {
 						key: `${e.value}:${t}`,
 						class: z(["tm-model-option", { disabled: e.disabled }])
 					}, [
@@ -17246,45 +17219,45 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 							name: `${Ut(p)}-choice`,
 							value: e.value,
 							disabled: o.value || e.disabled
-						}, null, 8, tN), [[gs, u.value]]),
+						}, null, 8, QM), [[gs, u.value]]),
 						J("span", null, [
 							J("strong", null, B(Ut(Fk)(e.label, e.value).name), 1),
-							e.group || Ut(Fk)(e.label, e.value).detail ? (K(), q("small", nN, B([e.group, Ut(Fk)(e.label, e.value).detail].filter(Boolean).join(" · ")), 1)) : Z("", !0),
-							d.value ? (K(), q("code", rN, B(e.value || e.label), 1)) : Z("", !0),
-							d.value && e.value !== e.label ? (K(), q("small", iN, B(e.label), 1)) : Z("", !0)
+							e.group || Ut(Fk)(e.label, e.value).detail ? (K(), q("small", $M, B([e.group, Ut(Fk)(e.label, e.value).detail].filter(Boolean).join(" · ")), 1)) : Z("", !0),
+							d.value ? (K(), q("code", eN, B(e.value || e.label), 1)) : Z("", !0),
+							d.value && e.value !== e.label ? (K(), q("small", tN, B(e.label), 1)) : Z("", !0)
 						]),
-						e.value === a.value ? (K(), q("small", aN, "Current")) : Z("", !0)
-					], 2))), 128)), v.value.length ? Z("", !0) : (K(), q("p", oN, "No matching options. Try another name or clear the search."))]),
-					J("footer", null, [J("span", sN, B(v.value.length) + " " + B(v.value.length === 1 ? "option" : "options") + " shown", 1), J("button", {
+						e.value === a.value ? (K(), q("small", nN, "Current")) : Z("", !0)
+					], 2))), 128)), v.value.length ? Z("", !0) : (K(), q("p", rN, "No matching options. Try another name or clear the search."))]),
+					J("footer", null, [J("span", iN, B(v.value.length) + " " + B(v.value.length === 1 ? "option" : "options") + " shown", 1), J("button", {
 						class: "tv-button",
 						type: "button",
 						"aria-pressed": d.value,
 						onClick: h[2] ||= (e) => d.value = !d.value
-					}, B(d.value ? "Hide model details" : "Show model details"), 9, cN)])
-				], 8, XM)]),
+					}, B(d.value ? "Hide model details" : "Show model details"), 9, aN)])
+				], 8, qM)]),
 				_: 1
 			}, 8, ["open", "eyebrow"]),
-			_.value.identifier && _.value.name !== _.value.original ? (K(), q("div", dN, [J("button", {
+			_.value.identifier && _.value.name !== _.value.original ? (K(), q("div", cN, [J("button", {
 				class: "tm-link-button",
 				type: "button",
 				"aria-expanded": f.value,
 				onClick: h[3] ||= (e) => f.value = !f.value
-			}, B(f.value ? "Hide model identifier" : "Full model identifier"), 9, fN), f.value ? (K(), q(G, { key: 0 }, [J("code", null, B(_.value.identifier), 1), _.value.original === _.value.identifier ? Z("", !0) : (K(), q("small", pN, B(_.value.original), 1))], 64)) : Z("", !0)])) : Z("", !0)
-		], 64)) : Z("", !0)], 40, WM));
+			}, B(f.value ? "Hide model identifier" : "Full model identifier"), 9, lN), f.value ? (K(), q(G, { key: 0 }, [J("code", null, B(_.value.identifier), 1), _.value.original === _.value.identifier ? Z("", !0) : (K(), q("small", uN, B(_.value.original), 1))], 64)) : Z("", !0)])) : Z("", !0)
+		], 64)) : Z("", !0)], 40, VM));
 	}
-}), hN = { class: "tm-field-sections" }, gN = { key: 0 }, _N = { key: 0 }, vN = { class: "tm-field-grid" }, yN = {
+}), fN = { class: "tm-field-sections" }, pN = { key: 0 }, mN = { key: 0 }, hN = { class: "tm-field-grid" }, gN = {
 	key: 0,
 	class: "tm-field-section-break"
-}, bN = { key: 0 }, xN = {
+}, _N = { key: 0 }, vN = {
 	key: 1,
 	class: "tm-field tm-field-wide tm-led-preview"
-}, SN = { class: "tm-field-label" }, CN = { class: "tm-led-preview-grid" }, wN = {
+}, yN = { class: "tm-field-label" }, bN = { class: "tm-led-preview-grid" }, xN = {
 	key: 2,
 	class: "tm-field tm-field-wide tm-display-theme-preview"
-}, TN = { class: "tm-field-label" }, EN = { class: "tm-display-theme-swatches" }, DN = {
+}, SN = { class: "tm-field-label" }, CN = { class: "tm-display-theme-swatches" }, wN = {
 	key: 3,
 	class: "tm-field tm-field-wide tm-equalizer"
-}, ON = { class: "tm-equalizer-head" }, kN = { class: "tm-field-label" }, AN = ["disabled", "onClick"], jN = ["aria-label"], MN = [
+}, TN = { class: "tm-equalizer-head" }, EN = { class: "tm-field-label" }, DN = ["disabled", "onClick"], ON = ["aria-label"], kN = [
 	"aria-label",
 	"min",
 	"max",
@@ -17292,26 +17265,26 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 	"value",
 	"disabled",
 	"onInput"
-], NN = { key: 0 }, PN = {
+], AN = { key: 0 }, jN = {
 	key: 4,
 	class: "tm-field tm-field-wide tm-runtime-table-field"
-}, FN = { class: "tm-field-label" }, IN = { class: "tm-table-wrap" }, LN = { key: 0 }, RN = ["colspan"], zN = { key: 0 }, BN = { key: 0 }, VN = [
+}, MN = { class: "tm-field-label" }, NN = { class: "tm-table-wrap" }, PN = { key: 0 }, FN = ["colspan"], IN = { key: 0 }, LN = { key: 0 }, RN = [
 	"checked",
 	"disabled",
 	"onChange"
-], HN = { class: "tm-field-label" }, UN = [
+], zN = { class: "tm-field-label" }, BN = [
 	"value",
 	"disabled",
 	"onChange"
-], WN = ["label"], GN = ["value"], KN = ["value"], qN = [
+], VN = ["label"], HN = ["value"], UN = ["value"], WN = [
 	"value",
 	"placeholder",
 	"readonly",
 	"onInput"
-], JN = {
+], GN = {
 	key: 2,
 	class: "tm-field-input-row"
-}, YN = [
+}, KN = [
 	"type",
 	"value",
 	"placeholder",
@@ -17320,10 +17293,10 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 	"step",
 	"readonly",
 	"onInput"
-], XN = {
+], qN = {
 	key: 0,
 	class: "tm-field-input-actions"
-}, ZN = ["disabled", "onClick"], QN = ["disabled", "onClick"], $N = ["disabled", "onClick"], eP = { key: 3 }, tP = /* @__PURE__ */ fr({
+}, JN = ["disabled", "onClick"], YN = ["disabled", "onClick"], XN = ["disabled", "onClick"], ZN = { key: 3 }, QN = /* @__PURE__ */ fr({
 	__name: "ModelFields",
 	props: {
 		sections: { default: () => [] },
@@ -17502,10 +17475,10 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 				"--tm-display-highlight": t[3] || t[0] || "#ffd05c"
 			};
 		}
-		return (e, t) => (K(), q("section", hN, [(K(!0), q(G, null, W(i.value, (e, r) => (K(), q("article", {
+		return (e, t) => (K(), q("section", fN, [(K(!0), q(G, null, W(i.value, (e, r) => (K(), q("article", {
 			key: String(e.label || r),
 			class: "tm-form-card"
-		}, [e.label || e.description ? (K(), q("header", gN, [J("h3", null, B(e.label || "Settings"), 1), e.description ? (K(), q("p", _N, B(e.description), 1)) : Z("", !0)])) : Z("", !0), J("div", vN, [(K(!0), q(G, null, W(s(e), (e) => (K(), q(G, { key: c(e) }, [h(e) && l(e) === "section" ? (K(), q("div", yN, [J("strong", null, B(e.label || "Settings"), 1), e.description ? (K(), q("small", bN, B(e.description), 1)) : Z("", !0)])) : h(e) && l(e) === "led_preview" ? (K(), q("div", xN, [J("span", SN, [X(B(e.label || "LED Preview") + " ", 1), t[0] ||= J("small", null, "Live examples", -1)]), J("div", CN, [(K(!0), q(G, null, W(e.states || [], (n) => (K(), q("article", {
+		}, [e.label || e.description ? (K(), q("header", pN, [J("h3", null, B(e.label || "Settings"), 1), e.description ? (K(), q("p", mN, B(e.description), 1)) : Z("", !0)])) : Z("", !0), J("div", hN, [(K(!0), q(G, null, W(s(e), (e) => (K(), q(G, { key: c(e) }, [h(e) && l(e) === "section" ? (K(), q("div", gN, [J("strong", null, B(e.label || "Settings"), 1), e.description ? (K(), q("small", _N, B(e.description), 1)) : Z("", !0)])) : h(e) && l(e) === "led_preview" ? (K(), q("div", vN, [J("span", yN, [X(B(e.label || "LED Preview") + " ", 1), t[0] ||= J("small", null, "Live examples", -1)]), J("div", bN, [(K(!0), q(G, null, W(e.states || [], (n) => (K(), q("article", {
 			key: String(n.label),
 			class: "tm-led-preview-card",
 			style: ne(A())
@@ -17520,24 +17493,24 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 				style: ne(`--tm-led-i:${e - 1}`)
 			}, null, 4)), 64)),
 			t[2] ||= J("span", { class: "tm-led-core" }, null, -1)
-		], 2), J("div", null, [J("strong", null, B(n.label), 1), J("small", null, B(k(n)), 1)])], 4))), 128))])])) : h(e) && l(e) === "display_theme_preview" ? (K(), q("div", wN, [
-			J("span", TN, [X(B(e.label || "Theme Preview") + " ", 1), J("small", null, B(M(e).label || "Tater Harvest"), 1)]),
+		], 2), J("div", null, [J("strong", null, B(n.label), 1), J("small", null, B(k(n)), 1)])], 4))), 128))])])) : h(e) && l(e) === "display_theme_preview" ? (K(), q("div", xN, [
+			J("span", SN, [X(B(e.label || "Theme Preview") + " ", 1), J("small", null, B(M(e).label || "Tater Harvest"), 1)]),
 			J("div", {
 				class: "tm-display-theme-stage",
 				style: ne(P(e)),
 				"aria-hidden": "true"
 			}, [...t[3] ||= [Ea("<span class=\"tm-display-theme-orb\"></span><span class=\"tm-display-theme-clock\">10:42</span><span class=\"tm-display-theme-greeting\">GOOD MORNING</span><span class=\"tm-display-theme-weather\">72°</span><span class=\"tm-display-theme-condition\">CLEAR SKIES</span><span class=\"tm-display-theme-reply\">Ready when you are</span>", 6)]], 4),
-			J("div", EN, [(K(!0), q(G, null, W(N(e), (e) => (K(), q("i", {
+			J("div", CN, [(K(!0), q(G, null, W(N(e), (e) => (K(), q("i", {
 				key: e,
 				style: ne({ background: e })
 			}, null, 4))), 128)), J("span", null, B(M(e).description), 1)])
-		])) : h(e) && l(e) === "equalizer" ? (K(), q("div", DN, [
-			J("div", ON, [J("span", kN, [X(B(e.label || "Equalizer") + " ", 1), t[4] ||= J("small", null, "Per-device", -1)]), J("button", {
+		])) : h(e) && l(e) === "equalizer" ? (K(), q("div", wN, [
+			J("div", TN, [J("span", EN, [X(B(e.label || "Equalizer") + " ", 1), t[4] ||= J("small", null, "Per-device", -1)]), J("button", {
 				class: "tv-button",
 				type: "button",
 				disabled: g(e),
 				onClick: (t) => D(e)
-			}, "Reset flat", 8, AN)]),
+			}, "Reset flat", 8, DN)]),
 			J("div", {
 				class: "tm-equalizer-bands",
 				role: "group",
@@ -17553,27 +17526,27 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 					value: w(e)[n],
 					disabled: g(e),
 					onInput: (t) => E(e, n, t)
-				}, null, 40, MN),
+				}, null, 40, kN),
 				J("span", null, B(t.label || `Band ${n + 1}`), 1)
-			]))), 128))], 8, jN),
-			e.description ? (K(), q("small", NN, B(e.description), 1)) : Z("", !0)
-		])) : h(e) && l(e) === "table" ? (K(), q("div", PN, [
-			J("span", FN, B(e.label), 1),
-			J("div", IN, [J("table", null, [J("thead", null, [J("tr", null, [(K(!0), q(G, null, W(x(e), (e) => (K(), q("th", { key: String(e.key) }, B(e.label || e.key), 1))), 128))])]), J("tbody", null, [(K(!0), q(G, null, W(S(e), (t, n) => (K(), q("tr", { key: n }, [(K(!0), q(G, null, W(x(e), (e) => (K(), q("td", { key: String(e.key) }, B(t[String(e.key)] ?? "—"), 1))), 128))]))), 128)), S(e).length ? Z("", !0) : (K(), q("tr", LN, [J("td", { colspan: Math.max(1, x(e).length) }, "No results yet.", 8, RN)]))])])]),
-			e.description ? (K(), q("small", zN, B(e.description), 1)) : Z("", !0)
+			]))), 128))], 8, ON),
+			e.description ? (K(), q("small", AN, B(e.description), 1)) : Z("", !0)
+		])) : h(e) && l(e) === "table" ? (K(), q("div", jN, [
+			J("span", MN, B(e.label), 1),
+			J("div", NN, [J("table", null, [J("thead", null, [J("tr", null, [(K(!0), q(G, null, W(x(e), (e) => (K(), q("th", { key: String(e.key) }, B(e.label || e.key), 1))), 128))])]), J("tbody", null, [(K(!0), q(G, null, W(S(e), (t, n) => (K(), q("tr", { key: n }, [(K(!0), q(G, null, W(x(e), (e) => (K(), q("td", { key: String(e.key) }, B(t[String(e.key)] ?? "—"), 1))), 128))]))), 128)), S(e).length ? Z("", !0) : (K(), q("tr", PN, [J("td", { colspan: Math.max(1, x(e).length) }, "No results yet.", 8, FN)]))])])]),
+			e.description ? (K(), q("small", IN, B(e.description), 1)) : Z("", !0)
 		])) : h(e) && l(e) === "checkbox" ? (K(), q("label", {
 			key: 5,
 			class: z(["tm-field tm-toggle-field", { "tm-field-wide": e.full_width }])
-		}, [J("span", null, [J("strong", null, B(e.label || c(e)), 1), e.description ? (K(), q("small", BN, B(e.description), 1)) : Z("", !0)]), J("input", {
+		}, [J("span", null, [J("strong", null, B(e.label || c(e)), 1), e.description ? (K(), q("small", LN, B(e.description), 1)) : Z("", !0)]), J("input", {
 			type: "checkbox",
 			checked: !!u(e),
 			disabled: g(e),
 			onChange: (t) => b(e, t)
-		}, null, 40, VN)], 2)) : h(e) ? (K(), q("label", {
+		}, null, 40, RN)], 2)) : h(e) ? (K(), q("label", {
 			key: 6,
 			class: z(["tm-field", { "tm-field-wide": e.full_width || l(e) === "textarea" }])
 		}, [
-			J("span", HN, B(e.label || c(e)), 1),
+			J("span", zN, B(e.label || c(e)), 1),
 			l(e) === "select" ? (K(), q("select", {
 				key: 0,
 				value: String(u(e) ?? ""),
@@ -17585,16 +17558,16 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 			}, [(K(!0), q(G, null, W(m(e), (e) => (K(), q("option", {
 				key: f(e),
 				value: f(e)
-			}, B(p(e)), 9, GN))), 128))], 8, WN)) : (K(), q("option", {
+			}, B(p(e)), 9, HN))), 128))], 8, VN)) : (K(), q("option", {
 				key: 1,
 				value: f(e)
-			}, B(p(e)), 9, KN))], 64))), 128))], 40, UN)) : l(e) === "textarea" ? (K(), q("textarea", {
+			}, B(p(e)), 9, UN))], 64))), 128))], 40, BN)) : l(e) === "textarea" ? (K(), q("textarea", {
 				key: 1,
 				value: String(u(e) ?? ""),
 				placeholder: String(e.placeholder || ""),
 				readonly: g(e),
 				onInput: (t) => b(e, t)
-			}, null, 40, qN)) : (K(), q("div", JN, [J("input", {
+			}, null, 40, WN)) : (K(), q("div", GN, [J("input", {
 				type: _(e),
 				value: String(u(e) ?? ""),
 				placeholder: String(e.placeholder || ""),
@@ -17603,78 +17576,78 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 				step: e.step,
 				readonly: g(e),
 				onInput: (t) => b(e, t)
-			}, null, 40, YN), e.copyable || e.revealable || e.generatable ? (K(), q("div", XN, [
+			}, null, 40, KN), e.copyable || e.revealable || e.generatable ? (K(), q("div", qN, [
 				e.revealable ? (K(), q("button", {
 					key: 0,
 					class: "tv-button",
 					type: "button",
 					disabled: n.disabled,
 					onClick: Es((t) => a[c(e)] = !a[c(e)], ["prevent", "stop"])
-				}, B(a[c(e)] ? "Hide" : "Show"), 9, ZN)) : Z("", !0),
+				}, B(a[c(e)] ? "Hide" : "Show"), 9, JN)) : Z("", !0),
 				e.copyable ? (K(), q("button", {
 					key: 1,
 					class: "tv-button",
 					type: "button",
 					disabled: !String(u(e) ?? ""),
 					onClick: Es((t) => v(e), ["prevent", "stop"])
-				}, B(o.value === c(e) ? "Copied" : "Copy"), 9, QN)) : Z("", !0),
+				}, B(o.value === c(e) ? "Copied" : "Copy"), 9, YN)) : Z("", !0),
 				e.generatable ? (K(), q("button", {
 					key: 2,
 					class: "tv-button",
 					type: "button",
 					disabled: n.disabled || g(e),
 					onClick: Es((t) => y(e), ["prevent", "stop"])
-				}, "New", 8, $N)) : Z("", !0)
+				}, "New", 8, XN)) : Z("", !0)
 			])) : Z("", !0)])),
-			e.description ? (K(), q("small", eP, B(e.description), 1)) : Z("", !0)
+			e.description ? (K(), q("small", ZN, B(e.description), 1)) : Z("", !0)
 		], 2)) : Z("", !0)], 64))), 128))])]))), 128))]));
 	}
-}), nP = { class: "tm-stack tm-speech-workspace tm-listening-workspace" }, rP = {
+}), $N = { class: "tm-stack tm-speech-workspace tm-listening-workspace" }, eP = {
 	key: 0,
 	class: "tm-form-card tm-speech-hero"
-}, iP = { class: "tm-speech-hero-status" }, aP = ["open"], oP = { class: "tm-speech-status-chip" }, sP = {
+}, tP = { class: "tm-speech-hero-status" }, nP = ["open"], rP = { class: "tm-speech-status-chip" }, iP = {
 	key: 0,
 	class: "tm-progress-list"
-}, cP = ["value"], lP = {
+}, aP = ["value"], oP = {
 	key: 1,
 	class: "tm-speech-ready"
-}, uP = { class: "tm-form-card tm-speech-picker-card" }, dP = {
+}, sP = { class: "tm-form-card tm-speech-picker-card" }, cP = {
 	key: 0,
 	class: "tset-compact-model-row"
-}, fP = ["value"], pP = ["value"], mP = { key: 1 }, hP = { class: "tm-speech-status-chip" }, gP = {
+}, lP = ["value"], uP = ["value"], dP = { key: 1 }, fP = { class: "tm-speech-status-chip" }, pP = {
 	key: 2,
 	class: "tm-speech-provider-grid",
 	role: "group",
 	"aria-label": "Speech recognition backend"
-}, _P = ["aria-pressed", "onClick"], vP = {
+}, mP = ["aria-pressed", "onClick"], hP = {
 	key: 2,
 	class: "tm-form-card tm-speech-picker-card"
-}, yP = {
+}, gP = {
 	key: 0,
 	class: "tset-compact-model-row"
-}, bP = ["value"], xP = ["value"], SP = { key: 1 }, CP = { class: "tm-speech-status-chip" }, wP = {
+}, _P = ["value"], vP = ["value"], yP = { key: 1 }, bP = { class: "tm-speech-status-chip" }, xP = {
 	key: 2,
 	class: "tm-speech-provider-grid",
 	role: "group",
 	"aria-label": "Qwen speech recognition model"
-}, TP = ["aria-pressed", "onClick"], EP = { class: "tm-form-card tm-speech-runtime-card" }, DP = {
+}, SP = ["aria-pressed", "onClick"], CP = { class: "tm-form-card tm-speech-runtime-card" }, wP = {
 	key: 0,
 	class: "tset-compact-model-row"
-}, OP = ["value"], kP = ["value"], AP = { key: 1 }, jP = { class: "tv-eyebrow" }, MP = { class: "tm-speech-status-chip" }, NP = {
+}, TP = ["value"], EP = ["value"], DP = { key: 1 }, OP = { class: "tv-eyebrow" }, kP = { class: "tm-speech-status-chip" }, AP = {
 	key: 2,
 	class: "tm-speech-acceleration",
 	role: "group",
 	"aria-label": "Speech acceleration"
-}, PP = ["onClick"], FP = {
+}, jP = ["onClick"], MP = {
 	key: 3,
 	class: "tm-field-grid tm-speech-connection-fields"
-}, IP = { class: "tm-field tm-field-wide" }, LP = { class: "tm-field" }, RP = {
+}, NP = { class: "tm-field tm-field-wide" }, PP = { class: "tm-field" }, FP = {
 	key: 3,
 	class: "tm-form-card tm-basic-listening"
-}, zP = {
+}, IP = {
 	key: 4,
 	class: "tset-runtime-details tset-advanced-section"
-}, BP = { class: "tm-speech-runtime-settings" }, VP = { class: "tm-speech-section-heading" }, HP = /* @__PURE__ */ fr({
+}, LP = { class: "tm-speech-runtime-settings" }, RP = { class: "tm-speech-section-heading" }, zP = /* @__PURE__ */ fr({
 	__name: "ListeningModels",
 	props: {
 		draft: {},
@@ -17756,12 +17729,12 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 			F();
 		}), Fr(() => {
 			o !== null && window.clearTimeout(o);
-		}), t({ refreshWarmup: F }), (t, n) => (K(), q("section", nP, [
-			e.compact ? Z("", !0) : (K(), q("article", rP, [J("header", null, [n[6] ||= J("div", null, [
+		}), t({ refreshWarmup: F }), (t, n) => (K(), q("section", $N, [
+			e.compact ? Z("", !0) : (K(), q("article", eP, [J("header", null, [n[6] ||= J("div", null, [
 				J("span", { class: "tv-eyebrow" }, "Hear clearly"),
 				J("h3", null, "Listening and speech recognition"),
 				J("p", null, "Choose how Tater turns speech into text, then tune only the listening runtime that is actually in use.")
-			], -1), J("div", iP, [J("span", null, [n[5] ||= J("i", null, null, -1), X(B(g.value), 1)]), J("b", null, B(x.value ? b.value : "Network service"), 1)])])])),
+			], -1), J("div", tP, [J("span", null, [n[5] ||= J("i", null, null, -1), X(B(g.value), 1)]), J("b", null, B(x.value ? b.value : "Network service"), 1)])])])),
 			a.value.running || f.value.length ? (K(), q("details", {
 				key: 1,
 				class: z(["tset-runtime-details tm-listening-status", { "is-ready": e.compact && !a.value.running && !p.value }]),
@@ -17773,15 +17746,15 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 				n[7] ||= J("span", { class: "tv-eyebrow" }, "Listening runtime", -1),
 				J("h3", null, B(a.value.running ? "Preparing listening models" : p.value ? "Listening model needs attention" : "Listening models are ready"), 1),
 				J("p", null, B(a.value.running ? "Tater is loading the selected local speech-recognition engine in the background." : p.value ? "One or more listening models could not be prepared." : "The latest listening-model preparation finished successfully."), 1)
-			]), J("span", oP, B(a.value.running ? "Working" : p.value ? "Check status" : "Ready"), 1)]), a.value.running ? (K(), q("div", sP, [(K(!0), q(G, null, W(f.value, (e) => (K(), q("div", {
+			]), J("span", rP, B(a.value.running ? "Working" : p.value ? "Check status" : "Ready"), 1)]), a.value.running ? (K(), q("div", iP, [(K(!0), q(G, null, W(f.value, (e) => (K(), q("div", {
 				key: String(e.key || e.model),
 				class: "tm-progress-row"
 			}, [J("div", null, [J("strong", null, B(e.label || e.model || e.backend), 1), J("span", null, B(e.message || e.status), 1)]), J("progress", {
 				value: Number(e.progress || 0),
 				max: "100"
-			}, null, 8, cP)]))), 128))])) : (K(), q("div", lP, [J("i", null, B(p.value ? "!" : "✓"), 1), J("span", null, B(f.value.length) + " listening " + B(f.value.length === 1 ? "item" : "items") + " checked", 1)]))], 2)], 10, aP)) : Z("", !0),
-			J("article", uP, [
-				e.compact ? (K(), q("div", dP, [n[8] ||= J("span", null, [J("strong", null, "Listening model"), J("small", null, "Turns your speech into text.")], -1), Y(mN, { label: "Listening model" }, {
+			}, null, 8, aP)]))), 128))])) : (K(), q("div", oP, [J("i", null, B(p.value ? "!" : "✓"), 1), J("span", null, B(f.value.length) + " listening " + B(f.value.length === 1 ? "item" : "items") + " checked", 1)]))], 2)], 10, nP)) : Z("", !0),
+			J("article", sP, [
+				e.compact ? (K(), q("div", cP, [n[8] ||= J("span", null, [J("strong", null, "Listening model"), J("small", null, "Turns your speech into text.")], -1), Y(dN, { label: "Listening model" }, {
 					default: En(() => [J("select", {
 						"aria-label": "Listening model",
 						value: h.value,
@@ -17789,15 +17762,15 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 					}, [(K(!0), q(G, null, W(l.value, (e) => (K(), q("option", {
 						key: w(e),
 						value: w(e)
-					}, B(T(e)), 9, pP))), 128))], 40, fP)]),
+					}, B(T(e)), 9, uP))), 128))], 40, lP)]),
 					_: 1
 				})])) : Z("", !0),
-				e.compact ? Z("", !0) : (K(), q("header", mP, [n[9] ||= J("div", null, [
+				e.compact ? Z("", !0) : (K(), q("header", dP, [n[9] ||= J("div", null, [
 					J("span", { class: "tv-eyebrow" }, "Step 1"),
 					J("h3", null, "Choose how Tater listens"),
 					J("p", null, "Only settings for the selected speech-recognition engine appear below.")
-				], -1), J("span", hP, B(g.value), 1)])),
-				e.compact ? Z("", !0) : (K(), q("div", gP, [(K(!0), q(G, null, W(l.value, (e) => (K(), q("button", {
+				], -1), J("span", fP, B(g.value), 1)])),
+				e.compact ? Z("", !0) : (K(), q("div", pP, [(K(!0), q(G, null, W(l.value, (e) => (K(), q("button", {
 					key: w(e),
 					type: "button",
 					class: z({ active: h.value === w(e) }),
@@ -17807,10 +17780,10 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 					J("i", null, B(O(e)), 1),
 					J("span", null, [J("strong", null, B(T(e)), 1), J("small", null, B(k(e)), 1)]),
 					n[10] ||= J("b", { "aria-hidden": "true" }, "✓", -1)
-				], 10, _P))), 128))]))
+				], 10, mP))), 128))]))
 			]),
-			h.value === "qwen3_asr_llama_cpp" ? (K(), q("article", vP, [
-				e.compact ? (K(), q("div", yP, [n[11] ||= J("span", null, [J("strong", null, "Qwen listening model"), J("small", null, "Choose speed or transcription accuracy.")], -1), Y(mN, { label: "Qwen listening model" }, {
+			h.value === "qwen3_asr_llama_cpp" ? (K(), q("article", hP, [
+				e.compact ? (K(), q("div", gP, [n[11] ||= J("span", null, [J("strong", null, "Qwen listening model"), J("small", null, "Choose speed or transcription accuracy.")], -1), Y(dN, { label: "Qwen listening model" }, {
 					default: En(() => [J("select", {
 						"aria-label": "Qwen listening model",
 						value: v.value,
@@ -17818,15 +17791,15 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 					}, [(K(!0), q(G, null, W(_.value, (e) => (K(), q("option", {
 						key: w(e),
 						value: w(e)
-					}, B(T(e)), 9, xP))), 128))], 40, bP)]),
+					}, B(T(e)), 9, vP))), 128))], 40, _P)]),
 					_: 1
 				})])) : Z("", !0),
-				e.compact ? Z("", !0) : (K(), q("header", SP, [n[12] ||= J("div", null, [
+				e.compact ? Z("", !0) : (K(), q("header", yP, [n[12] ||= J("div", null, [
 					J("span", { class: "tv-eyebrow" }, "Step 2"),
 					J("h3", null, "Choose the Qwen listening model"),
 					J("p", null, "Use the smaller model for speed, or the larger model when transcription accuracy matters more.")
-				], -1), J("span", CP, B(y.value), 1)])),
-				e.compact ? Z("", !0) : (K(), q("div", wP, [(K(!0), q(G, null, W(_.value, (e) => (K(), q("button", {
+				], -1), J("span", bP, B(y.value), 1)])),
+				e.compact ? Z("", !0) : (K(), q("div", xP, [(K(!0), q(G, null, W(_.value, (e) => (K(), q("button", {
 					key: w(e),
 					type: "button",
 					class: z({ active: v.value === w(e) }),
@@ -17836,29 +17809,29 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 					J("i", null, B(w(e).includes("1.7b") ? "1.7" : "0.6"), 1),
 					J("span", null, [J("strong", null, B(T(e)), 1), J("small", null, B(E(e)), 1)]),
 					n[13] ||= J("b", { "aria-hidden": "true" }, "✓", -1)
-				], 10, TP))), 128))]))
+				], 10, SP))), 128))]))
 			])) : Z("", !0),
-			J("article", EP, [
-				e.compact && x.value ? (K(), q("label", DP, [n[14] ||= J("span", null, [J("strong", null, "Processing hardware"), J("small", null, "Auto chooses the available accelerator.")], -1), J("select", {
+			J("article", CP, [
+				e.compact && x.value ? (K(), q("label", wP, [n[14] ||= J("span", null, [J("strong", null, "Processing hardware"), J("small", null, "Auto chooses the available accelerator.")], -1), J("select", {
 					"aria-label": "Processing hardware",
 					value: String(e.draft.speech_acceleration || "auto"),
 					onChange: n[2] ||= (e) => P(e.target.value)
 				}, [(K(!0), q(G, null, W(d.value, (e) => (K(), q("option", {
 					key: w(e),
 					value: w(e)
-				}, B(T(e)), 9, kP))), 128))], 40, OP)])) : Z("", !0),
-				!e.compact || !x.value ? (K(), q("header", AP, [J("div", null, [
-					J("span", jP, B(h.value === "qwen3_asr_llama_cpp" ? "Step 3" : "Step 2"), 1),
+				}, B(T(e)), 9, EP))), 128))], 40, TP)])) : Z("", !0),
+				!e.compact || !x.value ? (K(), q("header", DP, [J("div", null, [
+					J("span", OP, B(h.value === "qwen3_asr_llama_cpp" ? "Step 3" : "Step 2"), 1),
 					J("h3", null, B(x.value ? "Choose the processing hardware" : "Connect the Wyoming service"), 1),
 					J("p", null, B(x.value ? "Pick Auto unless you know which accelerator should run speech recognition." : "Enter the host and port of the Wyoming speech-to-text service."), 1)
-				]), J("span", MP, B(x.value ? b.value : "Network"), 1)])) : Z("", !0),
-				x.value && !e.compact ? (K(), q("div", NP, [(K(!0), q(G, null, W(d.value, (t) => (K(), q("button", {
+				]), J("span", kP, B(x.value ? b.value : "Network"), 1)])) : Z("", !0),
+				x.value && !e.compact ? (K(), q("div", AP, [(K(!0), q(G, null, W(d.value, (t) => (K(), q("button", {
 					key: w(t),
 					type: "button",
 					class: z({ active: String(e.draft.speech_acceleration || "auto") === w(t) }),
 					onClick: (e) => P(w(t))
-				}, [n[15] ||= J("i", null, null, -1), X(B(T(t)), 1)], 10, PP))), 128))])) : Z("", !0),
-				x.value ? Z("", !0) : (K(), q("div", FP, [J("label", IP, [
+				}, [n[15] ||= J("i", null, null, -1), X(B(T(t)), 1)], 10, jP))), 128))])) : Z("", !0),
+				x.value ? Z("", !0) : (K(), q("div", MP, [J("label", NP, [
 					n[16] ||= J("span", { class: "tm-field-label" }, "Wyoming host", -1),
 					U(J("input", {
 						"onUpdate:modelValue": n[3] ||= (t) => e.draft.speech_wyoming_stt_host = t,
@@ -17867,7 +17840,7 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 						onInput: A
 					}, null, 544), [[$, e.draft.speech_wyoming_stt_host]]),
 					n[17] ||= J("small", null, "Hostname or IP address of your Wyoming STT service.", -1)
-				]), J("label", LP, [n[18] ||= J("span", { class: "tm-field-label" }, "Wyoming port", -1), U(J("input", {
+				]), J("label", PP, [n[18] ||= J("span", { class: "tm-field-label" }, "Wyoming port", -1), U(J("input", {
 					"onUpdate:modelValue": n[4] ||= (t) => e.draft.speech_wyoming_stt_port = t,
 					type: "number",
 					min: "1",
@@ -17876,180 +17849,180 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 					onInput: A
 				}, null, 544), [[$, e.draft.speech_wyoming_stt_port]])])]))
 			]),
-			C.value.basic.length ? (K(), q("article", RP, [n[19] ||= J("header", null, [J("div", null, [J("h3", null, "When Tater listens"), J("p", null, "Choose how Tater recognizes speech and detects the end of a turn.")])], -1), Y(tP, {
+			C.value.basic.length ? (K(), q("article", FP, [n[19] ||= J("header", null, [J("div", null, [J("h3", null, "When Tater listens"), J("p", null, "Choose how Tater recognizes speech and detects the end of a turn.")])], -1), Y(QN, {
 				sections: C.value.basic,
 				values: m.value,
 				onChange: j
 			}, null, 8, ["sections", "values"])])) : Z("", !0),
-			C.value.advanced.length ? (K(), q("details", zP, [n[21] ||= J("summary", null, "Advanced listening settings", -1), J("section", BP, [J("div", VP, [n[20] ||= J("div", null, [J("h3", null, "Listening controls"), J("p", null, "These controls apply to the selected recognition path and shared listening runtime.")], -1), J("span", null, B(C.value.advanced.length) + " " + B(C.value.advanced.length === 1 ? "section" : "sections"), 1)]), Y(tP, {
+			C.value.advanced.length ? (K(), q("details", IP, [n[21] ||= J("summary", null, "Advanced listening settings", -1), J("section", LP, [J("div", RP, [n[20] ||= J("div", null, [J("h3", null, "Listening controls"), J("p", null, "These controls apply to the selected recognition path and shared listening runtime.")], -1), J("span", null, B(C.value.advanced.length) + " " + B(C.value.advanced.length === 1 ? "section" : "sections"), 1)]), Y(QN, {
 				sections: C.value.advanced,
 				values: m.value,
 				onChange: j
 			}, null, 8, ["sections", "values"])])])) : Z("", !0)
 		]));
 	}
-}), UP = { class: "tm-stack tm-llm-workspace" }, WP = {
+}), BP = { class: "tm-stack tm-llm-workspace" }, VP = {
 	class: "tv-tabs tm-inner-tabs tm-llm-tabs",
 	"aria-label": "LLM model areas"
-}, GP = {
+}, HP = {
 	key: 0,
 	class: "tv-notice error"
-}, KP = { class: "tv-eyebrow" }, qP = { class: "tm-inline-actions" }, JP = { class: "tm-llm-route-state" }, YP = ["onClick"], XP = { class: "tm-llm-provider-section" }, ZP = { class: "tm-llm-section-title" }, QP = ["aria-label"], $P = ["aria-pressed", "onClick"], eF = { class: "tm-llm-connection-card" }, tF = {
+}, UP = { class: "tv-eyebrow" }, WP = { class: "tm-inline-actions" }, GP = { class: "tm-llm-route-state" }, KP = ["onClick"], qP = { class: "tm-llm-provider-section" }, JP = { class: "tm-llm-section-title" }, YP = ["aria-label"], XP = ["aria-pressed", "onClick"], ZP = { class: "tm-llm-connection-card" }, QP = {
 	key: 0,
 	class: "tm-llm-route-note"
-}, nF = {
+}, $P = {
 	key: 1,
 	class: "tm-field-grid tm-llm-route-fields"
-}, rF = {
+}, eF = {
 	key: 0,
 	class: "tm-field tm-field-wide"
-}, iF = ["onUpdate:modelValue"], aF = {
+}, tF = ["onUpdate:modelValue"], nF = {
 	key: 1,
 	class: "tm-field"
-}, oF = ["onUpdate:modelValue"], sF = {
+}, rF = ["onUpdate:modelValue"], iF = {
 	key: 2,
 	class: "tm-field"
-}, cF = ["onUpdate:modelValue"], lF = {
+}, aF = ["onUpdate:modelValue"], oF = {
 	key: 3,
 	class: "tm-field tm-field-wide"
-}, uF = ["onUpdate:modelValue", "onChange"], dF = ["value"], fF = ["value"], pF = { key: 0 }, mF = { key: 1 }, hF = {
+}, sF = ["onUpdate:modelValue", "onChange"], cF = ["value"], lF = ["value"], uF = { key: 0 }, dF = { key: 1 }, fF = {
 	key: 4,
 	class: "tm-field tm-field-wide"
-}, gF = ["onUpdate:modelValue"], _F = {
+}, pF = ["onUpdate:modelValue"], mF = {
 	key: 5,
 	class: "tm-inline-field tm-llm-discover"
-}, vF = ["disabled", "onClick"], yF = ["onUpdate:modelValue"], bF = ["value"], xF = {
+}, hF = ["disabled", "onClick"], gF = ["onUpdate:modelValue"], _F = ["value"], vF = {
 	key: 0,
 	class: "tm-llm-thinking-card tset-advanced-section"
-}, SF = { class: "tm-llm-switch tm-llm-thinking-switch" }, CF = {
+}, yF = { class: "tm-llm-switch tm-llm-thinking-switch" }, bF = {
 	key: 0,
 	class: "tm-form-card tm-context-shortcut"
-}, wF = [
+}, xF = [
 	"min",
 	"max",
 	"value"
-], TF = {
+], SF = {
 	key: 1,
 	class: "tm-form-card tm-llm-runtime-card tset-advanced-section"
-}, EF = {
+}, CF = {
 	key: 0,
 	class: "tm-llm-runtime-picker"
-}, DF = ["onClick"], OF = { class: "tm-llm-context-slot-settings" }, kF = { class: "tm-llm-section-chip" }, AF = { class: "tm-llm-mode-picker tm-llm-slot-mode-picker" }, jF = ["disabled"], MF = { class: "tm-llm-context-layout" }, NF = { class: "tm-llm-context-control" }, PF = [
+}, wF = ["onClick"], TF = { class: "tm-llm-context-slot-settings" }, EF = { class: "tm-llm-section-chip" }, DF = { class: "tm-llm-mode-picker tm-llm-slot-mode-picker" }, OF = ["disabled"], kF = { class: "tm-llm-context-layout" }, AF = { class: "tm-llm-context-control" }, jF = [
 	"min",
 	"max",
 	"value"
-], FF = [
+], MF = [
 	"min",
 	"max",
 	"value"
-], IF = { class: "tm-llm-context-pool-note" }, LF = { class: "tm-llm-context-fit" }, RF = {
+], NF = { class: "tm-llm-context-pool-note" }, PF = { class: "tm-llm-context-fit" }, FF = {
 	class: "tm-llm-context-meter",
 	"aria-hidden": "true"
-}, zF = { class: "tm-llm-context-facts" }, BF = { class: "tm-llm-settings-section" }, VF = { class: "tm-field-grid" }, HF = { class: "tm-field" }, UF = { class: "tm-field" }, WF = { class: "tm-llm-switch-grid" }, GF = { class: "tm-llm-switch" }, KF = { class: "tm-llm-switch" }, qF = { class: "tm-llm-feature-toggle" }, JF = {
+}, IF = { class: "tm-llm-context-facts" }, LF = { class: "tm-llm-settings-section" }, RF = { class: "tm-field-grid" }, zF = { class: "tm-field" }, BF = { class: "tm-field" }, VF = { class: "tm-llm-switch-grid" }, HF = { class: "tm-llm-switch" }, UF = { class: "tm-llm-switch" }, WF = { class: "tm-llm-feature-toggle" }, GF = {
 	key: 0,
 	class: "tm-llm-speculative-settings"
-}, YF = { class: "tm-field" }, XF = { class: "tm-field tm-llm-draft-model" }, ZF = { value: "" }, QF = ["value"], $F = { key: 0 }, eI = {
+}, KF = { class: "tm-field" }, qF = { class: "tm-field tm-llm-draft-model" }, JF = { value: "" }, YF = ["value"], XF = { key: 0 }, ZF = {
 	key: 1,
 	class: "tm-llm-draft-match good"
-}, tI = {
+}, QF = {
 	key: 2,
 	class: "tm-llm-draft-match warn"
-}, nI = {
+}, $F = {
 	key: 3,
 	class: "tm-llm-draft-match warn"
-}, rI = { class: "tm-field tm-llm-draft-tokens" }, iI = {
+}, eI = { class: "tm-field tm-llm-draft-tokens" }, tI = {
 	key: 1,
 	class: "tm-llm-feature-off"
-}, aI = {
+}, nI = {
 	key: 2,
 	class: "tm-form-card tm-llm-no-runtime"
-}, oI = { class: "tm-form-card tm-llm-special-card" }, sI = { class: "tm-llm-mode-picker" }, cI = {
+}, rI = { class: "tm-form-card tm-llm-special-card" }, iI = { class: "tm-llm-mode-picker" }, aI = {
 	key: 0,
 	class: "tm-form-card tm-llm-special-card"
-}, lI = {
+}, oI = {
 	class: "tm-llm-provider-picker compact",
 	role: "group",
 	"aria-label": "Tater Open WebUI provider"
-}, uI = ["onClick"], dI = { class: "tm-field-grid" }, fI = {
+}, sI = ["onClick"], cI = { class: "tm-field-grid" }, lI = {
 	key: 0,
 	class: "tm-field tm-field-wide"
-}, pI = {
+}, uI = {
 	key: 1,
 	class: "tm-field"
-}, mI = {
+}, dI = {
 	key: 2,
 	class: "tm-field"
-}, hI = {
+}, fI = {
 	key: 3,
 	class: "tm-field tm-field-wide"
-}, gI = ["value"], _I = ["value"], vI = {
+}, pI = ["value"], mI = ["value"], hI = {
 	key: 4,
 	class: "tm-field tm-field-wide"
-}, yI = { class: "tm-form-card tm-llm-special-card" }, bI = { class: "tm-llm-mode-picker" }, xI = {
+}, gI = { class: "tm-form-card tm-llm-special-card" }, _I = { class: "tm-llm-mode-picker" }, vI = {
 	key: 0,
 	class: "tm-form-card tm-llm-special-card"
-}, SI = {
+}, yI = {
 	class: "tm-llm-provider-picker compact",
 	role: "group",
 	"aria-label": "Terminal provider"
-}, CI = ["onClick"], wI = { class: "tm-field-grid" }, TI = {
+}, bI = ["onClick"], xI = { class: "tm-field-grid" }, SI = {
 	key: 0,
 	class: "tm-field tm-field-wide"
-}, EI = {
+}, CI = {
 	key: 1,
 	class: "tm-field tm-field-wide"
-}, DI = ["value"], OI = ["value"], kI = {
+}, wI = ["value"], TI = ["value"], EI = {
 	key: 2,
 	class: "tm-field tm-field-wide"
-}, AI = { class: "tm-form-card tm-llm-special-card" }, jI = {
+}, DI = { class: "tm-form-card tm-llm-special-card" }, OI = {
 	class: "tm-llm-mode-picker tm-llm-mode-picker-three",
 	role: "group",
 	"aria-label": "Decision Router mode"
-}, MI = {
+}, kI = {
 	key: 0,
 	class: "tm-form-card tm-llm-special-card"
-}, NI = { class: "tm-llm-section-chip" }, PI = { class: "tm-field-grid" }, FI = { class: "tm-field tm-field-wide" }, II = ["value"], LI = ["value"], RI = { key: 0 }, zI = { key: 1 }, BI = { class: "tm-decision-threshold" }, VI = ["value"], HI = { class: "tm-llm-thinking-advice" }, UI = {
+}, AI = { class: "tm-llm-section-chip" }, jI = { class: "tm-field-grid" }, MI = { class: "tm-field tm-field-wide" }, NI = ["value"], PI = ["value"], FI = { key: 0 }, II = { key: 1 }, LI = { class: "tm-decision-threshold" }, RI = ["value"], zI = { class: "tm-llm-thinking-advice" }, BI = {
 	key: 1,
 	class: "tm-form-card tm-decision-benchmark-card"
-}, WI = ["disabled"], GI = {
+}, VI = ["disabled"], HI = {
 	key: 0,
 	class: "tm-decision-benchmark-running"
-}, KI = {
+}, UI = {
 	key: 1,
 	class: "tv-notice error",
 	"aria-live": "polite"
-}, qI = { class: "tm-decision-metrics" }, JI = ["open"], YI = {
+}, WI = { class: "tm-decision-metrics" }, GI = ["open"], KI = {
 	key: 2,
 	class: "tm-form-card tm-decision-live-card"
-}, XI = ["disabled"], ZI = {
+}, qI = ["disabled"], JI = {
 	key: 0,
 	class: "tv-notice error",
 	"aria-live": "polite"
-}, QI = {
+}, YI = {
 	key: 1,
 	class: "tm-decision-benchmark-running"
-}, $I = {
+}, XI = {
 	key: 2,
 	class: "tm-decision-live-empty"
-}, eL = {
+}, ZI = {
 	key: 3,
 	class: "tm-decision-live-results"
-}, tL = { class: "tm-decision-live-metrics" }, nL = { class: "tm-form-card tm-llm-beast-hero" }, rL = { class: "tm-llm-feature-toggle" }, iL = { class: "tm-llm-section-chip" }, aL = { class: "tm-llm-mode-picker" }, oL = ["disabled", "onClick"], sL = ["disabled", "onClick"], cL = ["aria-label"], lL = ["disabled", "onClick"], uL = { class: "tm-field-grid" }, dL = {
+}, QI = { class: "tm-decision-live-metrics" }, $I = { class: "tm-form-card tm-llm-beast-hero" }, eL = { class: "tm-llm-feature-toggle" }, tL = { class: "tm-llm-section-chip" }, nL = { class: "tm-llm-mode-picker" }, rL = ["disabled", "onClick"], iL = ["disabled", "onClick"], aL = ["aria-label"], oL = ["disabled", "onClick"], sL = { class: "tm-field-grid" }, cL = {
 	key: 0,
 	class: "tm-field tm-field-wide"
-}, fL = ["onUpdate:modelValue"], pL = {
+}, lL = ["onUpdate:modelValue"], uL = {
 	key: 1,
 	class: "tm-field"
-}, mL = ["onUpdate:modelValue"], hL = {
+}, dL = ["onUpdate:modelValue"], fL = {
 	key: 2,
 	class: "tm-field"
-}, gL = ["onUpdate:modelValue"], _L = {
+}, pL = ["onUpdate:modelValue"], mL = {
 	key: 3,
 	class: "tm-field tm-field-wide"
-}, vL = ["onUpdate:modelValue"], yL = ["value"], bL = ["value"], xL = {
+}, hL = ["onUpdate:modelValue"], gL = ["value"], _L = ["value"], vL = {
 	key: 4,
 	class: "tm-field tm-field-wide"
-}, SL = ["onUpdate:modelValue"], CL = /* @__PURE__ */ fr({
+}, yL = ["onUpdate:modelValue"], bL = /* @__PURE__ */ fr({
 	__name: "LlmModels",
 	props: {
 		draft: {},
@@ -18437,8 +18410,8 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 			}, 5e3);
 		}), Fr(() => {
 			v !== null && window.clearInterval(v);
-		}), (t, n) => (K(), q("section", UP, [
-			J("nav", WP, [
+		}), (t, n) => (K(), q("section", BP, [
+			J("nav", VP, [
 				J("button", {
 					type: "button",
 					class: z({ active: i.value === "base" }),
@@ -18465,23 +18438,23 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 					onClick: n[4] ||= (e) => i.value = "beast"
 				}, "Beast roles", 2)
 			]),
-			c.value ? (K(), q("div", GP, B(c.value), 1)) : Z("", !0),
+			c.value ? (K(), q("div", HP, B(c.value), 1)) : Z("", !0),
 			i.value === "base" ? (K(), q(G, { key: 1 }, [
 				(K(!0), q(G, null, W(M.value, (t, r) => (K(), q("article", {
 					key: r,
 					class: "tm-form-card tm-llm-route-card"
 				}, [
 					J("header", null, [J("div", null, [
-						J("span", KP, "Base route " + B(r + 1), 1),
+						J("span", UP, "Base route " + B(r + 1), 1),
 						J("h3", null, B(r === 0 ? "Choose a Base model" : "Additional Base model"), 1),
 						J("p", null, B(M.value.length > 1 ? "This route shares normal Base requests with every other pool member." : "All normal Base requests use this route until another pool member is added."), 1)
-					]), J("div", qP, [J("span", JP, [n[35] ||= J("i", null, null, -1), X("Pool member " + B(r + 1), 1)]), r > 0 ? (K(), q("button", {
+					]), J("div", WP, [J("span", GP, [n[35] ||= J("i", null, null, -1), X("Pool member " + B(r + 1), 1)]), r > 0 ? (K(), q("button", {
 						key: 0,
 						class: "tv-button danger",
 						type: "button",
 						onClick: (e) => Qe(r)
-					}, "Remove", 8, YP)) : Z("", !0)])]),
-					J("section", XP, [J("div", ZP, [n[36] ||= J("div", null, [J("strong", null, "Where the model runs"), J("span", null, "Choose this Mac, a connected service, or your paired Spud Hub.")], -1), J("b", null, B(De(Ee(t)).label), 1)]), J("div", {
+					}, "Remove", 8, KP)) : Z("", !0)])]),
+					J("section", qP, [J("div", JP, [n[36] ||= J("div", null, [J("strong", null, "Where the model runs"), J("span", null, "Choose this Mac, a connected service, or your paired Spud Hub.")], -1), J("b", null, B(De(Ee(t)).label), 1)]), J("div", {
 						class: "tm-llm-provider-picker",
 						role: "group",
 						"aria-label": `Base route ${r + 1} provider`
@@ -18495,36 +18468,36 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 						J("i", null, B(e.mark), 1),
 						J("span", null, [J("strong", null, B(e.label), 1), J("small", null, B(e.short), 1)]),
 						n[37] ||= J("b", { "aria-hidden": "true" }, "✓", -1)
-					], 10, $P)), 64))], 8, QP)]),
-					J("section", eF, [J("header", null, [J("div", null, [n[38] ||= J("span", { class: "tv-eyebrow" }, "Route settings", -1), J("h4", null, B(De(Ee(t)).label), 1)]), J("span", { class: z({ local: Oe(Ee(t)) }) }, B(Oe(Ee(t)) ? "On this Tater" : Ee(t) === "spud_link" ? "Paired route" : "Network connection"), 3)]), Ee(t) === "spud_link" ? (K(), q("div", tF, [...n[39] ||= [J("i", null, "SP", -1), J("div", null, [J("strong", null, "No model address needed"), J("span", null, "The paired Spud Hub chooses and runs the model for this request.")], -1)]])) : (K(), q("div", nF, [
-						Ae(Ee(t)) ? (K(), q("label", rF, [
+					], 10, XP)), 64))], 8, YP)]),
+					J("section", ZP, [J("header", null, [J("div", null, [n[38] ||= J("span", { class: "tv-eyebrow" }, "Route settings", -1), J("h4", null, B(De(Ee(t)).label), 1)]), J("span", { class: z({ local: Oe(Ee(t)) }) }, B(Oe(Ee(t)) ? "On this Tater" : Ee(t) === "spud_link" ? "Paired route" : "Network connection"), 3)]), Ee(t) === "spud_link" ? (K(), q("div", QP, [...n[39] ||= [J("i", null, "SP", -1), J("div", null, [J("strong", null, "No model address needed"), J("span", null, "The paired Spud Hub chooses and runs the model for this request.")], -1)]])) : (K(), q("div", $P, [
+						Ae(Ee(t)) ? (K(), q("label", eF, [
 							n[40] ||= J("span", { class: "tm-field-label" }, "Host or base URL", -1),
 							U(J("input", {
 								"onUpdate:modelValue": (e) => t.host = e,
 								type: "text",
 								placeholder: "http://127.0.0.1",
 								onInput: Se
-							}, null, 40, iF), [[$, t.host]]),
+							}, null, 40, tF), [[$, t.host]]),
 							n[41] ||= J("small", null, "Enter the server address; add the port separately below if needed.", -1)
 						])) : Z("", !0),
-						Ae(Ee(t)) ? (K(), q("label", aF, [n[42] ||= J("span", { class: "tm-field-label" }, "Port", -1), U(J("input", {
+						Ae(Ee(t)) ? (K(), q("label", nF, [n[42] ||= J("span", { class: "tm-field-label" }, "Port", -1), U(J("input", {
 							"onUpdate:modelValue": (e) => t.port = e,
 							type: "number",
 							min: "1",
 							max: "65535",
 							placeholder: "1234",
 							onInput: Se
-						}, null, 40, oF), [[$, t.port]])])) : Z("", !0),
-						Ae(Ee(t)) ? (K(), q("label", sF, [n[43] ||= J("span", { class: "tm-field-label" }, "API key", -1), U(J("input", {
+						}, null, 40, rF), [[$, t.port]])])) : Z("", !0),
+						Ae(Ee(t)) ? (K(), q("label", iF, [n[43] ||= J("span", { class: "tm-field-label" }, "API key", -1), U(J("input", {
 							"onUpdate:modelValue": (e) => t.api_key = e,
 							type: "password",
 							autocomplete: "off",
 							placeholder: "Optional",
 							onInput: Se
-						}, null, 40, cF), [[$, t.api_key]])])) : Z("", !0),
-						Oe(Ee(t)) ? (K(), q("div", lF, [
+						}, null, 40, aF), [[$, t.api_key]])])) : Z("", !0),
+						Oe(Ee(t)) ? (K(), q("div", oF, [
 							n[45] ||= J("span", { class: "tm-field-label" }, "Downloaded model", -1),
-							Y(mN, { label: "Downloaded model" }, {
+							Y(dN, { label: "Downloaded model" }, {
 								default: En(() => [U(J("select", {
 									"aria-label": "Downloaded model",
 									"onUpdate:modelValue": (e) => t.model = e,
@@ -18534,27 +18507,27 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 									t.model && !Ke(Ee(t), t.model) ? (K(), q("option", {
 										key: 0,
 										value: t.model
-									}, "Current: " + B(t.model) + " (not installed)", 9, dF)) : Z("", !0),
+									}, "Current: " + B(t.model) + " (not installed)", 9, cF)) : Z("", !0),
 									(K(!0), q(G, null, W(Ge(Ee(t)), (e) => (K(), q("option", {
 										key: String(e.model),
 										value: e.model
-									}, B(e.label || e.model), 9, fF))), 128))
-								], 40, uF), [[_s, t.model]])]),
+									}, B(e.label || e.model), 9, lF))), 128))
+								], 40, sF), [[_s, t.model]])]),
 								_: 2
 							}, 1024),
-							Ge(Ee(t)).length ? (K(), q("small", mF, B(Ge(Ee(t)).length) + " downloaded " + B(De(Ee(t)).label) + " model" + B(Ge(Ee(t)).length === 1 ? "" : "s") + " available.", 1)) : (K(), q("small", pF, "No matching model is downloaded. Add one from the Models tab first."))
-						])) : (K(), q("label", hF, [n[46] ||= J("span", { class: "tm-field-label" }, "Model id or alias", -1), U(J("input", {
+							Ge(Ee(t)).length ? (K(), q("small", dF, B(Ge(Ee(t)).length) + " downloaded " + B(De(Ee(t)).label) + " model" + B(Ge(Ee(t)).length === 1 ? "" : "s") + " available.", 1)) : (K(), q("small", uF, "No matching model is downloaded. Add one from the Models tab first."))
+						])) : (K(), q("label", fF, [n[46] ||= J("span", { class: "tm-field-label" }, "Model id or alias", -1), U(J("input", {
 							"onUpdate:modelValue": (e) => t.model = e,
 							type: "text",
 							placeholder: "Model id or server alias",
 							onInput: Se
-						}, null, 40, gF), [[$, t.model]])])),
-						ke(Ee(t)) ? (K(), q("div", _F, [J("button", {
+						}, null, 40, pF), [[$, t.model]])])),
+						ke(Ee(t)) ? (K(), q("div", mF, [J("button", {
 							class: "tv-button",
 							type: "button",
 							disabled: s.value === `base-${r}`,
 							onClick: (e) => ot(`base-${r}`, t)
-						}, B(s.value === `base-${r}` ? "Looking…" : "Discover server models"), 9, vF), Y(mN, { label: "Model" }, {
+						}, B(s.value === `base-${r}` ? "Looking…" : "Discover server models"), 9, hF), Y(dN, { label: "Model" }, {
 							default: En(() => [o[`base-${r}`]?.length ? U((K(), q("select", {
 								key: 0,
 								"aria-label": "Model",
@@ -18563,14 +18536,14 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 							}, [(K(!0), q(G, null, W(o[`base-${r}`], (e) => (K(), q("option", {
 								key: e,
 								value: e
-							}, B(e), 9, bF))), 128))], 40, yF)), [[_s, t.model]]) : Z("", !0)]),
+							}, B(e), 9, _F))), 128))], 40, gF)), [[_s, t.model]]) : Z("", !0)]),
 							_: 2
 						}, 1024)])) : Z("", !0)
 					]))]),
-					r === 0 ? (K(), q("details", xF, [
+					r === 0 ? (K(), q("details", vF, [
 						n[48] ||= J("summary", null, "Advanced model behavior · Thinking", -1),
 						n[49] ||= J("header", null, [J("div", null, [J("span", { class: "tv-eyebrow" }, "Optional model behavior"), J("strong", null, "Model thinking")]), J("b", null, "Leave off")], -1),
-						J("label", SF, [
+						J("label", yF, [
 							U(J("input", {
 								"onUpdate:modelValue": n[5] ||= (t) => e.draft.hydra_llm_thinking_enabled = t,
 								type: "checkbox",
@@ -18587,7 +18560,7 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 					type: "button",
 					onClick: Ze
 				}, "＋ Add round-robin route"),
-				be.value ? (K(), q("section", CF, [J("label", null, [n[51] ||= J("span", null, [J("strong", null, "Conversation capacity"), J("small", null, "The shared context available to your model and conversation slots.")], -1), J("input", {
+				be.value ? (K(), q("section", bF, [J("label", null, [n[51] ||= J("span", null, [J("strong", null, "Conversation capacity"), J("small", null, "The shared context available to your model and conversation slots.")], -1), J("input", {
 					"aria-label": "Conversation capacity in tokens",
 					type: "number",
 					min: P.value.min,
@@ -18595,24 +18568,24 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 					step: "256",
 					value: R.value,
 					onInput: tt
-				}, null, 40, wF)])])) : Z("", !0),
-				be.value ? (K(), q("details", TF, [
+				}, null, 40, xF)])])) : Z("", !0),
+				be.value ? (K(), q("details", SF, [
 					n[79] ||= J("summary", null, [X("Advanced model tuning"), J("small", null, "Context, slots, memory estimates, batching, GPU settings, and speculative decoding")], -1),
 					J("header", null, [n[52] ||= J("div", null, [
 						J("span", { class: "tv-eyebrow" }, "Shared llama.cpp runtime"),
 						J("h3", null, "Context and slots"),
 						J("p", null, "Configure the shared context pool and its logical conversation slots together.")
-					], -1), N.value.length > 1 ? (K(), q("div", EF, [(K(!0), q(G, null, W(N.value, (e) => (K(), q("button", {
+					], -1), N.value.length > 1 ? (K(), q("div", CF, [(K(!0), q(G, null, W(N.value, (e) => (K(), q("button", {
 						key: e.value,
 						type: "button",
 						class: z({ active: a.value === e.value }),
 						onClick: (t) => a.value = e.value
-					}, [J("i", null, B(e.mark), 1), X(B(e.label), 1)], 10, DF))), 128))])) : Z("", !0)]),
-					J("section", { class: z(["tm-llm-context-card", N.value.length ? ue.value : ""]) }, [J("section", OF, [J("header", null, [n[53] ||= J("div", null, [
+					}, [J("i", null, B(e.mark), 1), X(B(e.label), 1)], 10, wF))), 128))])) : Z("", !0)]),
+					J("section", { class: z(["tm-llm-context-card", N.value.length ? ue.value : ""]) }, [J("section", TF, [J("header", null, [n[53] ||= J("div", null, [
 						J("span", { class: "tv-eyebrow" }, "Shared context layout"),
 						J("h4", null, "Context slot mode"),
 						J("p", null, "Choose one shared conversation slot or stable logical slots for Base, every Hydra head, and Vision.")
-					], -1), J("span", kF, B(xe.value === "per_head" ? "5 slots" : "1 slot"), 1)]), J("div", AF, [J("button", {
+					], -1), J("span", EF, B(xe.value === "per_head" ? "5 slots" : "1 slot"), 1)]), J("div", DF, [J("button", {
 						type: "button",
 						class: z({ active: xe.value === "single" }),
 						onClick: n[6] ||= (e) => Fe("single")
@@ -18629,7 +18602,7 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 						type: "button",
 						disabled: u.value,
 						onClick: at
-					}, B(u.value ? "Refreshing…" : "Refresh estimate"), 9, jF)]), J("div", MF, [J("div", NF, [
+					}, B(u.value ? "Refreshing…" : "Refresh estimate"), 9, OF)]), J("div", kF, [J("div", AF, [
 						J("div", null, [n[58] ||= J("strong", null, "Context length", -1), J("b", null, B(rt(R.value)) + " shared tokens", 1)]),
 						J("input", {
 							type: "range",
@@ -18638,7 +18611,7 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 							step: "256",
 							value: R.value,
 							onInput: tt
-						}, null, 40, PF),
+						}, null, 40, jF),
 						J("label", null, [n[59] ||= J("span", null, "Exact shared token limit", -1), J("input", {
 							type: "number",
 							min: P.value.min,
@@ -18646,24 +18619,24 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 							step: "256",
 							value: R.value,
 							onInput: tt
-						}, null, 40, FF)]),
-						J("aside", IF, [J("i", null, B(xe.value === "per_head" ? "5×" : "1×"), 1), J("span", null, [J("strong", null, B(xe.value === "per_head" ? `About ${rt(ee.value)} each at equal load` : "Full pool for slot 0"), 1), J("small", null, B(te.value), 1)])]),
+						}, null, 40, MF)]),
+						J("aside", NF, [J("i", null, B(xe.value === "per_head" ? "5×" : "1×"), 1), J("span", null, [J("strong", null, B(xe.value === "per_head" ? `About ${rt(ee.value)} each at equal load` : "Full pool for slot 0"), 1), J("small", null, B(te.value), 1)])]),
 						J("small", null, B(I.value?.max_context_tokens ? `Model maximum ${rt(L.value)} from ${I.value.context_source === "gguf" ? "GGUF metadata" : "model config"}.` : `Model maximum is unknown; Tater uses a safe ${rt(L.value)} slider cap.`), 1)
-					]), J("div", LF, [
+					]), J("div", PF, [
 						J("div", null, [n[60] ||= J("span", null, [J("i"), X("Context fit")], -1), J("strong", null, B(de.value), 1)]),
-						J("div", RF, [J("span", { style: ne({ width: `${fe.value}%` }) }, null, 4), J("i", { style: ne({ left: `${pe.value}%` }) }, null, 4)]),
+						J("div", FF, [J("span", { style: ne({ width: `${fe.value}%` }) }, null, 4), J("i", { style: ne({ left: `${pe.value}%` }) }, null, 4)]),
 						J("h4", null, B(ae.value ? `Recommended: ${rt(ae.value)} tokens` : "Building a recommendation"), 1),
 						J("p", null, B(it()), 1),
-						J("div", zF, [
+						J("div", IF, [
 							J("span", null, [n[61] ||= X("Prompt ", -1), J("b", null, B(rt(oe.value)), 1)]),
 							J("span", null, [n[62] ||= X("Reply ", -1), J("b", null, B(rt(se.value)), 1)]),
 							J("span", null, [n[63] ||= X("Minimum ", -1), J("b", null, B(rt(ie.value)), 1)]),
 							J("span", null, [n[64] ||= X("Reserve ", -1), J("b", null, B(rt(ce.value)), 1)])
 						])
 					])])], 64)) : Z("", !0)], 2),
-					a.value === "llama_cpp" ? (K(), q(G, { key: 0 }, [J("section", BF, [
+					a.value === "llama_cpp" ? (K(), q(G, { key: 0 }, [J("section", LF, [
 						n[71] ||= J("header", null, [J("div", null, [J("h4", null, "Performance"), J("p", null, "Start with the defaults, then tune only when you need more throughput or concurrent slots.")]), J("span", { class: "tm-llm-section-chip" }, "GGUF")], -1),
-						J("div", VF, [J("label", HF, [
+						J("div", RF, [J("label", zF, [
 							n[65] ||= J("span", { class: "tm-field-label" }, "Evaluation batch", -1),
 							U(J("input", {
 								"onUpdate:modelValue": n[8] ||= (t) => e.draft.hydra_llama_cpp_n_batch = t,
@@ -18674,7 +18647,7 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 								onInput: Se
 							}, null, 544), [[$, e.draft.hydra_llama_cpp_n_batch]]),
 							n[66] ||= J("small", null, "Higher can speed prompt processing when memory allows.", -1)
-						]), J("label", UF, [
+						]), J("label", BF, [
 							n[67] ||= J("span", { class: "tm-field-label" }, "Micro-batch", -1),
 							U(J("input", {
 								"onUpdate:modelValue": n[9] ||= (t) => e.draft.hydra_llama_cpp_n_ubatch = t,
@@ -18687,7 +18660,7 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 							}, null, 544), [[$, e.draft.hydra_llama_cpp_n_ubatch]]),
 							n[68] ||= J("small", null, "0 lets llama.cpp choose, usually matching the evaluation batch.", -1)
 						])]),
-						J("div", WF, [J("label", GF, [
+						J("div", VF, [J("label", HF, [
 							U(J("input", {
 								"onUpdate:modelValue": n[10] ||= (t) => e.draft.hydra_llama_cpp_flash_attn = t,
 								type: "checkbox",
@@ -18695,7 +18668,7 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 							}, null, 544), [[ms, e.draft.hydra_llama_cpp_flash_attn]]),
 							n[69] ||= J("span", null, [J("strong", null, "Flash attention"), J("small", null, "Faster attention when supported by the model and backend.")], -1),
 							J("b", null, B(e.draft.hydra_llama_cpp_flash_attn ? "On" : "Off"), 1)
-						]), J("label", KF, [
+						]), J("label", UF, [
 							U(J("input", {
 								"onUpdate:modelValue": n[11] ||= (t) => e.draft.hydra_llama_cpp_offload_kqv = t,
 								type: "checkbox",
@@ -18708,7 +18681,7 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 						J("span", { class: "tv-eyebrow" }, "Speed boost"),
 						J("h4", null, "Speculative decoding"),
 						J("p", null, "A fast draft predicts tokens and the main model verifies them. It can improve generation speed with a compatible model pair.")
-					], -1), J("label", qF, [
+					], -1), J("label", WF, [
 						U(J("input", {
 							"onUpdate:modelValue": n[12] ||= (t) => e.draft.hydra_llama_cpp_mtp_enabled = t,
 							type: "checkbox",
@@ -18716,8 +18689,8 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 						}, null, 544), [[ms, e.draft.hydra_llama_cpp_mtp_enabled]]),
 						n[72] ||= J("span", null, [J("i")], -1),
 						J("b", null, B(e.draft.hydra_llama_cpp_mtp_enabled ? "Enabled" : "Disabled"), 1)
-					])]), e.draft.hydra_llama_cpp_mtp_enabled ? (K(), q("div", JF, [
-						J("label", YF, [
+					])]), e.draft.hydra_llama_cpp_mtp_enabled ? (K(), q("div", GF, [
+						J("label", KF, [
 							n[75] ||= J("span", { class: "tm-field-label" }, "Draft method", -1),
 							U(J("select", {
 								"onUpdate:modelValue": n[13] ||= (t) => e.draft.hydra_llama_cpp_speculative_method = t,
@@ -18729,23 +18702,23 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 							]], 544), [[_s, e.draft.hydra_llama_cpp_speculative_method]]),
 							J("small", null, B(me.value.help), 1)
 						]),
-						J("div", XF, [
+						J("div", qF, [
 							n[76] ||= J("span", { class: "tm-field-label" }, "Draft model (GGUF)", -1),
-							Y(mN, { label: "Draft model (GGUF)" }, {
+							Y(dN, { label: "Draft model (GGUF)" }, {
 								default: En(() => [U(J("select", {
 									"aria-label": "Draft model (GGUF)",
 									"onUpdate:modelValue": n[14] ||= (t) => e.draft.hydra_llama_cpp_mtp_draft_model = t,
 									onChange: Se
-								}, [J("option", ZF, B(me.value.requiresDraft ? "Choose a compatible draft model" : "Embedded heads / no sidecar"), 1), (K(!0), q(G, null, W(ge.value, (e) => (K(), q("option", {
+								}, [J("option", JF, B(me.value.requiresDraft ? "Choose a compatible draft model" : "Embedded heads / no sidecar"), 1), (K(!0), q(G, null, W(ge.value, (e) => (K(), q("option", {
 									key: String(e.model),
 									value: e.model
-								}, B(e.filename || e.model), 9, QF))), 128))], 544), [[_s, e.draft.hydra_llama_cpp_mtp_draft_model]])]),
+								}, B(e.filename || e.model), 9, YF))), 128))], 544), [[_s, e.draft.hydra_llama_cpp_mtp_draft_model]])]),
 								_: 1
 							}),
-							he.value ? ge.value.length ? (K(), q("small", eI, B(ge.value.length) + " compatible " + B(me.value.label) + " " + B(ge.value.length === 1 ? "model" : "models") + " for " + B(ve.value) + ".", 1)) : (K(), q("small", tI, "No compatible " + B(me.value.label) + " sidecar is installed for " + B(ve.value) + ".", 1)) : (K(), q("small", $F, "Choose a llama.cpp base model above first.")),
-							_e.value ? Z("", !0) : (K(), q("small", nI, "The previous draft did not match this method or base model and will not be used."))
+							he.value ? ge.value.length ? (K(), q("small", ZF, B(ge.value.length) + " compatible " + B(me.value.label) + " " + B(ge.value.length === 1 ? "model" : "models") + " for " + B(ve.value) + ".", 1)) : (K(), q("small", QF, "No compatible " + B(me.value.label) + " sidecar is installed for " + B(ve.value) + ".", 1)) : (K(), q("small", XF, "Choose a llama.cpp base model above first.")),
+							_e.value ? Z("", !0) : (K(), q("small", $F, "The previous draft did not match this method or base model and will not be used."))
 						]),
-						J("label", rI, [
+						J("label", eI, [
 							n[77] ||= J("span", { class: "tm-field-label" }, "Maximum draft tokens", -1),
 							J("div", null, [U(J("input", {
 								"onUpdate:modelValue": n[15] ||= (t) => e.draft.hydra_llama_cpp_mtp_draft_tokens = t,
@@ -18764,9 +18737,9 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 							}, null, 544), [[$, e.draft.hydra_llama_cpp_mtp_draft_tokens]])]),
 							J("small", null, B(me.value.label) + " recommends " + B(me.value.tokens) + ".", 1)
 						])
-					])) : (K(), q("div", iI, [...n[78] ||= [J("i", null, "↗", -1), J("span", null, [J("strong", null, "Optional advanced feature"), J("small", null, "Leave this off for the simplest, most compatible llama.cpp setup.")], -1)]]))], 2)], 64)) : Z("", !0)
-				])) : (K(), q("article", aI, [...n[80] ||= [J("i", null, "✓", -1), J("div", null, [J("h3", null, "No local runtime to tune"), J("p", null, "The selected routes run on an API, remote server, or paired Spud Hub. Their connection settings are already shown above.")], -1)]]))
-			], 64)) : i.value === "tater-open-webui" ? (K(), q(G, { key: 2 }, [J("article", oI, [n[83] ||= J("header", null, [J("div", null, [
+					])) : (K(), q("div", tI, [...n[78] ||= [J("i", null, "↗", -1), J("span", null, [J("strong", null, "Optional advanced feature"), J("small", null, "Leave this off for the simplest, most compatible llama.cpp setup.")], -1)]]))], 2)], 64)) : Z("", !0)
+				])) : (K(), q("article", nI, [...n[80] ||= [J("i", null, "✓", -1), J("div", null, [J("h3", null, "No local runtime to tune"), J("p", null, "The selected routes run on an API, remote server, or paired Spud Hub. Their connection settings are already shown above.")], -1)]]))
+			], 64)) : i.value === "tater-open-webui" ? (K(), q(G, { key: 2 }, [J("article", rI, [n[83] ||= J("header", null, [J("div", null, [
 				J("span", { class: "tv-eyebrow" }, "Tater Open WebUI model"),
 				J("h3", null, "Choose the model for coding chat"),
 				J("p", null, [
@@ -18774,7 +18747,7 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 					J("code", null, "tater/base"),
 					X("; Hydra calls keep their existing model routing.")
 				])
-			])], -1), J("div", sI, [J("button", {
+			])], -1), J("div", iI, [J("button", {
 				type: "button",
 				class: z({ active: !e.draft.tater_open_webui_llm_provider }),
 				onClick: n[17] ||= (e) => et("base")
@@ -18782,13 +18755,13 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 				type: "button",
 				class: z({ active: !!e.draft.tater_open_webui_llm_provider }),
 				onClick: n[18] ||= (e) => et("dedicated")
-			}, [...n[82] ||= [J("i", null, "2", -1), J("span", null, [J("strong", null, "Dedicated coding model"), J("small", null, "Only for Tater Open WebUI Base calls")], -1)]], 2)])]), e.draft.tater_open_webui_llm_provider ? (K(), q("article", cI, [
+			}, [...n[82] ||= [J("i", null, "2", -1), J("span", null, [J("strong", null, "Dedicated coding model"), J("small", null, "Only for Tater Open WebUI Base calls")], -1)]], 2)])]), e.draft.tater_open_webui_llm_provider ? (K(), q("article", aI, [
 				n[91] ||= J("header", null, [J("div", null, [J("h3", null, "Dedicated Tater Open WebUI route"), J("p", null, [
 					X("Only linked Tater Open WebUI "),
 					J("code", null, "tater/base"),
 					X(" requests use this route.")
 				])])], -1),
-				J("div", lI, [(K(!0), q(G, null, W(Ut(x), (t) => (K(), q("button", {
+				J("div", oI, [(K(!0), q(G, null, W(Ut(x), (t) => (K(), q("button", {
 					key: t.value,
 					type: "button",
 					class: z({ active: e.draft.tater_open_webui_llm_provider === t.value }),
@@ -18797,15 +18770,15 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 					J("i", null, B(t.mark), 1),
 					J("span", null, [J("strong", null, B(t.label), 1), J("small", null, B(t.short), 1)]),
 					n[84] ||= J("b", { "aria-hidden": "true" }, "✓", -1)
-				], 10, uI))), 128))]),
-				J("div", dI, [
-					Ae(e.draft.tater_open_webui_llm_provider) ? (K(), q("label", fI, [n[85] ||= J("span", { class: "tm-field-label" }, "Host or base URL", -1), U(J("input", {
+				], 10, sI))), 128))]),
+				J("div", cI, [
+					Ae(e.draft.tater_open_webui_llm_provider) ? (K(), q("label", lI, [n[85] ||= J("span", { class: "tm-field-label" }, "Host or base URL", -1), U(J("input", {
 						"onUpdate:modelValue": n[19] ||= (t) => e.draft.tater_open_webui_llm_host = t,
 						type: "text",
 						placeholder: "http://127.0.0.1",
 						onInput: Se
 					}, null, 544), [[$, e.draft.tater_open_webui_llm_host]])])) : Z("", !0),
-					Ae(e.draft.tater_open_webui_llm_provider) ? (K(), q("label", pI, [n[86] ||= J("span", { class: "tm-field-label" }, "Port", -1), U(J("input", {
+					Ae(e.draft.tater_open_webui_llm_provider) ? (K(), q("label", uI, [n[86] ||= J("span", { class: "tm-field-label" }, "Port", -1), U(J("input", {
 						"onUpdate:modelValue": n[20] ||= (t) => e.draft.tater_open_webui_llm_port = t,
 						type: "number",
 						min: "1",
@@ -18813,14 +18786,14 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 						placeholder: "1234",
 						onInput: Se
 					}, null, 544), [[$, e.draft.tater_open_webui_llm_port]])])) : Z("", !0),
-					Ae(e.draft.tater_open_webui_llm_provider) ? (K(), q("label", mI, [n[87] ||= J("span", { class: "tm-field-label" }, "API key", -1), U(J("input", {
+					Ae(e.draft.tater_open_webui_llm_provider) ? (K(), q("label", dI, [n[87] ||= J("span", { class: "tm-field-label" }, "API key", -1), U(J("input", {
 						"onUpdate:modelValue": n[21] ||= (t) => e.draft.tater_open_webui_llm_api_key = t,
 						type: "password",
 						autocomplete: "off",
 						placeholder: "Optional",
 						onInput: Se
 					}, null, 544), [[$, e.draft.tater_open_webui_llm_api_key]])])) : Z("", !0),
-					Oe(e.draft.tater_open_webui_llm_provider) ? (K(), q("div", hI, [n[89] ||= J("span", { class: "tm-field-label" }, "Local model", -1), Y(mN, { label: "Local model" }, {
+					Oe(e.draft.tater_open_webui_llm_provider) ? (K(), q("div", fI, [n[89] ||= J("span", { class: "tm-field-label" }, "Local model", -1), Y(dN, { label: "Local model" }, {
 						default: En(() => [U(J("select", {
 							"aria-label": "Local model",
 							"onUpdate:modelValue": n[22] ||= (t) => e.draft.tater_open_webui_llm_model = t,
@@ -18830,25 +18803,25 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 							e.draft.tater_open_webui_llm_model && !Ke(e.draft.tater_open_webui_llm_provider, e.draft.tater_open_webui_llm_model) ? (K(), q("option", {
 								key: 0,
 								value: e.draft.tater_open_webui_llm_model
-							}, "Current: " + B(e.draft.tater_open_webui_llm_model), 9, gI)) : Z("", !0),
+							}, "Current: " + B(e.draft.tater_open_webui_llm_model), 9, pI)) : Z("", !0),
 							(K(!0), q(G, null, W(Ge(e.draft.tater_open_webui_llm_provider), (e) => (K(), q("option", {
 								key: String(e.model),
 								value: e.model
-							}, B(e.label || e.model), 9, _I))), 128))
+							}, B(e.label || e.model), 9, mI))), 128))
 						], 544), [[_s, e.draft.tater_open_webui_llm_model]])]),
 						_: 1
-					})])) : (K(), q("label", vI, [n[90] ||= J("span", { class: "tm-field-label" }, "Model id or alias", -1), U(J("input", {
+					})])) : (K(), q("label", hI, [n[90] ||= J("span", { class: "tm-field-label" }, "Model id or alias", -1), U(J("input", {
 						"onUpdate:modelValue": n[23] ||= (t) => e.draft.tater_open_webui_llm_model = t,
 						type: "text",
 						placeholder: "Coding model id or server alias",
 						onInput: Se
 					}, null, 544), [[$, e.draft.tater_open_webui_llm_model]])]))
 				])
-			])) : Z("", !0)], 64)) : i.value === "spudex" ? (K(), q(G, { key: 3 }, [J("article", yI, [n[94] ||= J("header", null, [J("div", null, [
+			])) : Z("", !0)], 64)) : i.value === "spudex" ? (K(), q(G, { key: 3 }, [J("article", gI, [n[94] ||= J("header", null, [J("div", null, [
 				J("span", { class: "tv-eyebrow" }, "Terminal model"),
 				J("h3", null, "Choose how Terminal thinks"),
 				J("p", null, "Share Tater's Base route for a simple setup, or give terminal and coding work a dedicated model.")
-			])], -1), J("div", bI, [J("button", {
+			])], -1), J("div", _I, [J("button", {
 				type: "button",
 				class: z({ active: !e.draft.spudex_llm_provider }),
 				onClick: n[24] ||= (e) => $e("base")
@@ -18856,9 +18829,9 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 				type: "button",
 				class: z({ active: !!e.draft.spudex_llm_provider }),
 				onClick: n[25] ||= (e) => $e("dedicated")
-			}, [...n[93] ||= [J("i", null, "2", -1), J("span", null, [J("strong", null, "Dedicated model"), J("small", null, "Separate model just for Terminal")], -1)]], 2)])]), e.draft.spudex_llm_provider ? (K(), q("article", xI, [
+			}, [...n[93] ||= [J("i", null, "2", -1), J("span", null, [J("strong", null, "Dedicated model"), J("small", null, "Separate model just for Terminal")], -1)]], 2)])]), e.draft.spudex_llm_provider ? (K(), q("article", vI, [
 				n[100] ||= J("header", null, [J("div", null, [J("h3", null, "Dedicated Terminal route"), J("p", null, "Only settings for the selected provider are shown.")])], -1),
-				J("div", SI, [(K(), q(G, null, W(b, (t) => J("button", {
+				J("div", yI, [(K(), q(G, null, W(b, (t) => J("button", {
 					key: t.value,
 					type: "button",
 					class: z({ active: e.draft.spudex_llm_provider === t.value }),
@@ -18867,13 +18840,13 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 					J("i", null, B(t.mark), 1),
 					J("span", null, [J("strong", null, B(t.label), 1), J("small", null, B(t.short), 1)]),
 					n[95] ||= J("b", { "aria-hidden": "true" }, "✓", -1)
-				], 10, CI)), 64))]),
-				J("div", wI, [Ae(e.draft.spudex_llm_provider) ? (K(), q("label", TI, [n[96] ||= J("span", { class: "tm-field-label" }, "Host or base URL", -1), U(J("input", {
+				], 10, bI)), 64))]),
+				J("div", xI, [Ae(e.draft.spudex_llm_provider) ? (K(), q("label", SI, [n[96] ||= J("span", { class: "tm-field-label" }, "Host or base URL", -1), U(J("input", {
 					"onUpdate:modelValue": n[26] ||= (t) => e.draft.spudex_llm_host = t,
 					type: "text",
 					placeholder: "http://127.0.0.1:1234",
 					onInput: Se
-				}, null, 544), [[$, e.draft.spudex_llm_host]])])) : Z("", !0), Oe(e.draft.spudex_llm_provider) ? (K(), q("div", EI, [n[98] ||= J("span", { class: "tm-field-label" }, "Local model", -1), Y(mN, { label: "Local model" }, {
+				}, null, 544), [[$, e.draft.spudex_llm_host]])])) : Z("", !0), Oe(e.draft.spudex_llm_provider) ? (K(), q("div", CI, [n[98] ||= J("span", { class: "tm-field-label" }, "Local model", -1), Y(dN, { label: "Local model" }, {
 					default: En(() => [U(J("select", {
 						"aria-label": "Local model",
 						"onUpdate:modelValue": n[27] ||= (t) => e.draft.spudex_llm_model = t,
@@ -18883,24 +18856,24 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 						e.draft.spudex_llm_model && !Ke(e.draft.spudex_llm_provider, e.draft.spudex_llm_model) ? (K(), q("option", {
 							key: 0,
 							value: e.draft.spudex_llm_model
-						}, "Current: " + B(e.draft.spudex_llm_model), 9, DI)) : Z("", !0),
+						}, "Current: " + B(e.draft.spudex_llm_model), 9, wI)) : Z("", !0),
 						(K(!0), q(G, null, W(Ge(e.draft.spudex_llm_provider), (e) => (K(), q("option", {
 							key: String(e.model),
 							value: e.model
-						}, B(e.label || e.model), 9, OI))), 128))
+						}, B(e.label || e.model), 9, TI))), 128))
 					], 544), [[_s, e.draft.spudex_llm_model]])]),
 					_: 1
-				})])) : e.draft.spudex_llm_provider === "spud_link" ? Z("", !0) : (K(), q("label", kI, [n[99] ||= J("span", { class: "tm-field-label" }, "Model id or alias", -1), U(J("input", {
+				})])) : e.draft.spudex_llm_provider === "spud_link" ? Z("", !0) : (K(), q("label", EI, [n[99] ||= J("span", { class: "tm-field-label" }, "Model id or alias", -1), U(J("input", {
 					"onUpdate:modelValue": n[28] ||= (t) => e.draft.spudex_llm_model = t,
 					type: "text",
 					onInput: Se
 				}, null, 544), [[$, e.draft.spudex_llm_model]])]))])
 			])) : Z("", !0)], 64)) : i.value === "decision" ? (K(), q(G, { key: 4 }, [
-				J("article", AI, [n[104] ||= J("header", null, [J("div", null, [
+				J("article", DI, [n[104] ||= J("header", null, [J("div", null, [
 					J("span", { class: "tv-eyebrow" }, "Optional fast routing check"),
 					J("h3", null, "Decision Router"),
 					J("p", null, "A small native decision model scores whether the current request matches one of Tater's available tools. It never chooses or runs the tool, and uncertain results use the normal route.")
-				]), J("span", { class: "tm-llm-section-chip" }, "llama.cpp · System One")], -1), J("div", jI, [
+				]), J("span", { class: "tm-llm-section-chip" }, "llama.cpp · System One")], -1), J("div", OI, [
 					J("button", {
 						type: "button",
 						class: z({ active: String(e.draft.hydra_decision_router_mode || "off") === "off" }),
@@ -18923,15 +18896,15 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 						}
 					}, [...n[103] ||= [J("i", null, "✓", -1), J("span", null, [J("strong", null, "Active"), J("small", null, "Route only high-score decisions")], -1)]], 2)
 				])]),
-				String(e.draft.hydra_decision_router_mode || "off") === "off" ? Z("", !0) : (K(), q("article", MI, [
+				String(e.draft.hydra_decision_router_mode || "off") === "off" ? Z("", !0) : (K(), q("article", kI, [
 					J("header", null, [n[105] ||= J("div", null, [
 						J("span", { class: "tv-eyebrow" }, "Decision model"),
 						J("h3", null, "Choose a downloaded router"),
 						J("p", null, "Decision models use their own small context and one slot. They do not consume a Base or Hydra role slot.")
-					], -1), J("span", NI, "Route at " + B(O.value) + "%+", 1)]),
-					J("div", PI, [J("div", FI, [
+					], -1), J("span", AI, "Route at " + B(O.value) + "%+", 1)]),
+					J("div", jI, [J("div", MI, [
 						n[107] ||= J("span", { class: "tm-field-label" }, "Downloaded decision model", -1),
-						Y(mN, { label: "Downloaded decision model" }, {
+						Y(dN, { label: "Downloaded decision model" }, {
 							default: En(() => [U(J("select", {
 								"aria-label": "Downloaded decision model",
 								"onUpdate:modelValue": n[32] ||= (t) => e.draft.hydra_decision_router_model = t,
@@ -18941,17 +18914,17 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 								e.draft.hydra_decision_router_model && !Ke("llama_cpp", e.draft.hydra_decision_router_model) ? (K(), q("option", {
 									key: 0,
 									value: e.draft.hydra_decision_router_model
-								}, "Current: " + B(e.draft.hydra_decision_router_model) + " (not installed)", 9, II)) : Z("", !0),
+								}, "Current: " + B(e.draft.hydra_decision_router_model) + " (not installed)", 9, NI)) : Z("", !0),
 								(K(!0), q(G, null, W(E.value, (e) => (K(), q("option", {
 									key: String(e.model),
 									value: e.model
-								}, B(e.label || e.filename || e.model), 9, LI))), 128))
+								}, B(e.label || e.filename || e.model), 9, PI))), 128))
 							], 544), [[_s, e.draft.hydra_decision_router_model]])]),
 							_: 1
 						}),
-						E.value.length ? (K(), q("small", zI, B(E.value.length) + " native System One model" + B(E.value.length === 1 ? "" : "s") + " available.", 1)) : (K(), q("small", RI, "No native decision model is downloaded. In Models, choose Decision routing and download a verified System One GGUF."))
+						E.value.length ? (K(), q("small", II, B(E.value.length) + " native System One model" + B(E.value.length === 1 ? "" : "s") + " available.", 1)) : (K(), q("small", FI, "No native decision model is downloaded. In Models, choose Decision routing and download a verified System One GGUF."))
 					])]),
-					J("section", BI, [J("div", null, [
+					J("section", LI, [J("div", null, [
 						n[108] ||= J("span", { class: "tv-eyebrow" }, "Route score threshold", -1),
 						J("strong", null, B(O.value) + "%", 1),
 						n[109] ||= J("p", null, "Only route scores at or above this value can take the fast route. Model confidence is reported separately below.", -1)
@@ -18965,12 +18938,12 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 							step: "0.01",
 							"aria-label": "Decision Router route score threshold",
 							onInput: Te
-						}, null, 40, VI),
+						}, null, 40, RI),
 						n[111] ||= J("span", null, "99%", -1)
 					])]),
-					J("aside", HI, [n[112] ||= J("i", null, "i", -1), J("span", null, [J("strong", null, B(e.draft.hydra_decision_router_mode === "observe" ? "Observe is risk-free" : "Active keeps the normal-route safety net"), 1), J("small", null, B(e.draft.hydra_decision_router_mode === "observe" ? "Every turn still follows the normal route while the score and timing are recorded in the Hydra ledger." : "High-confidence chat or unsupported requests go directly to the response model. High-confidence tool matches go to tool planning, and uncertain or failed decisions use the normal route."), 1)])])
+					J("aside", zI, [n[112] ||= J("i", null, "i", -1), J("span", null, [J("strong", null, B(e.draft.hydra_decision_router_mode === "observe" ? "Observe is risk-free" : "Active keeps the normal-route safety net"), 1), J("small", null, B(e.draft.hydra_decision_router_mode === "observe" ? "Every turn still follows the normal route while the score and timing are recorded in the Hydra ledger." : "High-confidence chat or unsupported requests go directly to the response model. High-confidence tool matches go to tool planning, and uncertain or failed decisions use the normal route."), 1)])])
 				])),
-				String(e.draft.hydra_decision_router_mode || "off") === "off" ? Z("", !0) : (K(), q("article", UI, [
+				String(e.draft.hydra_decision_router_mode || "off") === "off" ? Z("", !0) : (K(), q("article", BI, [
 					J("header", null, [n[113] ||= J("div", null, [
 						J("span", { class: "tv-eyebrow" }, "Model check"),
 						J("h3", null, "Test this router before it routes"),
@@ -18980,15 +18953,15 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 						type: "button",
 						disabled: f.value || !String(e.draft.hydra_decision_router_model || "").trim(),
 						onClick: st
-					}, B(f.value ? "Testing prompts…" : "Run router test"), 9, WI)]),
-					f.value ? (K(), q("div", GI, [...n[114] ||= [J("span", {
+					}, B(f.value ? "Testing prompts…" : "Run router test"), 9, VI)]),
+					f.value ? (K(), q("div", HI, [...n[114] ||= [J("span", {
 						class: "tm-decision-spinner",
 						"aria-hidden": "true"
 					}, null, -1), J("div", null, [J("strong", null, "Scoring the standard benchmark"), J("small", null, "The first run may also load the model. Larger routers can take a little while.")], -1)]])) : Z("", !0),
-					p.value ? (K(), q("div", KI, B(p.value), 1)) : Z("", !0),
+					p.value ? (K(), q("div", UI, B(p.value), 1)) : Z("", !0),
 					m.value.total ? (K(), q(G, { key: 2 }, [
 						J("section", { class: z(["tm-decision-verdict", String(m.value.verdict || "")]) }, [J("div", null, [J("span", null, B(m.value.verdict === "great" ? "✓" : m.value.verdict === "unsafe" ? "!" : "◎"), 1), J("div", null, [J("strong", null, B(m.value.verdict === "great" ? "Great fit" : m.value.verdict === "promising" ? "Promising" : m.value.verdict === "unsafe" ? "Unsafe at this threshold" : "Needs tuning"), 1), J("small", null, B(m.value.verdict_text), 1)])]), J("b", null, B(m.value.correct) + "/" + B(m.value.total), 1)], 2),
-						J("div", qI, [
+						J("div", WI, [
 							J("article", null, [
 								n[115] ||= J("span", null, "Raw accuracy", -1),
 								J("strong", null, B(m.value.accuracy_percent) + "%", 1),
@@ -19043,10 +19016,10 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 							J("i", null, B(e.correct ? "✓" : "×"), 1),
 							J("div", null, [J("strong", null, B(e.message), 1), J("small", null, B(e.category === "chat" ? "Normal chat" : e.category === "multi_tool" ? "Multi-tool request" : "Tool request") + " · expected " + B(e.expected === "needs_tool" ? "Needs tool" : "Chat") + " · chose " + B(e.actual === "needs_tool" ? "Needs tool" : "Chat") + " · route score " + B(ct(e.probability)) + " · confidence " + B(ct(e.confidence)) + " · " + B(e.elapsed_ms) + " ms", 1)]),
 							J("b", null, B(e.would_route ? "Would route" : "Fallback"), 1)
-						], 2))), 128))])], 8, JI)
+						], 2))), 128))])], 8, GI)
 					], 64)) : Z("", !0)
 				])),
-				String(e.draft.hydra_decision_router_mode || "off") === "off" ? Z("", !0) : (K(), q("article", YI, [
+				String(e.draft.hydra_decision_router_mode || "off") === "off" ? Z("", !0) : (K(), q("article", KI, [
 					J("header", null, [n[128] ||= J("div", null, [
 						J("span", { class: "tv-eyebrow" }, "Recent live decisions"),
 						J("h3", null, "See what the router is choosing"),
@@ -19056,12 +19029,12 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 						type: "button",
 						disabled: h.value,
 						onClick: n[33] ||= (e) => dt()
-					}, B(h.value ? "Refreshing…" : "Refresh"), 9, XI)]),
-					g.value ? (K(), q("div", ZI, B(g.value), 1)) : Z("", !0),
-					h.value && !j.value.length ? (K(), q("div", QI, [...n[129] ||= [J("span", {
+					}, B(h.value ? "Refreshing…" : "Refresh"), 9, qI)]),
+					g.value ? (K(), q("div", JI, B(g.value), 1)) : Z("", !0),
+					h.value && !j.value.length ? (K(), q("div", YI, [...n[129] ||= [J("span", {
 						class: "tm-decision-spinner",
 						"aria-hidden": "true"
-					}, null, -1), J("div", null, [J("strong", null, "Loading recent decisions"), J("small", null, "Reading the Decision Router results recorded in the Hydra ledger.")], -1)]])) : j.value.length ? (K(), q("div", eL, [(K(!0), q(G, null, W(j.value, (e, t) => (K(), q("article", {
+					}, null, -1), J("div", null, [J("strong", null, "Loading recent decisions"), J("small", null, "Reading the Decision Router results recorded in the Hydra ledger.")], -1)]])) : j.value.length ? (K(), q("div", ZI, [(K(!0), q(G, null, W(j.value, (e, t) => (K(), q("article", {
 						key: `${e.timestamp || t}-${t}`,
 						class: z({
 							routed: e.above_threshold,
@@ -19073,20 +19046,20 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 							J("strong", null, B(e.message || e.error || "Decision Router result"), 1),
 							J("time", null, B(ut(e)), 1)
 						]),
-						J("div", tL, [
+						J("div", QI, [
 							J("span", null, [n[131] ||= J("small", null, "Route score", -1), J("b", null, B(ct(e.probability)), 1)]),
 							J("span", null, [n[132] ||= J("small", null, "Model confidence", -1), J("b", null, B(ct(e.confidence)), 1)]),
 							J("span", null, [n[133] ||= J("small", null, "Recorded threshold", -1), J("b", null, B(ct(e.threshold)), 1)]),
 							J("span", null, [n[134] ||= J("small", null, "Decision time", -1), J("b", null, B(e.elapsed_ms) + " ms", 1)])
 						]),
 						J("footer", null, [J("span", null, B(e.platform || "unknown") + " · " + B(e.mode === "observe" ? "Observe" : "Active") + " · " + B(e.outcome || "recorded"), 1), J("b", null, B(e.route_effect), 1)])
-					], 2))), 128))])) : (K(), q("div", $I, [...n[130] ||= [J("strong", null, "No decisions recorded yet", -1), J("small", null, "Send a request through Tater with Observe or Active enabled. Results refresh automatically while this tab is open.", -1)]]))
+					], 2))), 128))])) : (K(), q("div", XI, [...n[130] ||= [J("strong", null, "No decisions recorded yet", -1), J("small", null, "Send a request through Tater with Observe or Active enabled. Results refresh automatically while this tab is open.", -1)]]))
 				]))
-			], 64)) : (K(), q(G, { key: 5 }, [J("article", nL, [J("header", null, [n[136] ||= J("div", null, [
+			], 64)) : (K(), q(G, { key: 5 }, [J("article", $I, [J("header", null, [n[136] ||= J("div", null, [
 				J("span", { class: "tv-eyebrow" }, "Advanced routing"),
 				J("h3", null, "Beast Mode"),
 				J("p", null, "Give planning, critique, and final responses their own models. Keep this disabled unless you intentionally run a multi-model setup.")
-			], -1), J("label", rL, [
+			], -1), J("label", eL, [
 				U(J("input", {
 					"onUpdate:modelValue": n[34] ||= (t) => e.draft.hydra_beast_mode_enabled = t,
 					type: "checkbox",
@@ -19102,18 +19075,18 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 					n[137] ||= J("span", { class: "tv-eyebrow" }, "Beast role", -1),
 					J("h3", null, B(t.label), 1),
 					J("p", null, B(t.description), 1)
-				]), J("span", iL, B(Pe(t.id)), 1)]),
-				J("div", aL, [J("button", {
+				]), J("span", tL, B(Pe(t.id)), 1)]),
+				J("div", nL, [J("button", {
 					type: "button",
 					disabled: !e.draft.hydra_beast_mode_enabled,
 					class: z({ active: Me(t.id) }),
 					onClick: (e) => Ie(t.id, "base")
-				}, [n[139] ||= J("i", null, "1", -1), J("span", null, [n[138] ||= J("strong", null, "Use Base model", -1), J("small", null, B(V(Ne(t.id)) && xe.value === "per_head" ? "Share the model with a stable role slot" : "Share the Base model and context slot"), 1)])], 10, oL), J("button", {
+				}, [n[139] ||= J("i", null, "1", -1), J("span", null, [n[138] ||= J("strong", null, "Use Base model", -1), J("small", null, B(V(Ne(t.id)) && xe.value === "per_head" ? "Share the model with a stable role slot" : "Share the Base model and context slot"), 1)])], 10, rL), J("button", {
 					type: "button",
 					disabled: !e.draft.hydra_beast_mode_enabled,
 					class: z({ active: !Me(t.id) }),
 					onClick: (e) => Ie(t.id, "dedicated")
-				}, [...n[140] ||= [J("i", null, "2", -1), J("span", null, [J("strong", null, "Dedicated model"), J("small", null, "Choose a separate model for this role")], -1)]], 10, sL)]),
+				}, [...n[140] ||= [J("i", null, "2", -1), J("span", null, [J("strong", null, "Dedicated model"), J("small", null, "Choose a separate model for this role")], -1)]], 10, iL)]),
 				Me(t.id) ? Z("", !0) : (K(), q("div", {
 					key: 0,
 					class: "tm-llm-provider-picker compact",
@@ -19129,26 +19102,26 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 					J("i", null, B(r.mark), 1),
 					J("span", null, [J("strong", null, B(r.label), 1), J("small", null, B(r.short), 1)]),
 					n[141] ||= J("b", { "aria-hidden": "true" }, "✓", -1)
-				], 10, lL)), 64))], 8, cL)),
-				J("div", uL, [
-					Ae(e.draft[je(t.id, "provider")]) ? (K(), q("label", dL, [n[142] ||= J("span", { class: "tm-field-label" }, "Host or base URL", -1), U(J("input", {
+				], 10, oL)), 64))], 8, aL)),
+				J("div", sL, [
+					Ae(e.draft[je(t.id, "provider")]) ? (K(), q("label", cL, [n[142] ||= J("span", { class: "tm-field-label" }, "Host or base URL", -1), U(J("input", {
 						"onUpdate:modelValue": (n) => e.draft[je(t.id, "host")] = n,
 						type: "text",
 						onInput: Se
-					}, null, 40, fL), [[$, e.draft[je(t.id, "host")]]])])) : Z("", !0),
-					Ae(e.draft[je(t.id, "provider")]) ? (K(), q("label", pL, [n[143] ||= J("span", { class: "tm-field-label" }, "Port", -1), U(J("input", {
+					}, null, 40, lL), [[$, e.draft[je(t.id, "host")]]])])) : Z("", !0),
+					Ae(e.draft[je(t.id, "provider")]) ? (K(), q("label", uL, [n[143] ||= J("span", { class: "tm-field-label" }, "Port", -1), U(J("input", {
 						"onUpdate:modelValue": (n) => e.draft[je(t.id, "port")] = n,
 						type: "number",
 						min: "1",
 						max: "65535",
 						onInput: Se
-					}, null, 40, mL), [[$, e.draft[je(t.id, "port")]]])])) : Z("", !0),
-					Ae(e.draft[je(t.id, "provider")]) ? (K(), q("label", hL, [n[144] ||= J("span", { class: "tm-field-label" }, "API key", -1), U(J("input", {
+					}, null, 40, dL), [[$, e.draft[je(t.id, "port")]]])])) : Z("", !0),
+					Ae(e.draft[je(t.id, "provider")]) ? (K(), q("label", fL, [n[144] ||= J("span", { class: "tm-field-label" }, "API key", -1), U(J("input", {
 						"onUpdate:modelValue": (n) => e.draft[je(t.id, "api_key")] = n,
 						type: "password",
 						onInput: Se
-					}, null, 40, gL), [[$, e.draft[je(t.id, "api_key")]]])])) : Z("", !0),
-					Oe(e.draft[je(t.id, "provider")]) ? (K(), q("div", _L, [n[146] ||= J("span", { class: "tm-field-label" }, "Local model", -1), Y(mN, { label: "Local model" }, {
+					}, null, 40, pL), [[$, e.draft[je(t.id, "api_key")]]])])) : Z("", !0),
+					Oe(e.draft[je(t.id, "provider")]) ? (K(), q("div", mL, [n[146] ||= J("span", { class: "tm-field-label" }, "Local model", -1), Y(dN, { label: "Local model" }, {
 						default: En(() => [U(J("select", {
 							"aria-label": "Local model",
 							"onUpdate:modelValue": (n) => e.draft[je(t.id, "model")] = n,
@@ -19158,50 +19131,50 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 							e.draft[je(t.id, "model")] && !Ke(e.draft[je(t.id, "provider")], e.draft[je(t.id, "model")]) ? (K(), q("option", {
 								key: 0,
 								value: e.draft[je(t.id, "model")]
-							}, "Current: " + B(e.draft[je(t.id, "model")]), 9, yL)) : Z("", !0),
+							}, "Current: " + B(e.draft[je(t.id, "model")]), 9, gL)) : Z("", !0),
 							(K(!0), q(G, null, W(Ge(e.draft[je(t.id, "provider")]), (e) => (K(), q("option", {
 								key: String(e.model),
 								value: e.model
-							}, B(e.label || e.model), 9, bL))), 128))
-						], 40, vL), [[_s, e.draft[je(t.id, "model")]]])]),
+							}, B(e.label || e.model), 9, _L))), 128))
+						], 40, hL), [[_s, e.draft[je(t.id, "model")]]])]),
 						_: 2
-					}, 1024)])) : !Me(t.id) && e.draft[je(t.id, "provider")] !== "spud_link" ? (K(), q("label", xL, [n[147] ||= J("span", { class: "tm-field-label" }, "Model id or alias", -1), U(J("input", {
+					}, 1024)])) : !Me(t.id) && e.draft[je(t.id, "provider")] !== "spud_link" ? (K(), q("label", vL, [n[147] ||= J("span", { class: "tm-field-label" }, "Model id or alias", -1), U(J("input", {
 						"onUpdate:modelValue": (n) => e.draft[je(t.id, "model")] = n,
 						type: "text",
 						onInput: Se
-					}, null, 40, SL), [[$, e.draft[je(t.id, "model")]]])])) : Z("", !0)
+					}, null, 40, yL), [[$, e.draft[je(t.id, "model")]]])])) : Z("", !0)
 				])
 			], 2)), 64))], 64))
 		]));
 	}
-}), wL = { class: "mq-top" }, TL = { class: "mq-context" }, EL = ["aria-label"], DL = { "aria-hidden": "true" }, OL = { class: "mq-body" }, kL = { class: "mq-heading" }, AL = { id: "tm-model-apply-title" }, jL = {
+}), xL = { class: "mq-top" }, SL = { class: "mq-context" }, CL = ["aria-label"], wL = { "aria-hidden": "true" }, TL = { class: "mq-body" }, EL = { class: "mq-heading" }, DL = { id: "tm-model-apply-title" }, OL = {
 	class: "mq-stages",
 	"aria-label": "Model apply stages"
-}, ML = ["aria-label"], NL = {
+}, kL = ["aria-label"], AL = {
 	key: 2,
 	class: "mq-stage-dot",
 	"aria-hidden": "true"
-}, PL = {
+}, jL = {
 	key: 0,
 	class: "mq-overall"
-}, FL = { class: "mq-progress-heading" }, IL = ["aria-label", "aria-valuenow"], LL = {
+}, ML = { class: "mq-progress-heading" }, NL = ["aria-label", "aria-valuenow"], PL = {
 	key: 0,
 	class: "mq-count"
-}, RL = {
+}, FL = {
 	key: 1,
 	class: "mq-waiting"
-}, zL = {
+}, IL = {
 	key: 2,
 	class: "mq-models",
 	"aria-label": "Model loading queue"
-}, BL = { class: "mq-model-icon" }, VL = { class: "mq-model-name" }, HL = { class: "mq-model-state" }, UL = { key: 0 }, WL = ["aria-label", "aria-valuenow"], GL = {
+}, LL = { class: "mq-model-icon" }, RL = { class: "mq-model-name" }, zL = { class: "mq-model-state" }, BL = { key: 0 }, VL = ["aria-label", "aria-valuenow"], HL = {
 	key: 4,
 	class: "mq-errors",
 	role: "alert"
-}, KL = { class: "mq-details" }, qL = { class: "mq-technical" }, JL = { key: 0 }, YL = { class: "mq-stage-details" }, XL = { key: 0 }, ZL = { class: "mq-footer" }, QL = {
+}, UL = { class: "mq-details" }, WL = { class: "mq-technical" }, GL = { key: 0 }, KL = { class: "mq-stage-details" }, qL = { key: 0 }, JL = { class: "mq-footer" }, YL = {
 	class: "mq-dock-copy",
 	role: "status"
-}, $L = /* @__PURE__ */ fr({
+}, XL = /* @__PURE__ */ fr({
 	__name: "LocalModelApplyProgress",
 	props: {
 		open: { type: Boolean },
@@ -19380,19 +19353,19 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 				"aria-modal": "true",
 				"aria-labelledby": "tm-model-apply-title"
 			}, [
-				J("header", wL, [
+				J("header", xL, [
 					n[1] ||= J("span", { class: "mq-brand" }, "Tater", -1),
-					J("span", TL, B(l.value ? "Startup" : "Model settings"), 1),
+					J("span", SL, B(l.value ? "Startup" : "Model settings"), 1),
 					J("button", {
 						class: "mq-icon-button",
 						type: "button",
 						"aria-label": v.value ? "Close model progress" : "Hide model progress",
 						onClick: R
-					}, [J("span", DL, B(v.value ? "×" : "−"), 1)], 8, EL)
+					}, [J("span", wL, B(v.value ? "×" : "−"), 1)], 8, CL)
 				]),
-				J("div", OL, [
-					J("div", kL, [J("h2", AL, B(O.value), 1), J("p", null, B(y.value ? l.value ? "Your selected models are ready to use." : "Your saved model setup is ready to use." : l.value ? "Preparing your saved models and services." : "Applying your saved model choices and reconnecting services."), 1)]),
-					J("ol", jL, [(K(!0), q(G, null, W(T.value, (e) => (K(), q("li", {
+				J("div", TL, [
+					J("div", EL, [J("h2", DL, B(O.value), 1), J("p", null, B(y.value ? l.value ? "Your selected models are ready to use." : "Your saved model setup is ready to use." : l.value ? "Preparing your saved models and services." : "Applying your saved model choices and reconnecting services."), 1)]),
+					J("ol", OL, [(K(!0), q(G, null, W(T.value, (e) => (K(), q("li", {
 						key: e.id,
 						class: z(e.state),
 						"aria-label": e.label + ": " + e.detail
@@ -19402,9 +19375,9 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 					})) : e.state === "error" ? (K(), va(Hc, {
 						key: 1,
 						name: "alert"
-					})) : (K(), q("i", NL, B(e.state === "skipped" ? "−" : ""), 1)), J("span", null, B(e.id === "ready" && e.state === "error" ? "Needs attention" : A[e.id] || e.label), 1)], 10, ML))), 128))]),
-					o.value.length || d.value || f.value === "__unload_previous__" || E.value || v.value ? (K(), q("div", PL, [
-						J("div", FL, [J("strong", null, B(k.value), 1), J("span", null, B(Math.round(b.value)) + "%", 1)]),
+					})) : (K(), q("i", AL, B(e.state === "skipped" ? "−" : ""), 1)), J("span", null, B(e.id === "ready" && e.state === "error" ? "Needs attention" : A[e.id] || e.label), 1)], 10, kL))), 128))]),
+					o.value.length || d.value || f.value === "__unload_previous__" || E.value || v.value ? (K(), q("div", jL, [
+						J("div", ML, [J("strong", null, B(k.value), 1), J("span", null, B(Math.round(b.value)) + "%", 1)]),
 						J("div", {
 							class: "mq-track",
 							role: "progressbar",
@@ -19412,16 +19385,16 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 							"aria-valuenow": Math.round(b.value),
 							"aria-valuemin": "0",
 							"aria-valuemax": "100"
-						}, [J("span", { style: ne({ width: b.value + "%" }) }, null, 4)], 8, IL),
-						o.value.length ? (K(), q("div", LL, [J("span", null, B(D.value) + " of " + B(o.value.length) + " " + B(o.value.length === 1 ? "model" : "models") + " " + B(e.snapshot.load_models === !1 ? "downloaded" : "ready"), 1), n[2] ||= J("span", null, "Local models", -1)])) : Z("", !0)
-					])) : (K(), q("div", RL, [Y(Hc, { name: "server" }), J("div", null, [J("strong", null, B(S.value), 1), J("span", null, B(C.value), 1)])])),
-					o.value.length ? (K(), q("div", zL, [(K(!0), q(G, null, W(o.value, (e) => (K(), q("article", {
+						}, [J("span", { style: ne({ width: b.value + "%" }) }, null, 4)], 8, NL),
+						o.value.length ? (K(), q("div", PL, [J("span", null, B(D.value) + " of " + B(o.value.length) + " " + B(o.value.length === 1 ? "model" : "models") + " " + B(e.snapshot.load_models === !1 ? "downloaded" : "ready"), 1), n[2] ||= J("span", null, "Local models", -1)])) : Z("", !0)
+					])) : (K(), q("div", FL, [Y(Hc, { name: "server" }), J("div", null, [J("strong", null, B(S.value), 1), J("span", null, B(C.value), 1)])])),
+					o.value.length ? (K(), q("div", IL, [(K(!0), q(G, null, W(o.value, (e) => (K(), q("article", {
 						key: String(e.key || e.model),
 						class: z(["mq-model", [re(e), { active: F(e) }]])
 					}, [
-						J("span", BL, [Y(Hc, { name: I(e) }, null, 8, ["name"])]),
-						J("div", VL, [J("strong", null, B(j(e)), 1), J("span", null, B(M(e)), 1)]),
-						J("div", HL, [J("span", null, B(N(e)), 1), F(e) ? (K(), q("small", UL, B(Math.round(P(e))) + "%", 1)) : Z("", !0)]),
+						J("span", LL, [Y(Hc, { name: I(e) }, null, 8, ["name"])]),
+						J("div", RL, [J("strong", null, B(j(e)), 1), J("span", null, B(M(e)), 1)]),
+						J("div", zL, [J("span", null, B(N(e)), 1), F(e) ? (K(), q("small", BL, B(Math.round(P(e))) + "%", 1)) : Z("", !0)]),
 						F(e) ? (K(), q("div", {
 							key: 0,
 							class: "mq-track mq-row-track",
@@ -19430,7 +19403,7 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 							"aria-valuenow": Math.round(P(e)),
 							"aria-valuemin": "0",
 							"aria-valuemax": "100"
-						}, [J("span", { style: ne({ width: P(e) + "%" }) }, null, 4)], 8, WL)) : Z("", !0)
+						}, [J("span", { style: ne({ width: P(e) + "%" }) }, null, 4)], 8, VL)) : Z("", !0)
 					], 2))), 128))])) : Z("", !0),
 					E.value ? (K(), q("div", {
 						key: 3,
@@ -19440,24 +19413,24 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 						}]),
 						role: "status"
 					}, [Y(Hc, { name: "refresh" }), J("div", null, [J("strong", null, B(g.value ? "Cores and Portals are restarting" : h.value.error || ce(h.value) ? "Platform refresh needs attention" : "Cores and Portals refreshed"), 1), J("span", null, B(le(h.value)), 1)])], 2)) : Z("", !0),
-					s.value.length ? (K(), q("div", GL, [Y(Hc, { name: "alert" }), J("div", null, [n[3] ||= J("strong", null, "What needs attention", -1), (K(!0), q(G, null, W(s.value, (e) => (K(), q("span", { key: e }, B(e), 1))), 128))])])) : Z("", !0),
-					J("details", KL, [J("summary", null, [Y(Hc, { name: "chevron" }), n[4] ||= X("Technical details", -1)]), J("div", qL, [
+					s.value.length ? (K(), q("div", HL, [Y(Hc, { name: "alert" }), J("div", null, [n[3] ||= J("strong", null, "What needs attention", -1), (K(!0), q(G, null, W(s.value, (e) => (K(), q("span", { key: e }, B(e), 1))), 128))])])) : Z("", !0),
+					J("details", UL, [J("summary", null, [Y(Hc, { name: "chevron" }), n[4] ||= X("Technical details", -1)]), J("div", WL, [
 						J("p", null, B(C.value), 1),
 						J("p", null, B(w.value), 1),
-						c.value || d.value || u.value ? (K(), q("p", JL, "This continues safely if you hide the window or change tabs.")) : Z("", !0),
-						J("dl", YL, [(K(!0), q(G, null, W(T.value, (e) => (K(), q(G, { key: e.id }, [J("dt", null, B(e.label) + " · " + B(ie(e.state)), 1), J("dd", null, B(e.detail), 1)], 64))), 128))]),
+						c.value || d.value || u.value ? (K(), q("p", GL, "This continues safely if you hide the window or change tabs.")) : Z("", !0),
+						J("dl", KL, [(K(!0), q(G, null, W(T.value, (e) => (K(), q(G, { key: e.id }, [J("dt", null, B(e.label) + " · " + B(ie(e.state)), 1), J("dd", null, B(e.detail), 1)], 64))), 128))]),
 						(K(!0), q(G, null, W(o.value, (e) => (K(), q("div", {
 							key: String(e.key || e.model),
 							class: "mq-item-details"
 						}, [
 							J("strong", null, B(M(e)) + " · " + B(e.provider_label || ae(e.provider)), 1),
 							J("code", null, B(e.model || e.filename), 1),
-							e.filename && e.filename !== e.model ? (K(), q("code", XL, B(e.filename), 1)) : Z("", !0),
+							e.filename && e.filename !== e.model ? (K(), q("code", qL, B(e.filename), 1)) : Z("", !0),
 							J("span", null, [X(B(ie(e.status)) + " · " + B(Math.round(P(e))) + "%", 1), e.message ? (K(), q(G, { key: 0 }, [X(" · " + B(e.message), 1)], 64)) : Z("", !0)])
 						]))), 128))
 					])])
 				]),
-				J("footer", ZL, [J("span", null, B(v.value ? s.value.length ? "Your saved settings remain available." : "Your workspace and models are ready." : "Model loading continues in the background."), 1), J("button", {
+				J("footer", JL, [J("span", null, B(v.value ? s.value.length ? "Your saved settings remain available." : "Your workspace and models are ready." : "Model loading continues in the background."), 1), J("button", {
 					class: "tv-button primary",
 					type: "button",
 					onClick: R
@@ -19473,7 +19446,7 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 			"aria-label": "Background model progress"
 		}, [
 			Y(Hc, { name: s.value.length ? "alert" : y.value ? "check" : "brain" }, null, 8, ["name"]),
-			J("div", QL, [J("strong", null, B(s.value.length ? "A model needs attention" : y.value ? "Your models are ready" : u.value && !o.value.length ? "Starting Tater" : "Models are preparing"), 1), J("span", null, B(k.value), 1)]),
+			J("div", YL, [J("strong", null, B(s.value.length ? "A model needs attention" : y.value ? "Your models are ready" : u.value && !o.value.length ? "Starting Tater" : "Models are preparing"), 1), J("span", null, B(k.value), 1)]),
 			J("button", {
 				class: "tv-button",
 				type: "button",
@@ -19487,28 +19460,28 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 			}, [Y(Hc, { name: "close" })])
 		], 2)) : Z("", !0)]))], 64));
 	}
-}), eR = { class: "tm-media-header" }, tR = { class: "tm-media-title" }, nR = { class: "tv-eyebrow" }, rR = { class: "tm-speech-status-chip" }, iR = { class: "tm-media-section" }, aR = { class: "tm-speech-section-heading compact" }, oR = ["aria-label"], sR = ["onClick"], cR = {
+}), ZL = { class: "tm-media-header" }, QL = { class: "tm-media-title" }, $L = { class: "tv-eyebrow" }, eR = { class: "tm-speech-status-chip" }, tR = { class: "tm-media-section" }, nR = { class: "tm-speech-section-heading compact" }, rR = ["aria-label"], iR = ["onClick"], aR = {
 	key: 0,
 	class: "tm-media-section tm-media-provider-section"
-}, lR = { class: "tm-speech-section-heading compact" }, uR = ["aria-label"], dR = ["onClick"], fR = { class: "tm-media-config-panel" }, pR = {
+}, oR = { class: "tm-speech-section-heading compact" }, sR = ["aria-label"], cR = ["onClick"], lR = { class: "tm-media-config-panel" }, uR = {
 	key: 0,
 	class: "tm-field-grid"
-}, mR = { class: "tm-field" }, hR = { class: "tm-field" }, gR = {
+}, dR = { class: "tm-field" }, fR = { class: "tm-field" }, pR = {
 	key: 1,
 	class: "tm-field tm-field-wide"
-}, _R = { class: "tm-field-label" }, vR = ["value"], yR = ["value"], bR = { key: 0 }, xR = { key: 1 }, SR = {
+}, mR = { class: "tm-field-label" }, hR = ["value"], gR = ["value"], _R = { key: 0 }, vR = { key: 1 }, yR = {
 	key: 2,
 	class: "tm-field tm-field-wide"
-}, CR = {
+}, bR = {
 	key: 1,
 	class: "tm-media-route-summary"
-}, wR = {
+}, xR = {
 	key: 2,
 	class: "tm-media-limits"
-}, TR = {
+}, SR = {
 	key: 3,
 	class: "tm-speech-advanced tm-media-advanced"
-}, ER = { class: "tm-field-grid" }, DR = { class: "tm-field" }, OR = /* @__PURE__ */ fr({
+}, CR = { class: "tm-field-grid" }, wR = { class: "tm-field" }, TR = /* @__PURE__ */ fr({
 	__name: "MediaModelCard",
 	props: {
 		kind: {},
@@ -19604,12 +19577,12 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 			return m.value.some((e) => String(e.provider || "") === p.value && String(e.model || "") === String(n.draft[c.value] || ""));
 		}
 		return (t, n) => (K(), q("article", { class: z(["tm-form-card tm-media-card", `tm-media-${e.kind}`]) }, [
-			J("header", eR, [J("div", tR, [J("i", null, B(b.value.mark), 1), J("div", null, [
-				J("span", nR, B(b.value.eyebrow), 1),
+			J("header", ZL, [J("div", QL, [J("i", null, B(b.value.mark), 1), J("div", null, [
+				J("span", $L, B(b.value.eyebrow), 1),
 				J("h3", null, B(i.value), 1),
 				J("p", null, B(b.value.short), 1)
-			])]), J("span", rR, B(v.value.label), 1)]),
-			J("section", iR, [J("div", aR, [J("div", null, [J("h3", null, B(b.value.title), 1), n[7] ||= J("p", null, "Pick the routing behavior first. Detailed settings appear only when they are needed.", -1)]), n[8] ||= J("span", null, "Route", -1)]), J("div", {
+			])]), J("span", eR, B(v.value.label), 1)]),
+			J("section", tR, [J("div", nR, [J("div", null, [J("h3", null, B(b.value.title), 1), n[7] ||= J("p", null, "Pick the routing behavior first. Detailed settings appear only when they are needed.", -1)]), n[8] ||= J("span", null, "Route", -1)]), J("div", {
 				class: "tm-choice-grid tm-media-mode-grid",
 				role: "group",
 				"aria-label": `${i.value} mode`
@@ -19622,9 +19595,9 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 				J("i", null, B(e.mark), 1),
 				J("span", null, [J("strong", null, B(e.label), 1), J("small", null, B(e.short), 1)]),
 				n[9] ||= J("b", null, "✓", -1)
-			], 10, sR))), 128))], 8, oR)]),
-			f.value === "dedicated" || f.value === "api" ? (K(), q("section", cR, [
-				J("div", lR, [n[10] ||= J("div", null, [J("h3", null, "Choose a provider"), J("p", null, "Only compatible installed models appear in the local model picker.")], -1), J("span", null, B(y.value.label), 1)]),
+			], 10, iR))), 128))], 8, rR)]),
+			f.value === "dedicated" || f.value === "api" ? (K(), q("section", aR, [
+				J("div", oR, [n[10] ||= J("div", null, [J("h3", null, "Choose a provider"), J("p", null, "Only compatible installed models appear in the local model picker.")], -1), J("span", null, B(y.value.label), 1)]),
 				J("div", {
 					class: "tm-choice-grid tm-media-provider-grid",
 					role: "group",
@@ -19638,8 +19611,8 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 					J("i", null, B(e.mark), 1),
 					J("span", null, [J("strong", null, B(e.label), 1), J("small", null, B(e.short), 1)]),
 					n[11] ||= J("b", null, "✓", -1)
-				], 10, dR)), 64))], 8, uR),
-				J("div", fR, [T() ? (K(), q("div", pR, [J("label", mR, [
+				], 10, cR)), 64))], 8, sR),
+				J("div", lR, [T() ? (K(), q("div", uR, [J("label", dR, [
 					n[12] ||= J("span", { class: "tm-field-label" }, "API base URL", -1),
 					U(J("input", {
 						"onUpdate:modelValue": n[0] ||= (t) => e.draft[l.value] = t,
@@ -19648,7 +19621,7 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 						onInput: x
 					}, null, 544), [[$, e.draft[l.value]]]),
 					n[13] ||= J("small", null, "Base URL for the compatible inference server.", -1)
-				]), J("label", hR, [
+				]), J("label", fR, [
 					n[14] ||= J("span", { class: "tm-field-label" }, "API key", -1),
 					U(J("input", {
 						"onUpdate:modelValue": n[1] ||= (t) => e.draft[u.value] = t,
@@ -19658,9 +19631,9 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 						onInput: x
 					}, null, 544), [[$, e.draft[u.value]]]),
 					n[15] ||= J("small", null, "Stored locally and sent only to this endpoint.", -1)
-				])])) : Z("", !0), w() ? (K(), q("div", gR, [
-					J("span", _R, "Downloaded " + B(e.kind) + " model", 1),
-					Y(mN, { label: "Downloaded  model" }, {
+				])])) : Z("", !0), w() ? (K(), q("div", pR, [
+					J("span", mR, "Downloaded " + B(e.kind) + " model", 1),
+					Y(dN, { label: "Downloaded  model" }, {
 						default: En(() => [U(J("select", {
 							"aria-label": "Downloaded  model",
 							"onUpdate:modelValue": n[2] ||= (t) => e.draft[c.value] = t,
@@ -19670,16 +19643,16 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 							e.draft[c.value] && !E() ? (K(), q("option", {
 								key: 0,
 								value: e.draft[c.value]
-							}, "Current: " + B(e.draft[c.value]), 9, vR)) : Z("", !0),
+							}, "Current: " + B(e.draft[c.value]), 9, hR)) : Z("", !0),
 							(K(!0), q(G, null, W(h.value, (e) => (K(), q("option", {
 								key: String(e.model),
 								value: e.model
-							}, B(e.model), 9, yR))), 128))
+							}, B(e.model), 9, gR))), 128))
 						], 544), [[_s, e.draft[c.value]]])]),
 						_: 1
 					}),
-					h.value.length ? (K(), q("small", xR, B(h.value.length) + " compatible downloaded model" + B(h.value.length === 1 ? "" : "s") + " available.", 1)) : (K(), q("small", bR, "No compatible downloaded models were detected. Add one from the Models tab."))
-				])) : (K(), q("label", SR, [
+					h.value.length ? (K(), q("small", vR, B(h.value.length) + " compatible downloaded model" + B(h.value.length === 1 ? "" : "s") + " available.", 1)) : (K(), q("small", _R, "No compatible downloaded models were detected. Add one from the Models tab."))
+				])) : (K(), q("label", yR, [
 					n[17] ||= J("span", { class: "tm-field-label" }, "Model name or alias", -1),
 					U(J("input", {
 						"onUpdate:modelValue": n[3] ||= (t) => e.draft[c.value] = t,
@@ -19689,8 +19662,8 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 					}, null, 544), [[$, e.draft[c.value]]]),
 					n[18] ||= J("small", null, "Use the exact model name exposed by the selected server.", -1)
 				]))])
-			])) : (K(), q("div", CR, [J("i", null, B(v.value.mark), 1), J("span", null, [J("strong", null, B(v.value.label), 1), J("small", null, B(v.value.short) + " No separate provider configuration is required.", 1)])])),
-			e.kind === "vision" ? Z("", !0) : (K(), q("section", wR, [n[20] ||= J("div", null, [J("strong", null, "Maximum clip length"), J("small", null, "Longer clips need more context and take longer to process.")], -1), J("label", null, [U(J("input", {
+			])) : (K(), q("div", bR, [J("i", null, B(v.value.mark), 1), J("span", null, [J("strong", null, B(v.value.label), 1), J("small", null, B(v.value.short) + " No separate provider configuration is required.", 1)])])),
+			e.kind === "vision" ? Z("", !0) : (K(), q("section", xR, [n[20] ||= J("div", null, [J("strong", null, "Maximum clip length"), J("small", null, "Longer clips need more context and take longer to process.")], -1), J("label", null, [U(J("input", {
 				"onUpdate:modelValue": n[4] ||= (t) => e.draft[d.value] = t,
 				type: "range",
 				min: "1",
@@ -19705,7 +19678,7 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 				step: "1",
 				onInput: x
 			}, null, 544), [[$, e.draft[d.value]]]), n[19] ||= X(" sec", -1)])])])),
-			e.kind === "vision" ? (K(), q("details", TR, [n[23] ||= J("summary", null, [J("span", null, [J("strong", null, "llama.cpp performance"), J("small", null, "Context allocation and automatic cache affinity")]), J("b", null, "⌄")], -1), J("div", ER, [J("label", DR, [
+			e.kind === "vision" ? (K(), q("details", SR, [n[23] ||= J("summary", null, [J("span", null, [J("strong", null, "llama.cpp performance"), J("small", null, "Context allocation and automatic cache affinity")]), J("b", null, "⌄")], -1), J("div", CR, [J("label", wR, [
 				n[21] ||= J("span", { class: "tm-field-label" }, "Multimodal context", -1),
 				U(J("input", {
 					"onUpdate:modelValue": n[6] ||= (t) => e.draft.hydra_llama_cpp_vision_context_tokens = t,
@@ -19719,58 +19692,58 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 			])])])) : Z("", !0)
 		], 2));
 	}
-}), kR = { class: "tm-stack tm-tts-profile" }, AR = { class: "tm-form-card tm-tts-engine-card" }, jR = { class: "tm-speech-status-chip" }, MR = {
+}), ER = { class: "tm-stack tm-tts-profile" }, DR = { class: "tm-form-card tm-tts-engine-card" }, OR = { class: "tm-speech-status-chip" }, kR = {
 	key: 0,
 	class: "tv-notice error"
-}, NR = { class: "tm-engine-chooser" }, PR = ["aria-label"], FR = ["aria-pressed", "onClick"], IR = {
+}, AR = { class: "tm-engine-chooser" }, jR = ["aria-label"], MR = ["aria-pressed", "onClick"], NR = {
 	key: 0,
 	class: "tm-form-card tm-speech-inherit-card"
-}, LR = {
+}, PR = {
 	key: 1,
 	class: "tm-form-card tm-tts-config-card"
-}, RR = { class: "tv-eyebrow" }, zR = { class: "tm-speech-status-chip" }, BR = {
+}, FR = { class: "tv-eyebrow" }, IR = { class: "tm-speech-status-chip" }, LR = {
 	key: 0,
 	class: "tm-speech-connection-panel"
-}, VR = { class: "tm-speech-section-heading compact" }, HR = { class: "tm-field-grid" }, UR = { class: "tm-field tm-field-wide" }, WR = { class: "tm-field" }, GR = { class: "tm-field tm-field-wide" }, KR = { class: "tm-field tm-field-wide" }, qR = {
+}, RR = { class: "tm-speech-section-heading compact" }, zR = { class: "tm-field-grid" }, BR = { class: "tm-field tm-field-wide" }, VR = { class: "tm-field" }, HR = { class: "tm-field tm-field-wide" }, UR = { class: "tm-field tm-field-wide" }, WR = {
 	key: 0,
 	class: "tm-speech-discovery"
-}, JR = ["disabled"], YR = {
+}, GR = ["disabled"], KR = {
 	key: 1,
 	class: "tm-speech-voice-panel"
-}, XR = { class: "tm-speech-section-heading compact" }, ZR = { class: "tm-field-grid" }, QR = {
+}, qR = { class: "tm-speech-section-heading compact" }, JR = { class: "tm-field-grid" }, YR = {
 	key: 0,
 	class: "tm-field"
-}, $R = ["value"], ez = ["value"], tz = {
+}, XR = ["value"], ZR = ["value"], QR = {
 	key: 1,
 	class: "tm-field"
-}, nz = {
+}, $R = {
 	key: 2,
 	class: "tm-field"
-}, rz = ["value"], iz = ["value"], az = {
+}, ez = ["value"], tz = ["value"], nz = {
 	key: 3,
 	class: "tm-field"
-}, oz = {
+}, rz = {
 	key: 2,
 	class: "tm-form-card tm-speech-clone-card"
-}, sz = {
+}, iz = {
 	key: 0,
 	class: "tm-voice-sample-player"
-}, cz = { class: "tm-voice-sample-body" }, lz = { class: "tm-voice-sample-name" }, uz = ["src"], dz = { class: "tm-voice-sample-actions" }, fz = { class: "tv-button tm-voice-replace" }, pz = ["disabled"], mz = ["disabled"], hz = {
+}, az = { class: "tm-voice-sample-body" }, oz = { class: "tm-voice-sample-name" }, sz = ["src"], cz = { class: "tm-voice-sample-actions" }, lz = { class: "tv-button tm-voice-replace" }, uz = ["disabled"], dz = ["disabled"], fz = {
 	key: 1,
 	class: "tm-voice-sample-empty"
-}, gz = ["disabled"], _z = { class: "tm-field-grid tm-voice-clone-tuning" }, vz = {
+}, pz = ["disabled"], mz = { class: "tm-field-grid tm-voice-clone-tuning" }, hz = {
 	key: 0,
 	class: "tm-field tm-field-wide"
-}, yz = {
+}, gz = {
 	key: 1,
 	class: "tm-field"
-}, bz = ["value"], xz = ["value"], Sz = {
+}, _z = ["value"], vz = ["value"], yz = {
 	key: 2,
 	class: "tm-field"
-}, Cz = {
+}, bz = {
 	key: 3,
 	class: "tm-field"
-}, wz = /* @__PURE__ */ fr({
+}, xz = /* @__PURE__ */ fr({
 	__name: "TtsProfile",
 	props: {
 		scope: {},
@@ -19946,15 +19919,15 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 				}
 			}
 		}
-		return (t, n) => (K(), q("section", kR, [
-			J("article", AR, [
+		return (t, n) => (K(), q("section", ER, [
+			J("article", DR, [
 				J("header", null, [J("div", null, [
 					n[23] ||= J("span", { class: "tv-eyebrow" }, "Voice engine", -1),
 					J("h3", null, B(l.value ? "Choose the announcement voice" : "Choose Tater's reply voice"), 1),
 					J("p", null, B(l.value ? "Reuse the Reply Voice profile or select a dedicated engine for announcements." : "Select one engine. Only its matching model and connection settings appear."), 1)
-				]), J("span", jR, B(x.value.label), 1)]),
-				a.value ? (K(), q("div", MR, B(a.value), 1)) : Z("", !0),
-				J("details", NR, [J("summary", null, [J("span", null, [J("strong", null, B(x.value.label), 1), J("small", null, B(x.value.short), 1)]), n[24] ||= J("span", null, "Change engine", -1)]), J("div", {
+				]), J("span", OR, B(x.value.label), 1)]),
+				a.value ? (K(), q("div", kR, B(a.value), 1)) : Z("", !0),
+				J("details", AR, [J("summary", null, [J("span", null, [J("strong", null, B(x.value.label), 1), J("small", null, B(x.value.short), 1)]), n[24] ||= J("span", null, "Change engine", -1)]), J("div", {
 					class: "tm-speech-provider-grid tm-tts-provider-grid",
 					role: "group",
 					"aria-label": `${l.value ? "Announcement" : "Reply"} voice engine`
@@ -19968,9 +19941,9 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 					J("i", null, B(re(ee(e)).mark), 1),
 					J("span", null, [J("strong", null, B(te(e)), 1), J("small", null, B(re(ee(e)).short), 1)]),
 					n[25] ||= J("b", { "aria-hidden": "true" }, "✓", -1)
-				], 10, FR))), 128))], 8, PR)])
+				], 10, MR))), 128))], 8, jR)])
 			]),
-			h.value ? (K(), q("article", IR, [
+			h.value ? (K(), q("article", NR, [
 				n[26] ||= J("i", null, "↔", -1),
 				n[27] ||= J("div", null, [
 					J("span", { class: "tv-eyebrow" }, "Linked profile"),
@@ -19978,15 +19951,15 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 					J("p", null, "Model, voice, connection, cloning, and tuning changes from Reply Voice are applied automatically.")
 				], -1),
 				J("span", null, B(S.value), 1)
-			])) : (K(), q("article", LR, [
+			])) : (K(), q("article", PR, [
 				J("header", null, [J("div", null, [
-					J("span", RR, B(x.value.kind) + " setup", 1),
+					J("span", FR, B(x.value.kind) + " setup", 1),
 					J("h3", null, B(x.value.label), 1),
 					J("p", null, B(x.value.short), 1)
-				]), J("span", zR, B(e.draft[p.value] || e.draft[f.value] || "Choose voice"), 1)]),
-				["wyoming", "openai_compatible"].includes(g.value) ? (K(), q("section", BR, [
-					J("div", VR, [n[28] ||= J("div", null, [J("h3", null, "Connection"), J("p", null, "Tell Tater where this voice service is running.")], -1), J("span", null, B(x.value.kind), 1)]),
-					J("div", HR, [g.value === "wyoming" ? (K(), q(G, { key: 0 }, [J("label", UR, [
+				]), J("span", IR, B(e.draft[p.value] || e.draft[f.value] || "Choose voice"), 1)]),
+				["wyoming", "openai_compatible"].includes(g.value) ? (K(), q("section", LR, [
+					J("div", RR, [n[28] ||= J("div", null, [J("h3", null, "Connection"), J("p", null, "Tell Tater where this voice service is running.")], -1), J("span", null, B(x.value.kind), 1)]),
+					J("div", zR, [g.value === "wyoming" ? (K(), q(G, { key: 0 }, [J("label", BR, [
 						n[29] ||= J("span", { class: "tm-field-label" }, "Wyoming host", -1),
 						U(J("input", {
 							"onUpdate:modelValue": n[0] ||= (t) => e.draft[L("wyoming_tts_host")] = t,
@@ -19995,14 +19968,14 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 							onInput: n[1] ||= (e) => r("dirty")
 						}, null, 544), [[$, e.draft[L("wyoming_tts_host")]]]),
 						n[30] ||= J("small", null, "Hostname or IP address of the Wyoming TTS service.", -1)
-					]), J("label", WR, [n[31] ||= J("span", { class: "tm-field-label" }, "Wyoming port", -1), U(J("input", {
+					]), J("label", VR, [n[31] ||= J("span", { class: "tm-field-label" }, "Wyoming port", -1), U(J("input", {
 						"onUpdate:modelValue": n[2] ||= (t) => e.draft[L("wyoming_tts_port")] = t,
 						type: "number",
 						min: "1",
 						max: "65535",
 						placeholder: "10200",
 						onInput: n[3] ||= (e) => r("dirty")
-					}, null, 544), [[$, e.draft[L("wyoming_tts_port")]]])])], 64)) : g.value === "openai_compatible" ? (K(), q(G, { key: 1 }, [J("label", GR, [
+					}, null, 544), [[$, e.draft[L("wyoming_tts_port")]]])])], 64)) : g.value === "openai_compatible" ? (K(), q(G, { key: 1 }, [J("label", HR, [
 						n[32] ||= J("span", { class: "tm-field-label" }, "Base URL", -1),
 						U(J("input", {
 							"onUpdate:modelValue": n[4] ||= (t) => e.draft[L("openai_tts_base_url")] = t,
@@ -20011,21 +19984,21 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 							onInput: n[5] ||= (e) => r("dirty")
 						}, null, 544), [[$, e.draft[L("openai_tts_base_url")]]]),
 						n[33] ||= J("small", null, "The root URL for an OpenAI-compatible audio API.", -1)
-					]), J("label", KR, [n[34] ||= J("span", { class: "tm-field-label" }, "API key", -1), U(J("input", {
+					]), J("label", UR, [n[34] ||= J("span", { class: "tm-field-label" }, "API key", -1), U(J("input", {
 						"onUpdate:modelValue": n[6] ||= (t) => e.draft[L("openai_tts_api_key")] = t,
 						type: "password",
 						autocomplete: "off",
 						placeholder: "Optional",
 						onInput: n[7] ||= (e) => r("dirty")
 					}, null, 544), [[$, e.draft[L("openai_tts_api_key")]]])])], 64)) : Z("", !0)]),
-					C.value ? (K(), q("div", qR, [n[35] ||= J("div", null, [J("i", null, "⌕"), J("span", null, [J("strong", null, "Find available voices"), J("small", null, "Ask the connected service for its current models and voices.")])], -1), J("button", {
+					C.value ? (K(), q("div", WR, [n[35] ||= J("div", null, [J("i", null, "⌕"), J("span", null, [J("strong", null, "Find available voices"), J("small", null, "Ask the connected service for its current models and voices.")])], -1), J("button", {
 						class: "tv-button",
 						type: "button",
 						disabled: !!i.value,
 						onClick: oe
-					}, B(i.value === "discover" ? "Discovering…" : "Discover models & voices"), 9, JR)])) : Z("", !0)
+					}, B(i.value === "discover" ? "Discovering…" : "Discover models & voices"), 9, GR)])) : Z("", !0)
 				])) : Z("", !0),
-				D.value ? (K(), q("section", YR, [J("div", XR, [n[36] ||= J("div", null, [J("h3", null, "Model and voice"), J("p", null, "Choose what generates the audio and how Tater should sound.")], -1), J("span", null, B(_.value.length || y.value.length ? "Available choices" : "Manual entry"), 1)]), J("div", ZR, [_.value.length ? (K(), q("div", QR, [n[38] ||= J("span", { class: "tm-field-label" }, "Model", -1), Y(mN, { label: "Model" }, {
+				D.value ? (K(), q("section", KR, [J("div", qR, [n[36] ||= J("div", null, [J("h3", null, "Model and voice"), J("p", null, "Choose what generates the audio and how Tater should sound.")], -1), J("span", null, B(_.value.length || y.value.length ? "Available choices" : "Manual entry"), 1)]), J("div", JR, [_.value.length ? (K(), q("div", YR, [n[38] ||= J("span", { class: "tm-field-label" }, "Model", -1), Y(dN, { label: "Model" }, {
 					default: En(() => [U(J("select", {
 						"aria-label": "Model",
 						"onUpdate:modelValue": n[8] ||= (t) => e.draft[f.value] = t,
@@ -20035,19 +20008,19 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 						e.draft[f.value] && !ne(_.value, e.draft[f.value]) ? (K(), q("option", {
 							key: 0,
 							value: e.draft[f.value]
-						}, "Current: " + B(e.draft[f.value]), 9, $R)) : Z("", !0),
+						}, "Current: " + B(e.draft[f.value]), 9, XR)) : Z("", !0),
 						(K(!0), q(G, null, W(_.value, (e) => (K(), q("option", {
 							key: ee(e),
 							value: ee(e)
-						}, B(te(e)), 9, ez))), 128))
+						}, B(te(e)), 9, ZR))), 128))
 					], 544), [[_s, e.draft[f.value]]])]),
 					_: 1
-				})])) : g.value === "wyoming" ? Z("", !0) : (K(), q("label", tz, [n[39] ||= J("span", { class: "tm-field-label" }, "Model", -1), U(J("input", {
+				})])) : g.value === "wyoming" ? Z("", !0) : (K(), q("label", QR, [n[39] ||= J("span", { class: "tm-field-label" }, "Model", -1), U(J("input", {
 					"onUpdate:modelValue": n[9] ||= (t) => e.draft[f.value] = t,
 					type: "text",
 					placeholder: "Model id or alias",
 					onInput: n[10] ||= (e) => r("dirty")
-				}, null, 544), [[$, e.draft[f.value]]])])), w.value && y.value.length ? (K(), q("div", nz, [n[41] ||= J("span", { class: "tm-field-label" }, "Voice", -1), Y(mN, {
+				}, null, 544), [[$, e.draft[f.value]]])])), w.value && y.value.length ? (K(), q("div", $R, [n[41] ||= J("span", { class: "tm-field-label" }, "Voice", -1), Y(dN, {
 					label: "Voice",
 					"action-label": "Change voice"
 				}, {
@@ -20060,60 +20033,60 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 						e.draft[p.value] && !ne(y.value, e.draft[p.value]) ? (K(), q("option", {
 							key: 0,
 							value: e.draft[p.value]
-						}, "Current: " + B(e.draft[p.value]), 9, rz)) : Z("", !0),
+						}, "Current: " + B(e.draft[p.value]), 9, ez)) : Z("", !0),
 						(K(!0), q(G, null, W(y.value, (e) => (K(), q("option", {
 							key: ee(e),
 							value: ee(e)
-						}, B(te(e)), 9, iz))), 128))
+						}, B(te(e)), 9, tz))), 128))
 					], 544), [[_s, e.draft[p.value]]])]),
 					_: 1
-				})])) : w.value ? (K(), q("label", az, [n[42] ||= J("span", { class: "tm-field-label" }, "Voice", -1), U(J("input", {
+				})])) : w.value ? (K(), q("label", nz, [n[42] ||= J("span", { class: "tm-field-label" }, "Voice", -1), U(J("input", {
 					"onUpdate:modelValue": n[13] ||= (t) => e.draft[p.value] = t,
 					type: "text",
 					placeholder: "Voice id or name",
 					onInput: n[14] ||= (e) => r("dirty")
 				}, null, 544), [[$, e.draft[p.value]]])])) : Z("", !0)])])) : Z("", !0)
 			])),
-			T.value && !h.value ? (K(), q("article", oz, [
+			T.value && !h.value ? (K(), q("article", rz, [
 				J("header", null, [n[43] ||= J("div", null, [
 					J("span", { class: "tv-eyebrow" }, "Shared personal voice"),
 					J("h3", null, "Voice sample"),
 					J("p", null, "One recording is shared automatically by Pocket TTS, Qwen3-TTS, and OmniVoice when you switch engines.")
 				], -1), J("span", { class: z(["tm-speech-status-chip", { ready: F.value.configured }]) }, B(F.value.configured ? "Voice ready" : "Add a sample"), 3)]),
-				F.value.configured ? (K(), q("section", sz, [n[45] ||= J("div", {
+				F.value.configured ? (K(), q("section", iz, [n[45] ||= J("div", {
 					class: "tm-voice-sample-icon",
 					"aria-hidden": "true"
-				}, "♫", -1), J("div", cz, [
-					J("div", lz, [J("span", null, [J("strong", null, B(F.value.name || "Voice sample"), 1), J("small", null, B(ae(F.value.size)) + " · Shared across all local voice cloners", 1)]), n[44] ||= J("i", null, "Ready", -1)]),
+				}, "♫", -1), J("div", az, [
+					J("div", oz, [J("span", null, [J("strong", null, B(F.value.name || "Voice sample"), 1), J("small", null, B(ae(F.value.size)) + " · Shared across all local voice cloners", 1)]), n[44] ||= J("i", null, "Ready", -1)]),
 					I.value ? (K(), q("audio", {
 						key: I.value,
 						controls: "",
 						preload: "metadata",
 						src: I.value
-					}, "Your browser cannot play this audio sample.", 8, uz)) : Z("", !0),
-					J("div", dz, [J("label", fz, [J("input", {
+					}, "Your browser cannot play this audio sample.", 8, sz)) : Z("", !0),
+					J("div", cz, [J("label", lz, [J("input", {
 						type: "file",
 						accept: "audio/*",
 						disabled: !!i.value,
 						onChange: ce
-					}, null, 40, pz), X(B(i.value === "upload" ? "Uploading…" : "Replace sample"), 1)]), J("button", {
+					}, null, 40, uz), X(B(i.value === "upload" ? "Uploading…" : "Replace sample"), 1)]), J("button", {
 						class: "tv-button danger",
 						type: "button",
 						disabled: !!i.value,
 						onClick: le
-					}, B(i.value === "delete" ? "Removing…" : "Remove sample"), 9, mz)])
-				])])) : (K(), q("label", hz, [
+					}, B(i.value === "delete" ? "Removing…" : "Remove sample"), 9, dz)])
+				])])) : (K(), q("label", fz, [
 					J("input", {
 						type: "file",
 						accept: "audio/*",
 						disabled: !!i.value,
 						onChange: ce
-					}, null, 40, gz),
+					}, null, 40, pz),
 					n[47] ||= J("i", { "aria-hidden": "true" }, "＋", -1),
 					J("span", null, [J("strong", null, B(i.value === "upload" ? "Uploading voice sample…" : "Choose a voice recording"), 1), n[46] ||= J("small", null, "Use a short, clean recording with little background noise. WAV, MP3, FLAC, M4A, OGG, Opus, and AAC are supported.", -1)])
 				])),
-				J("div", _z, [
-					E.value ? (K(), q("label", vz, [
+				J("div", mz, [
+					E.value ? (K(), q("label", hz, [
 						n[48] ||= J("span", { class: "tm-field-label" }, "Reference transcript", -1),
 						U(J("textarea", {
 							"onUpdate:modelValue": n[15] ||= (t) => e.draft[M.value] = t,
@@ -20122,7 +20095,7 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 						}, null, 544), [[$, e.draft[M.value]]]),
 						n[49] ||= J("small", null, "Tater fills this automatically when STT is available. Correct it here if needed.", -1)
 					])) : Z("", !0),
-					E.value ? (K(), q("label", yz, [
+					E.value ? (K(), q("label", gz, [
 						n[50] ||= J("span", { class: "tm-field-label" }, "Language", -1),
 						U(J("select", {
 							"onUpdate:modelValue": n[17] ||= (t) => e.draft[N.value] = t,
@@ -20130,19 +20103,19 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 						}, [e.draft[N.value] && !ne(v.value, e.draft[N.value]) ? (K(), q("option", {
 							key: 0,
 							value: e.draft[N.value]
-						}, "Current: " + B(e.draft[N.value]), 9, bz)) : Z("", !0), (K(!0), q(G, null, W(v.value, (e) => (K(), q("option", {
+						}, "Current: " + B(e.draft[N.value]), 9, _z)) : Z("", !0), (K(!0), q(G, null, W(v.value, (e) => (K(), q("option", {
 							key: ee(e),
 							value: ee(e)
-						}, B(te(e)), 9, xz))), 128))], 544), [[_s, e.draft[N.value]]]),
+						}, B(te(e)), 9, vz))), 128))], 544), [[_s, e.draft[N.value]]]),
 						J("small", null, B(g.value === "omnivoice" ? "Auto works across OmniVoice's full language catalog. Open the list and type a language name to jump to it." : "Auto detects the language from the reply. Choose one explicitly only when detection needs help."), 1)
 					])) : Z("", !0),
-					E.value ? (K(), q("label", Sz, [n[51] ||= J("span", { class: "tm-field-label" }, "Voice instruction", -1), U(J("input", {
+					E.value ? (K(), q("label", yz, [n[51] ||= J("span", { class: "tm-field-label" }, "Voice instruction", -1), U(J("input", {
 						"onUpdate:modelValue": n[19] ||= (t) => e.draft[P.value] = t,
 						type: "text",
 						placeholder: "Optional style or delivery guidance",
 						onInput: n[20] ||= (e) => r("dirty")
 					}, null, 544), [[$, e.draft[P.value]]])])) : Z("", !0),
-					g.value === "pocket_tts" ? (K(), q("label", Cz, [
+					g.value === "pocket_tts" ? (K(), q("label", bz, [
 						n[52] ||= J("span", { class: "tm-field-label" }, "Output gain", -1),
 						U(J("input", {
 							"onUpdate:modelValue": n[21] ||= (t) => e.draft[L("pocket_tts_output_gain")] = t,
@@ -20158,29 +20131,29 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 			])) : Z("", !0)
 		]));
 	}
-}), Tz = { class: "tm-stack tm-speech-workspace" }, Ez = {
+}), Sz = { class: "tm-stack tm-speech-workspace" }, Cz = {
 	class: "tv-tabs tm-inner-tabs tm-speech-tabs",
 	"aria-label": "Speech settings areas"
-}, Dz = {
+}, wz = {
 	key: 0,
 	class: "tv-notice error"
-}, Oz = { class: "tm-form-card tm-speech-hero" }, kz = { class: "tv-eyebrow" }, Az = { class: "tm-speech-hero-status" }, jz = { class: "tm-speech-status-chip" }, Mz = {
+}, Tz = { class: "tm-form-card tm-speech-hero" }, Ez = { class: "tv-eyebrow" }, Dz = { class: "tm-speech-hero-status" }, Oz = { class: "tm-speech-status-chip" }, kz = {
 	key: 0,
 	class: "tm-progress-list"
-}, Nz = ["value"], Pz = {
+}, Az = ["value"], jz = {
 	key: 1,
 	class: "tm-speech-ready"
-}, Fz = { class: "tm-form-card tm-speech-duck-card" }, Iz = { class: "tm-speech-status-chip" }, Lz = { class: "tm-field-grid" }, Rz = { class: "tm-field tm-field-wide" }, zz = { class: "tm-speech-range-field" }, Bz = { class: "tm-field" }, Vz = { class: "tm-field" }, Hz = {
+}, Mz = { class: "tm-form-card tm-speech-duck-card" }, Nz = { class: "tm-speech-status-chip" }, Pz = { class: "tm-field-grid" }, Fz = { class: "tm-field tm-field-wide" }, Iz = { class: "tm-speech-range-field" }, Lz = { class: "tm-field" }, Rz = { class: "tm-field" }, zz = {
 	key: 4,
 	class: "tm-form-card tm-preview-card tm-speech-preview-card"
-}, Uz = { class: "tm-speech-status-chip" }, Wz = {
+}, Bz = { class: "tm-speech-status-chip" }, Vz = {
 	class: "tm-speech-profile-switch",
 	role: "group",
 	"aria-label": "Voice profile to preview"
-}, Gz = { class: "tm-field-grid" }, Kz = { class: "tm-field tm-field-wide" }, qz = { class: "tm-speech-preview-actions" }, Jz = ["disabled"], Yz = {
+}, Hz = { class: "tm-field-grid" }, Uz = { class: "tm-field tm-field-wide" }, Wz = { class: "tm-speech-preview-actions" }, Gz = ["disabled"], Kz = {
 	key: 0,
 	class: "tm-speech-audio-player"
-}, Xz = ["src"], Zz = /* @__PURE__ */ fr({
+}, qz = ["src"], Jz = /* @__PURE__ */ fr({
 	__name: "SpeechModels",
 	props: {
 		draft: {},
@@ -20278,8 +20251,8 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 			w();
 		}), Fr(() => {
 			p !== null && window.clearTimeout(p), u.value && URL.revokeObjectURL(u.value);
-		}), t({ refreshWarmup: w }), (t, n) => (K(), q("section", Tz, [
-			J("nav", Ez, [
+		}), t({ refreshWarmup: w }), (t, n) => (K(), q("section", Sz, [
+			J("nav", Cz, [
 				J("button", {
 					type: "button",
 					class: z({ active: a.value === "replies" }),
@@ -20296,12 +20269,12 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 					onClick: n[2] ||= (e) => a.value = "playback"
 				}, "Playback & test", 2)
 			]),
-			f.value ? (K(), q("div", Dz, B(f.value), 1)) : Z("", !0),
-			J("article", Oz, [J("header", null, [J("div", null, [
-				J("span", kz, B(y.value.eyebrow), 1),
+			f.value ? (K(), q("div", wz, B(f.value), 1)) : Z("", !0),
+			J("article", Tz, [J("header", null, [J("div", null, [
+				J("span", Ez, B(y.value.eyebrow), 1),
 				J("h3", null, B(y.value.title), 1),
 				J("p", null, B(y.value.description), 1)
-			]), J("div", Az, [J("span", null, [n[12] ||= J("i", null, null, -1), X(B(y.value.status), 1)]), J("b", null, B(y.value.badge), 1)])])]),
+			]), J("div", Dz, [J("span", null, [n[12] ||= J("i", null, null, -1), X(B(y.value.status), 1)]), J("b", null, B(y.value.badge), 1)])])]),
 			o.value.running || m.value.length ? (K(), q("article", {
 				key: 1,
 				class: z(["tm-form-card tm-speech-warmup", {
@@ -20312,14 +20285,14 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 				n[13] ||= J("span", { class: "tv-eyebrow" }, "Voice runtime", -1),
 				J("h3", null, B(o.value.running ? "Preparing voice models" : h.value ? "Voice model needs attention" : "Voice models are ready"), 1),
 				J("p", null, B(o.value.running ? "Tater is loading the selected local speech engines in the background." : h.value ? "One or more voice models could not be prepared." : "The latest voice-model preparation finished successfully."), 1)
-			]), J("span", jz, B(o.value.running ? "Working" : h.value ? "Check status" : "Ready"), 1)]), o.value.running ? (K(), q("div", Mz, [(K(!0), q(G, null, W(m.value, (e) => (K(), q("div", {
+			]), J("span", Oz, B(o.value.running ? "Working" : h.value ? "Check status" : "Ready"), 1)]), o.value.running ? (K(), q("div", kz, [(K(!0), q(G, null, W(m.value, (e) => (K(), q("div", {
 				key: String(e.key || e.model),
 				class: "tm-progress-row"
 			}, [J("div", null, [J("strong", null, B(e.label || e.model || e.backend), 1), J("span", null, B(e.message || e.status), 1)]), J("progress", {
 				value: Number(e.progress || 0),
 				max: "100"
-			}, null, 8, Nz)]))), 128))])) : (K(), q("div", Pz, [J("i", null, B(h.value ? "!" : "✓"), 1), J("span", null, B(m.value.length) + " voice " + B(m.value.length === 1 ? "item" : "items") + " checked", 1)]))], 2)) : Z("", !0),
-			a.value === "replies" ? (K(), va(wz, {
+			}, null, 8, Az)]))), 128))])) : (K(), q("div", jz, [J("i", null, B(h.value ? "!" : "✓"), 1), J("span", null, B(m.value.length) + " voice " + B(m.value.length === 1 ? "item" : "items") + " checked", 1)]))], 2)) : Z("", !0),
+			a.value === "replies" ? (K(), va(xz, {
 				key: 2,
 				scope: "direct",
 				draft: e.draft,
@@ -20331,7 +20304,7 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 				"draft",
 				"ui",
 				"endpoints"
-			])) : a.value === "announcements" ? (K(), q(G, { key: 3 }, [Y(wz, {
+			])) : a.value === "announcements" ? (K(), q(G, { key: 3 }, [Y(xz, {
 				scope: "announcement",
 				draft: e.draft,
 				ui: e.announcementUi,
@@ -20342,14 +20315,14 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 				"draft",
 				"ui",
 				"endpoints"
-			]), J("article", Fz, [J("header", null, [n[14] ||= J("div", null, [
+			]), J("article", Mz, [J("header", null, [n[14] ||= J("div", null, [
 				J("span", { class: "tv-eyebrow" }, "Audio focus"),
 				J("h3", null, "Lower other audio during announcements"),
 				J("p", null, "Fade satellite playback down before Tater speaks, then restore it smoothly.")
-			], -1), J("span", Iz, B(Number(e.draft.speech_satellite_ducking_target_percent || 0)) + "% target", 1)]), J("div", Lz, [
-				J("label", Rz, [
+			], -1), J("span", Nz, B(Number(e.draft.speech_satellite_ducking_target_percent || 0)) + "% target", 1)]), J("div", Pz, [
+				J("label", Fz, [
 					n[15] ||= J("span", { class: "tm-field-label" }, "Background audio target", -1),
-					J("div", zz, [U(J("input", {
+					J("div", Iz, [U(J("input", {
 						"onUpdate:modelValue": n[5] ||= (t) => e.draft.speech_satellite_ducking_target_percent = t,
 						type: "range",
 						min: "0",
@@ -20365,7 +20338,7 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 					}, null, 544), [[$, e.draft.speech_satellite_ducking_target_percent]])]),
 					n[16] ||= J("small", null, "0% silences other audio; 100% leaves it unchanged.", -1)
 				]),
-				J("label", Bz, [
+				J("label", Lz, [
 					n[17] ||= J("span", { class: "tm-field-label" }, "Fade down time", -1),
 					U(J("input", {
 						"onUpdate:modelValue": n[7] ||= (t) => e.draft.speech_satellite_ducking_attack_ms = t,
@@ -20376,7 +20349,7 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 					}, null, 544), [[$, e.draft.speech_satellite_ducking_attack_ms]]),
 					n[18] ||= J("small", null, "Milliseconds before the announcement begins.", -1)
 				]),
-				J("label", Vz, [
+				J("label", Rz, [
 					n[19] ||= J("span", { class: "tm-field-label" }, "Restore time", -1),
 					U(J("input", {
 						"onUpdate:modelValue": n[8] ||= (t) => e.draft.speech_satellite_ducking_release_ms = t,
@@ -20387,13 +20360,13 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 					}, null, 544), [[$, e.draft.speech_satellite_ducking_release_ms]]),
 					n[20] ||= J("small", null, "Milliseconds to return to the previous volume.", -1)
 				])
-			])])], 64)) : (K(), q("article", Hz, [
+			])])], 64)) : (K(), q("article", zz, [
 				J("header", null, [n[21] ||= J("div", null, [
 					J("span", { class: "tv-eyebrow" }, "Try it now"),
 					J("h3", null, "Voice preview"),
 					J("p", null, "The preview uses the values currently on screen, even before you save them.")
-				], -1), J("span", Uz, B(v.value), 1)]),
-				J("div", Wz, [J("button", {
+				], -1), J("span", Bz, B(v.value), 1)]),
+				J("div", Vz, [J("button", {
 					type: "button",
 					class: z({ active: c.value === "direct" }),
 					onClick: n[9] ||= (e) => c.value = "direct"
@@ -20402,157 +20375,157 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 					class: z({ active: c.value === "announcement" }),
 					onClick: n[10] ||= (e) => c.value = "announcement"
 				}, [...n[23] ||= [J("i", null, "⌂", -1), J("span", null, [J("strong", null, "Announcement voice"), J("small", null, "Proactive and whole-home speech")], -1)]], 2)]),
-				J("div", Gz, [J("label", Kz, [n[24] ||= J("span", { class: "tm-field-label" }, "What should Tater say?", -1), U(J("textarea", {
+				J("div", Hz, [J("label", Uz, [n[24] ||= J("span", { class: "tm-field-label" }, "What should Tater say?", -1), U(J("textarea", {
 					"onUpdate:modelValue": n[11] ||= (e) => s.value = e,
 					placeholder: "Type a short sentence to preview."
 				}, null, 512), [[$, s.value]])])]),
-				J("div", qz, [J("button", {
+				J("div", Wz, [J("button", {
 					class: "tv-button primary",
 					type: "button",
 					disabled: l.value || !s.value.trim(),
 					onClick: D
-				}, B(l.value ? "Generating voice…" : "Generate & play preview"), 9, Jz), u.value ? (K(), q("div", Yz, [n[25] ||= J("span", null, "Latest preview", -1), J("audio", {
+				}, B(l.value ? "Generating voice…" : "Generate & play preview"), 9, Gz), u.value ? (K(), q("div", Kz, [n[25] ||= J("span", null, "Latest preview", -1), J("audio", {
 					ref_key: "previewAudio",
 					ref: d,
 					src: u.value,
 					controls: ""
-				}, null, 8, Xz)])) : Z("", !0)])
+				}, null, 8, qz)])) : Z("", !0)])
 			]))
 		]));
 	}
-}), Qz = { class: "tm-stack tm-wake-workspace" }, $z = {
+}), Yz = { class: "tm-stack tm-wake-workspace" }, Xz = {
 	key: 0,
 	class: "tv-notice"
-}, eB = {
+}, Zz = {
 	key: 1,
 	class: "tv-notice error"
-}, tB = { class: "tm-form-card tm-model-area-hero tm-wake-hero" }, nB = { class: "tm-model-area-status" }, rB = {
+}, Qz = { class: "tm-form-card tm-model-area-hero tm-wake-hero" }, $z = { class: "tm-model-area-status" }, eB = {
 	key: 2,
 	class: "tm-form-card tm-wake-engine-card"
-}, iB = { class: "tm-speech-status-chip" }, aB = {
+}, tB = { class: "tm-speech-status-chip" }, nB = {
 	class: "tm-choice-grid tm-wake-choice-grid",
 	role: "group",
 	"aria-label": "Wake engine"
-}, oB = ["disabled", "onClick"], sB = {
+}, rB = ["disabled", "onClick"], iB = {
 	key: 0,
 	class: "tm-wake-source-panel"
-}, cB = { class: "tm-speech-section-heading compact" }, lB = { class: "tm-wake-mode-row" }, uB = {
+}, aB = { class: "tm-speech-section-heading compact" }, oB = { class: "tm-wake-mode-row" }, sB = {
 	class: "tm-choice-grid tm-wake-source-grid",
 	role: "group",
 	"aria-label": "Single wake engine"
-}, dB = ["disabled", "onClick"], fB = { class: "tm-wake-mode-row" }, pB = {
+}, cB = ["disabled", "onClick"], lB = { class: "tm-wake-mode-row" }, uB = {
 	class: "tm-choice-grid tm-wake-source-grid-two",
 	role: "group",
 	"aria-label": "Dual wake engines"
-}, mB = ["disabled", "onClick"], hB = {
+}, dB = ["disabled", "onClick"], fB = {
 	key: 0,
 	class: "tm-wake-model-block"
-}, gB = { class: "tm-speech-section-heading compact" }, _B = {
+}, pB = { class: "tm-speech-section-heading compact" }, mB = {
 	class: "tm-choice-grid tm-wake-source-grid",
 	role: "group",
 	"aria-label": "microWakeWord model source"
-}, vB = ["disabled", "onClick"], yB = {
+}, hB = ["disabled", "onClick"], gB = {
 	key: 0,
 	class: "tm-field tm-field-wide"
-}, bB = ["disabled"], xB = ["value"], SB = {
+}, _B = ["disabled"], vB = ["value"], yB = {
 	key: 1,
 	class: "tm-field tm-field-wide"
-}, CB = { class: "tm-field-label" }, wB = ["placeholder", "disabled"], TB = {
+}, bB = { class: "tm-field-label" }, xB = ["placeholder", "disabled"], SB = {
 	key: 1,
 	class: "tm-wake-model-block"
-}, EB = { class: "tm-speech-section-heading compact" }, DB = {
+}, CB = { class: "tm-speech-section-heading compact" }, wB = {
 	class: "tm-choice-grid tm-wake-source-grid",
 	role: "group",
 	"aria-label": "matched wake bundle source"
-}, OB = ["disabled", "onClick"], kB = {
+}, TB = ["disabled", "onClick"], EB = {
 	key: 0,
 	class: "tm-field tm-field-wide"
-}, AB = ["disabled"], jB = {
+}, DB = ["disabled"], OB = {
 	key: 0,
 	value: "",
 	disabled: ""
-}, MB = ["value"], NB = {
+}, kB = ["value"], AB = {
 	key: 1,
 	class: "tm-field tm-field-wide"
-}, PB = { class: "tm-field-label" }, FB = ["placeholder", "disabled"], IB = {
+}, jB = { class: "tm-field-label" }, MB = ["placeholder", "disabled"], NB = {
 	key: 2,
 	class: "tm-wake-mode-row"
-}, LB = {
+}, PB = {
 	class: "tm-choice-grid tm-wake-source-grid-two",
 	role: "group",
 	"aria-label": "NanoWakeWord architecture"
-}, RB = ["disabled", "onClick"], zB = {
+}, FB = ["disabled", "onClick"], IB = {
 	key: 3,
 	class: "tm-wake-bundle-info",
 	"aria-label": "Included bundle models"
-}, BB = { class: "tm-wake-bundle-models" }, VB = {
+}, LB = { class: "tm-wake-bundle-models" }, RB = {
 	key: 1,
 	class: "tm-wake-engine-note"
-}, HB = {
+}, zB = {
 	key: 3,
 	class: "tm-form-card tm-wake-training-card"
-}, UB = { class: "tm-wake-feedback-grid" }, WB = { class: "tm-wake-toggle-card" }, GB = ["disabled"], KB = { class: "tm-wake-toggle-card" }, qB = ["disabled"], JB = { class: "tm-field tm-field-wide" }, YB = ["placeholder", "disabled"], XB = {
+}, BB = { class: "tm-wake-feedback-grid" }, VB = { class: "tm-wake-toggle-card" }, HB = ["disabled"], UB = { class: "tm-wake-toggle-card" }, WB = ["disabled"], GB = { class: "tm-field tm-field-wide" }, KB = ["placeholder", "disabled"], qB = {
 	key: 4,
 	class: "tm-form-card tm-wake-auto-training-card"
-}, ZB = { class: "tm-speech-status-chip" }, QB = {
+}, JB = { class: "tm-speech-status-chip" }, YB = {
 	key: 0,
 	class: "tm-wake-trainer-linked"
-}, $B = ["disabled"], eV = {
+}, XB = ["disabled"], ZB = {
 	key: 1,
 	class: "tm-wake-trainer-link"
-}, tV = { class: "tm-inline-actions" }, nV = ["disabled"], rV = ["disabled"], iV = { key: 0 }, aV = { key: 1 }, oV = ["href"], sV = {
+}, QB = { class: "tm-inline-actions" }, $B = ["disabled"], eV = ["disabled"], tV = { key: 0 }, nV = { key: 1 }, rV = ["href"], iV = {
 	key: 5,
 	class: "tm-form-card tm-wake-tuning-card"
-}, cV = { class: "tm-speech-status-chip" }, lV = { class: "tm-wake-tuning-grid" }, uV = { class: "tm-wake-tuning-switch" }, dV = ["disabled"], fV = {
+}, aV = { class: "tm-speech-status-chip" }, oV = { class: "tm-wake-tuning-grid" }, sV = { class: "tm-wake-tuning-switch" }, cV = ["disabled"], lV = {
 	key: 0,
 	class: "tm-wake-tuning-inputs"
-}, pV = [
+}, uV = [
 	"min",
 	"max",
 	"step",
 	"disabled"
-], mV = [
+], dV = [
 	"min",
 	"max",
 	"disabled"
-], hV = { class: "tm-wake-tuning-switch" }, gV = ["disabled"], _V = {
+], fV = { class: "tm-wake-tuning-switch" }, pV = ["disabled"], mV = {
 	key: 0,
 	class: "tm-wake-tuning-inputs"
-}, vV = [
+}, hV = [
 	"min",
 	"max",
 	"step",
 	"disabled"
-], yV = [
+], gV = [
 	"min",
 	"max",
 	"disabled"
-], bV = { class: "tm-wake-tuning-switch" }, xV = ["disabled"], SV = {
+], _V = { class: "tm-wake-tuning-switch" }, vV = ["disabled"], yV = {
 	key: 0,
 	class: "tm-wake-tuning-inputs"
-}, CV = [
+}, bV = [
 	"min",
 	"max",
 	"step",
 	"disabled"
-], wV = [
+], xV = [
 	"min",
 	"max",
 	"disabled"
-], TV = {
+], SV = {
 	key: 6,
 	class: "tm-form-card tm-wake-verifier-card"
-}, EV = { class: "tm-speech-status-chip" }, DV = {
+}, CV = { class: "tm-speech-status-chip" }, wV = {
 	class: "tm-choice-grid tm-wake-verifier-grid",
 	role: "group",
 	"aria-label": "Wake verification mode"
-}, OV = ["disabled", "onClick"], kV = { class: "tm-wake-verifier-threshold" }, AV = [
+}, TV = ["disabled", "onClick"], EV = { class: "tm-wake-verifier-threshold" }, DV = [
 	"min",
 	"max",
 	"step",
 	"value",
 	"disabled"
-], jV = ["disabled"], MV = [
+], OV = ["disabled"], kV = [
 	"min",
 	"max",
 	"step",
@@ -20561,7 +20534,7 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 	"aria-label",
 	"aria-valuetext",
 	"onInput"
-], NV = { class: "tm-wake-verifier-scale" }, PV = ["disabled", "onClick"], FV = { class: "tm-wake-verifier-summary" }, IV = ["open"], LV = { class: "tm-table-wrap" }, RV = { key: 0 }, zV = ["colspan"], BV = { class: "tm-inline-actions tm-secondary-row" }, VV = ["disabled"], HV = /* @__PURE__ */ fr({
+], AV = { class: "tm-wake-verifier-scale" }, jV = ["disabled", "onClick"], MV = { class: "tm-wake-verifier-summary" }, NV = ["open"], PV = { class: "tm-table-wrap" }, FV = { key: 0 }, IV = ["colspan"], LV = { class: "tm-inline-actions tm-secondary-row" }, RV = ["disabled"], zV = /* @__PURE__ */ fr({
 	__name: "WakeWordModels",
 	props: {
 		runtimeEndpoint: {},
@@ -20853,25 +20826,25 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 		}), t({
 			apply: Ye,
 			refresh: Ke
-		}), (e, t) => (K(), q("section", Qz, [
-			a.value ? (K(), q("div", $z, "Loading live Wake Word settings…")) : Z("", !0),
-			s.value ? (K(), q("div", eB, B(s.value), 1)) : Z("", !0),
-			J("article", tB, [t[33] ||= J("div", { class: "tm-model-area-hero-copy" }, [
+		}), (e, t) => (K(), q("section", Yz, [
+			a.value ? (K(), q("div", Xz, "Loading live Wake Word settings…")) : Z("", !0),
+			s.value ? (K(), q("div", Zz, B(s.value), 1)) : Z("", !0),
+			J("article", Qz, [t[33] ||= J("div", { class: "tm-model-area-hero-copy" }, [
 				J("span", { class: "tv-eyebrow" }, "Wake pipeline"),
 				J("h3", null, "One phrase. Every room."),
 				J("p", null, "Choose one wake bundle, then run MWW, OWW, NWW, or one of the two supported dual-detector policies.")
-			], -1), J("div", nB, [
+			], -1), J("div", $z, [
 				J("span", null, [t[32] ||= J("i", { class: "ready" }, null, -1), X(B(fe.value) + " connected", 1)]),
 				J("span", null, B(pe.value), 1),
 				J("span", null, B(we[ne.value]?.label || "Disabled") + " verification", 1)
 			])]),
-			l.value ? (K(), q("article", rB, [
+			l.value ? (K(), q("article", eB, [
 				J("header", null, [t[34] ||= J("div", null, [
 					J("span", { class: "tv-eyebrow" }, "Step 1 · All satellites"),
 					J("h3", null, "How should satellites wake?"),
 					J("p", null, "Every satellite uses the same wake phrase. Capable devices follow this policy; MWW-only satellites keep the bundle's MWW fallback.")
-				], -1), J("span", iB, B(pe.value), 1)]),
-				J("div", aB, [(K(!0), q(G, null, W(De(x.value.wake_engine), (e) => (K(), q("button", {
+				], -1), J("span", tB, B(pe.value), 1)]),
+				J("div", nB, [(K(!0), q(G, null, W(De(x.value.wake_engine), (e) => (K(), q("button", {
 					key: Oe(e),
 					type: "button",
 					class: z({ active: w.value === Oe(e) }),
@@ -20881,10 +20854,10 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 					J("i", null, B(xe[Oe(e)]?.mark || "WAKE"), 1),
 					J("span", null, [J("strong", null, B(ke(e)), 1), J("small", null, B(xe[Oe(e)]?.short), 1)]),
 					t[35] ||= J("b", null, "✓", -1)
-				], 10, oB))), 128))]),
-				w.value === "micro_wake_word" ? (K(), q("section", sB, [
-					J("div", cB, [t[36] ||= J("div", null, [J("h3", null, "Wake detection mode"), J("p", null, "Choose the detector policy once; each satellite receives the best supported projection.")], -1), J("span", null, B(pe.value), 1)]),
-					J("div", lB, [t[38] ||= J("span", null, "Single wake engine", -1), J("div", uB, [(K(!0), q(G, null, W(I.value, (e) => (K(), q("button", {
+				], 10, rB))), 128))]),
+				w.value === "micro_wake_word" ? (K(), q("section", iB, [
+					J("div", aB, [t[36] ||= J("div", null, [J("h3", null, "Wake detection mode"), J("p", null, "Choose the detector policy once; each satellite receives the best supported projection.")], -1), J("span", null, B(pe.value), 1)]),
+					J("div", oB, [t[38] ||= J("span", null, "Single wake engine", -1), J("div", sB, [(K(!0), q(G, null, W(I.value, (e) => (K(), q("button", {
 						key: Oe(e),
 						type: "button",
 						class: z({ active: E.value === Oe(e) }),
@@ -20894,8 +20867,8 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 						J("i", null, B(Ce[Oe(e)]?.mark || "WAKE"), 1),
 						J("span", null, [J("strong", null, B(ke(e)), 1), J("small", null, B(Ce[Oe(e)]?.short), 1)]),
 						t[37] ||= J("b", null, "✓", -1)
-					], 10, dB))), 128))])]),
-					J("div", fB, [t[40] ||= J("span", null, "Dual wake engines", -1), J("div", pB, [(K(!0), q(G, null, W(L.value, (e) => (K(), q("button", {
+					], 10, cB))), 128))])]),
+					J("div", lB, [t[40] ||= J("span", null, "Dual wake engines", -1), J("div", uB, [(K(!0), q(G, null, W(L.value, (e) => (K(), q("button", {
 						key: Oe(e),
 						type: "button",
 						class: z({ active: E.value === Oe(e) }),
@@ -20905,10 +20878,10 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 						J("i", null, B(Ce[Oe(e)]?.mark || "WAKE"), 1),
 						J("span", null, [J("strong", null, B(ke(e)), 1), J("small", null, B(Ce[Oe(e)]?.short), 1)]),
 						t[39] ||= J("b", null, "✓", -1)
-					], 10, mB))), 128))])]),
-					A.value ? Z("", !0) : (K(), q("div", hB, [
-						J("div", gB, [t[41] ||= J("div", null, [J("h3", null, "microWakeWord model"), J("p", null, "Choose Tater's model, a catalog release, or your own package.")], -1), J("span", null, B(me.value), 1)]),
-						J("div", _B, [(K(!0), q(G, null, W(De(x.value.wake_word), (e) => (K(), q("button", {
+					], 10, dB))), 128))])]),
+					A.value ? Z("", !0) : (K(), q("div", fB, [
+						J("div", pB, [t[41] ||= J("div", null, [J("h3", null, "microWakeWord model"), J("p", null, "Choose Tater's model, a catalog release, or your own package.")], -1), J("span", null, B(me.value), 1)]),
+						J("div", mB, [(K(!0), q(G, null, W(De(x.value.wake_word), (e) => (K(), q("button", {
 							key: Oe(e),
 							type: "button",
 							class: z({ active: T.value === Oe(e) }),
@@ -20918,8 +20891,8 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 							J("i", null, B(Se[Oe(e)]?.mark || "SRC"), 1),
 							J("span", null, [J("strong", null, B(ke(e)), 1), J("small", null, B(Se[Oe(e)]?.short), 1)]),
 							t[42] ||= J("b", null, "✓", -1)
-						], 10, vB))), 128))]),
-						T.value === "catalog" ? (K(), q("label", yB, [
+						], 10, hB))), 128))]),
+						T.value === "catalog" ? (K(), q("label", gB, [
 							t[43] ||= J("span", { class: "tm-field-label" }, "Wake Word Catalog", -1),
 							U(J("select", {
 								"onUpdate:modelValue": t[0] ||= (e) => p.wake_word_catalog_url = e,
@@ -20928,24 +20901,24 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 							}, [(K(!0), q(G, null, W(De(x.value.wake_word_catalog_url), (e) => (K(), q("option", {
 								key: Oe(e),
 								value: Oe(e)
-							}, B(ke(e)), 9, xB))), 128))], 40, bB), [[_s, p.wake_word_catalog_url]]),
+							}, B(ke(e)), 9, vB))), 128))], 40, _B), [[_s, p.wake_word_catalog_url]]),
 							J("small", null, B(x.value.wake_word_catalog_url?.description), 1)
 						])) : Z("", !0),
-						T.value === "custom_url" ? (K(), q("label", SB, [
-							J("span", CB, B(x.value.wake_word_url?.label), 1),
+						T.value === "custom_url" ? (K(), q("label", yB, [
+							J("span", bB, B(x.value.wake_word_url?.label), 1),
 							U(J("input", {
 								"onUpdate:modelValue": t[2] ||= (e) => p.wake_word_url = e,
 								type: "url",
 								placeholder: String(x.value.wake_word_url?.placeholder || "https://example.local/wake_word.wake-bundle.json"),
 								disabled: !!o.value,
 								onInput: t[3] ||= (e) => qe(p, "wake_word_url", p.wake_word_url)
-							}, null, 40, wB), [[$, p.wake_word_url]]),
+							}, null, 40, xB), [[$, p.wake_word_url]]),
 							J("small", null, B(x.value.wake_word_url?.description), 1)
 						])) : Z("", !0)
 					])),
-					A.value ? (K(), q("div", TB, [
-						J("div", EB, [J("div", null, [t[44] ||= J("h3", null, "Wake word bundle", -1), J("p", null, "One bundle keeps the phrase consistent. MWW-only satellites load its microWakeWord model; capable satellites load " + B(E.value === "mww_oww" ? "MWW + OWW" : E.value === "mww_nww" ? `MWW + NWW ${j.value.toUpperCase()}` : E.value === "nww" ? `NWW ${j.value.toUpperCase()}` : "OWW") + ".", 1)]), J("span", null, B(he.value), 1)]),
-						J("div", DB, [(K(!0), q(G, null, W(De(x.value.oww_wake_word), (e) => (K(), q("button", {
+					A.value ? (K(), q("div", SB, [
+						J("div", CB, [J("div", null, [t[44] ||= J("h3", null, "Wake word bundle", -1), J("p", null, "One bundle keeps the phrase consistent. MWW-only satellites load its microWakeWord model; capable satellites load " + B(E.value === "mww_oww" ? "MWW + OWW" : E.value === "mww_nww" ? `MWW + NWW ${j.value.toUpperCase()}` : E.value === "nww" ? `NWW ${j.value.toUpperCase()}` : "OWW") + ".", 1)]), J("span", null, B(he.value), 1)]),
+						J("div", wB, [(K(!0), q(G, null, W(De(x.value.oww_wake_word), (e) => (K(), q("button", {
 							key: Oe(e),
 							type: "button",
 							class: z({ active: R.value === Oe(e) }),
@@ -20955,31 +20928,31 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 							J("i", null, B(Oe(e) === "hey_tater" ? "T" : Oe(e) === "catalog" ? "CAT" : "URL"), 1),
 							J("span", null, [J("strong", null, B(Ae(e)), 1), J("small", null, B(V(e)), 1)]),
 							t[45] ||= J("b", null, "✓", -1)
-						], 10, OB))), 128))]),
-						R.value === "catalog" ? (K(), q("label", kB, [
+						], 10, TB))), 128))]),
+						R.value === "catalog" ? (K(), q("label", EB, [
 							t[46] ||= J("span", { class: "tm-field-label" }, "Wake Bundle Catalog", -1),
 							U(J("select", {
 								"onUpdate:modelValue": t[4] ||= (e) => p.oww_wake_word_catalog_url = e,
 								disabled: !!o.value || !De(x.value.oww_wake_word_catalog_url).length,
 								onChange: t[5] ||= (e) => qe(p, "oww_wake_word_catalog_url", p.oww_wake_word_catalog_url)
-							}, [De(x.value.oww_wake_word_catalog_url).length ? Z("", !0) : (K(), q("option", jB, "Awaiting the first verified wake bundle")), (K(!0), q(G, null, W(De(x.value.oww_wake_word_catalog_url), (e) => (K(), q("option", {
+							}, [De(x.value.oww_wake_word_catalog_url).length ? Z("", !0) : (K(), q("option", OB, "Awaiting the first verified wake bundle")), (K(!0), q(G, null, W(De(x.value.oww_wake_word_catalog_url), (e) => (K(), q("option", {
 								key: Oe(e),
 								value: Oe(e)
-							}, B(ke(e)), 9, MB))), 128))], 40, AB), [[_s, p.oww_wake_word_catalog_url]]),
+							}, B(ke(e)), 9, kB))), 128))], 40, DB), [[_s, p.oww_wake_word_catalog_url]]),
 							J("small", null, B(x.value.oww_wake_word_catalog_url?.description), 1)
 						])) : Z("", !0),
-						R.value === "custom_url" ? (K(), q("label", NB, [
-							J("span", PB, B(x.value.oww_wake_word_url?.label), 1),
+						R.value === "custom_url" ? (K(), q("label", AB, [
+							J("span", jB, B(x.value.oww_wake_word_url?.label), 1),
 							U(J("input", {
 								"onUpdate:modelValue": t[6] ||= (e) => p.oww_wake_word_url = e,
 								type: "url",
 								placeholder: String(x.value.oww_wake_word_url?.placeholder || "https://example.local/hey_tater.wake-bundle.json"),
 								disabled: !!o.value,
 								onInput: t[7] ||= (e) => qe(p, "oww_wake_word_url", p.oww_wake_word_url)
-							}, null, 40, FB), [[$, p.oww_wake_word_url]]),
+							}, null, 40, MB), [[$, p.oww_wake_word_url]]),
 							J("small", null, B(x.value.oww_wake_word_url?.description), 1)
 						])) : Z("", !0),
-						k.value ? (K(), q("div", IB, [t[48] ||= J("span", null, "NanoWakeWord architecture", -1), J("div", LB, [(K(!0), q(G, null, W(De(x.value.nww_architecture), (e) => (K(), q("button", {
+						k.value ? (K(), q("div", NB, [t[48] ||= J("span", null, "NanoWakeWord architecture", -1), J("div", PB, [(K(!0), q(G, null, W(De(x.value.nww_architecture), (e) => (K(), q("button", {
 							key: Oe(e),
 							type: "button",
 							class: z({ active: j.value === Oe(e) }),
@@ -20989,10 +20962,10 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 							J("i", null, B(Oe(e).toUpperCase()), 1),
 							J("span", null, [J("strong", null, B(ke(e)), 1), J("small", null, B(je(e) ? "Not included in this bundle" : "Available in this bundle"), 1)]),
 							t[47] ||= J("b", null, "✓", -1)
-						], 10, RB))), 128))])])) : Z("", !0),
-						_e.value.length ? (K(), q("section", zB, [
+						], 10, FB))), 128))])])) : Z("", !0),
+						_e.value.length ? (K(), q("section", IB, [
 							J("header", null, [J("div", null, [t[49] ||= J("span", null, "Included models", -1), J("strong", null, B(ge.value), 1)]), t[50] ||= J("b", null, "Read only", -1)]),
-							J("div", BB, [(K(!0), q(G, null, W(_e.value, (e) => (K(), q("div", {
+							J("div", LB, [(K(!0), q(G, null, W(_e.value, (e) => (K(), q("div", {
 								key: String(e.key),
 								class: z(["tm-wake-bundle-model", { missing: !e.included }])
 							}, [
@@ -21003,26 +20976,26 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 							t[51] ||= J("small", null, "These are the validated models inside the bundle currently loaded by Tater.", -1)
 						])) : Z("", !0)
 					])) : Z("", !0)
-				])) : (K(), q("div", VB, [J("strong", null, B(pe.value) + " selected", 1), J("span", null, B(xe[w.value]?.short) + " Wake-model selection is not needed for this mode.", 1)]))
+				])) : (K(), q("div", RB, [J("strong", null, B(pe.value) + " selected", 1), J("span", null, B(xe[w.value]?.short) + " Wake-model selection is not needed for this mode.", 1)]))
 			])) : Z("", !0),
-			u.value ? (K(), q("article", HB, [
+			u.value ? (K(), q("article", zB, [
 				t[56] ||= J("header", null, [J("div", null, [
 					J("span", { class: "tv-eyebrow" }, "Step 2 · Audio capture"),
 					J("h3", null, "Send audio to trainer"),
 					J("p", null, "Satellites upload directly to the trainer URL. No link required.")
 				])], -1),
-				J("div", UB, [J("label", WB, [t[52] ||= J("span", null, [J("strong", null, "Good wakes"), J("small", null, "Send confirmed wakes to improve recognition.")], -1), U(J("input", {
+				J("div", BB, [J("label", VB, [t[52] ||= J("span", null, [J("strong", null, "Good wakes"), J("small", null, "Send confirmed wakes to improve recognition.")], -1), U(J("input", {
 					"onUpdate:modelValue": t[8] ||= (e) => m.capture_wake_audio = e,
 					type: "checkbox",
 					disabled: !!o.value,
 					onChange: t[9] ||= (e) => qe(m, "capture_wake_audio", m.capture_wake_audio)
-				}, null, 40, GB), [[ms, m.capture_wake_audio]])]), J("label", KB, [t[53] ||= J("span", null, [J("strong", null, "Close misses"), J("small", null, "Send near-wakes that can improve model tuning.")], -1), U(J("input", {
+				}, null, 40, HB), [[ms, m.capture_wake_audio]])]), J("label", UB, [t[53] ||= J("span", null, [J("strong", null, "Close misses"), J("small", null, "Send near-wakes that can improve model tuning.")], -1), U(J("input", {
 					"onUpdate:modelValue": t[10] ||= (e) => m.capture_close_misses = e,
 					type: "checkbox",
 					disabled: !!o.value,
 					onChange: t[11] ||= (e) => qe(m, "capture_close_misses", m.capture_close_misses)
-				}, null, 40, qB), [[ms, m.capture_close_misses]])])]),
-				J("label", JB, [
+				}, null, 40, WB), [[ms, m.capture_close_misses]])])]),
+				J("label", GB, [
 					t[54] ||= J("span", { class: "tm-field-label" }, "Trainer URL for audio", -1),
 					U(J("input", {
 						"onUpdate:modelValue": t[12] ||= (e) => m.trainer_app_url = e,
@@ -21030,67 +21003,67 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 						placeholder: String(S.value.trainer_app_url?.placeholder || "http://trainer.local:8789"),
 						disabled: !!o.value,
 						onInput: t[13] ||= (e) => qe(m, "trainer_app_url", m.trainer_app_url)
-					}, null, 40, YB), [[$, m.trainer_app_url]]),
+					}, null, 40, KB), [[$, m.trainer_app_url]]),
 					t[55] ||= J("small", null, "The destination for the wake clips selected above.", -1)
 				])
 			])) : Z("", !0),
-			f.value ? (K(), q("article", XB, [
+			f.value ? (K(), q("article", qB, [
 				J("header", null, [t[57] ||= J("div", null, [
 					J("span", { class: "tv-eyebrow" }, "Optional · Auto-training"),
 					J("h3", null, "Auto-training link"),
 					J("p", null, "Automatically apply newly trained wake models. Audio uploads do not need this link.")
-				], -1), J("span", ZB, B(f.value.status_label), 1)]),
-				f.value?.linked ? (K(), q("div", QB, [J("div", null, [t[58] ||= J("i", null, "✓", -1), J("span", null, [J("strong", null, B(f.value.trainer_name), 1), J("small", null, "Last model: " + B(f.value.last_wake_word || "No model published yet") + " · " + B(f.value.last_publish_at || "Waiting for first publish"), 1)])]), J("button", {
+				], -1), J("span", JB, B(f.value.status_label), 1)]),
+				f.value?.linked ? (K(), q("div", YB, [J("div", null, [t[58] ||= J("i", null, "✓", -1), J("span", null, [J("strong", null, B(f.value.trainer_name), 1), J("small", null, "Last model: " + B(f.value.last_wake_word || "No model published yet") + " · " + B(f.value.last_publish_at || "Waiting for first publish"), 1)])]), J("button", {
 					class: "tv-button danger",
 					type: "button",
 					disabled: !!o.value,
 					onClick: tt
-				}, "Unlink", 8, $B)])) : (K(), q("div", eV, [t[59] ||= J("div", null, [J("i", null, "↗"), J("span", null, [J("strong", null, "Allow model updates from your trainer"), J("small", null, "Use the trainer’s Auto tab and a short pairing code.")])], -1), J("div", tV, [J("button", {
+				}, "Unlink", 8, XB)])) : (K(), q("div", ZB, [t[59] ||= J("div", null, [J("i", null, "↗"), J("span", null, [J("strong", null, "Allow model updates from your trainer"), J("small", null, "Use the trainer’s Auto tab and a short pairing code.")])], -1), J("div", QB, [J("button", {
 					class: "tv-button",
 					type: "button",
 					disabled: !!o.value,
 					onClick: Ze
-				}, B(g.value ? "Restart pairing" : "Link for auto-training"), 9, nV), g.value && ye.value === "waiting" ? (K(), q("button", {
+				}, B(g.value ? "Restart pairing" : "Link for auto-training"), 9, $B), g.value && ye.value === "waiting" ? (K(), q("button", {
 					key: 0,
 					class: "tv-button",
 					type: "button",
 					disabled: !!o.value,
 					onClick: Qe
-				}, "Check link", 8, rV)) : Z("", !0)])])),
+				}, "Check link", 8, eV)) : Z("", !0)])])),
 				g.value && !f.value?.linked ? (K(), q("div", {
 					key: 2,
 					class: z(["tm-pairing-box", { expired: ye.value === "expired" }])
 				}, [
 					t[60] ||= J("span", null, "Pairing code", -1),
 					J("strong", null, B(ye.value === "expired" ? "Expired" : ve.value || "Creating…"), 1),
-					ye.value === "waiting" ? (K(), q("small", iV, "Expires in " + B(Me(be.value)), 1)) : ye.value === "expired" ? (K(), q("small", aV, "Restart pairing to create a new code.")) : Z("", !0),
+					ye.value === "waiting" ? (K(), q("small", tV, "Expires in " + B(Me(be.value)), 1)) : ye.value === "expired" ? (K(), q("small", nV, "Restart pairing to create a new code.")) : Z("", !0),
 					g.value.pairing_url || g.value.url ? (K(), q("a", {
 						key: 2,
 						href: String(g.value.pairing_url || g.value.url),
 						target: "_blank",
 						rel: "noreferrer"
-					}, "Open trainer pairing", 8, oV)) : Z("", !0)
+					}, "Open trainer pairing", 8, rV)) : Z("", !0)
 				], 2)) : Z("", !0)
 			])) : Z("", !0),
-			l.value && w.value === "micro_wake_word" ? (K(), q("article", sV, [
+			l.value && w.value === "micro_wake_word" ? (K(), q("article", iV, [
 				J("header", null, [t[61] ||= J("div", null, [
 					J("span", { class: "tv-eyebrow" }, "Step 3 · Tune"),
 					J("h3", null, "Wake model overrides"),
 					J("p", null, "Each active engine starts with the values validated by its selected bundle. Enable an override only when you want to trade sensitivity, false wakes, or response time.")
-				], -1), J("span", cV, B(pe.value), 1)]),
-				J("div", lV, [
+				], -1), J("span", aV, B(pe.value), 1)]),
+				J("div", oV, [
 					D.value ? (K(), q("section", {
 						key: 0,
 						class: z(["tm-wake-tuning-model", { active: !!p.mww_tuning_override_enabled }])
 					}, [
 						J("header", null, [t[63] ||= J("i", null, "MW", -1), J("div", null, [t[62] ||= J("strong", null, "microWakeWord", -1), J("small", null, "Bundle: threshold " + B(x.value.mww_threshold_override?.default) + " · window " + B(x.value.mww_sliding_window_override?.default), 1)])]),
-						J("label", uV, [t[64] ||= J("span", null, [J("strong", null, "Override bundle values"), J("small", null, "Applies to the MWW half of built-in, catalog, and custom bundles.")], -1), U(J("input", {
+						J("label", sV, [t[64] ||= J("span", null, [J("strong", null, "Override bundle values"), J("small", null, "Applies to the MWW half of built-in, catalog, and custom bundles.")], -1), U(J("input", {
 							"onUpdate:modelValue": t[14] ||= (e) => p.mww_tuning_override_enabled = e,
 							type: "checkbox",
 							disabled: !!o.value,
 							onChange: t[15] ||= (e) => qe(p, "mww_tuning_override_enabled", p.mww_tuning_override_enabled)
-						}, null, 40, dV), [[ms, p.mww_tuning_override_enabled]])]),
-						p.mww_tuning_override_enabled ? (K(), q("div", fV, [J("label", null, [
+						}, null, 40, cV), [[ms, p.mww_tuning_override_enabled]])]),
+						p.mww_tuning_override_enabled ? (K(), q("div", lV, [J("label", null, [
 							t[65] ||= J("span", null, "Threshold", -1),
 							U(J("input", {
 								"onUpdate:modelValue": t[16] ||= (e) => p.mww_threshold_override = e,
@@ -21100,7 +21073,7 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 								step: x.value.mww_threshold_override?.step ?? .01,
 								disabled: !!o.value,
 								onInput: t[17] ||= (e) => qe(p, "mww_threshold_override", p.mww_threshold_override)
-							}, null, 40, pV), [[
+							}, null, 40, uV), [[
 								$,
 								p.mww_threshold_override,
 								void 0,
@@ -21117,7 +21090,7 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 								step: 1,
 								disabled: !!o.value,
 								onInput: t[19] ||= (e) => qe(p, "mww_sliding_window_override", p.mww_sliding_window_override)
-							}, null, 40, mV), [[
+							}, null, 40, dV), [[
 								$,
 								p.mww_sliding_window_override,
 								void 0,
@@ -21131,13 +21104,13 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 						class: z(["tm-wake-tuning-model", { active: !!p.oww_tuning_override_enabled }])
 					}, [
 						J("header", null, [t[69] ||= J("i", null, "OW", -1), J("div", null, [J("strong", null, "openWakeWord" + B(E.value === "mww_oww" ? " confirmation" : ""), 1), J("small", null, "Bundle: threshold " + B(M.value) + " · patience " + B(N.value), 1)])]),
-						J("label", hV, [t[70] ||= J("span", null, [J("strong", null, "Override bundle values"), J("small", null, "Applies to the OWW model from any supported wake-bundle source.")], -1), U(J("input", {
+						J("label", fV, [t[70] ||= J("span", null, [J("strong", null, "Override bundle values"), J("small", null, "Applies to the OWW model from any supported wake-bundle source.")], -1), U(J("input", {
 							"onUpdate:modelValue": t[20] ||= (e) => p.oww_tuning_override_enabled = e,
 							type: "checkbox",
 							disabled: !!o.value,
 							onChange: t[21] ||= (e) => qe(p, "oww_tuning_override_enabled", p.oww_tuning_override_enabled)
-						}, null, 40, gV), [[ms, p.oww_tuning_override_enabled]])]),
-						p.oww_tuning_override_enabled ? (K(), q("div", _V, [J("label", null, [
+						}, null, 40, pV), [[ms, p.oww_tuning_override_enabled]])]),
+						p.oww_tuning_override_enabled ? (K(), q("div", mV, [J("label", null, [
 							t[71] ||= J("span", null, "Threshold", -1),
 							U(J("input", {
 								"onUpdate:modelValue": t[22] ||= (e) => p.oww_threshold_override = e,
@@ -21147,7 +21120,7 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 								step: x.value.oww_threshold_override?.step ?? .01,
 								disabled: !!o.value,
 								onInput: t[23] ||= (e) => qe(p, "oww_threshold_override", p.oww_threshold_override)
-							}, null, 40, vV), [[
+							}, null, 40, hV), [[
 								$,
 								p.oww_threshold_override,
 								void 0,
@@ -21164,7 +21137,7 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 								step: 1,
 								disabled: !!o.value,
 								onInput: t[25] ||= (e) => qe(p, "oww_patience_override", p.oww_patience_override)
-							}, null, 40, yV), [[
+							}, null, 40, gV), [[
 								$,
 								p.oww_patience_override,
 								void 0,
@@ -21178,13 +21151,13 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 						class: z(["tm-wake-tuning-model", { active: !!p.nww_tuning_override_enabled }])
 					}, [
 						J("header", null, [t[75] ||= J("i", null, "NW", -1), J("div", null, [J("strong", null, "NanoWakeWord " + B(j.value.toUpperCase()), 1), J("small", null, "Bundle: threshold " + B(P.value) + " · patience " + B(F.value), 1)])]),
-						J("label", bV, [t[76] ||= J("span", null, [J("strong", null, "Override bundle values"), J("small", null, "Applies to the selected CNN or GRU model from any supported bundle source.")], -1), U(J("input", {
+						J("label", _V, [t[76] ||= J("span", null, [J("strong", null, "Override bundle values"), J("small", null, "Applies to the selected CNN or GRU model from any supported bundle source.")], -1), U(J("input", {
 							"onUpdate:modelValue": t[26] ||= (e) => p.nww_tuning_override_enabled = e,
 							type: "checkbox",
 							disabled: !!o.value,
 							onChange: t[27] ||= (e) => qe(p, "nww_tuning_override_enabled", p.nww_tuning_override_enabled)
-						}, null, 40, xV), [[ms, p.nww_tuning_override_enabled]])]),
-						p.nww_tuning_override_enabled ? (K(), q("div", SV, [J("label", null, [
+						}, null, 40, vV), [[ms, p.nww_tuning_override_enabled]])]),
+						p.nww_tuning_override_enabled ? (K(), q("div", yV, [J("label", null, [
 							t[77] ||= J("span", null, "Threshold", -1),
 							U(J("input", {
 								"onUpdate:modelValue": t[28] ||= (e) => p.nww_threshold_override = e,
@@ -21194,7 +21167,7 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 								step: x.value.nww_threshold_override?.step ?? .01,
 								disabled: !!o.value,
 								onInput: t[29] ||= (e) => qe(p, "nww_threshold_override", p.nww_threshold_override)
-							}, null, 40, CV), [[
+							}, null, 40, bV), [[
 								$,
 								p.nww_threshold_override,
 								void 0,
@@ -21211,7 +21184,7 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 								step: 1,
 								disabled: !!o.value,
 								onInput: t[31] ||= (e) => qe(p, "nww_patience_override", p.nww_patience_override)
-							}, null, 40, wV), [[
+							}, null, 40, xV), [[
 								$,
 								p.nww_patience_override,
 								void 0,
@@ -21223,13 +21196,13 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 				]),
 				t[81] ||= J("div", { class: "tm-wake-model-note" }, "Overrides follow the selected model source, so they work with the built-in word, Wake Bundle Catalog, and custom bundle URLs. Turning an override off immediately restores the bundle’s validated values.", -1)
 			])) : Z("", !0),
-			d.value ? (K(), q("article", TV, [
+			d.value ? (K(), q("article", SV, [
 				J("header", null, [t[82] ||= J("div", null, [
 					J("span", { class: "tv-eyebrow" }, "Step 4 · Verify"),
 					J("h3", null, "STT wake verification"),
 					J("p", null, "Use the selected Speech STT engine for a fast second opinion after an on-device wake.")
-				], -1), J("span", EV, B(de.value), 1)]),
-				J("div", DV, [(K(!0), q(G, null, W(De(ee.value), (e) => (K(), q("button", {
+				], -1), J("span", CV, B(de.value), 1)]),
+				J("div", wV, [(K(!0), q(G, null, W(De(ee.value), (e) => (K(), q("button", {
 					key: Oe(e),
 					type: "button",
 					class: z({ active: ne.value === Oe(e) }),
@@ -21239,8 +21212,8 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 					J("i", null, B(we[Oe(e)]?.mark), 1),
 					J("span", null, [J("strong", null, B(we[Oe(e)]?.label || ke(e)), 1), J("small", null, B(we[Oe(e)]?.short), 1)]),
 					t[83] ||= J("b", null, "✓", -1)
-				], 10, OV))), 128))]),
-				J("section", kV, [
+				], 10, TV))), 128))]),
+				J("section", EV, [
 					J("header", null, [t[84] ||= J("div", null, [J("span", null, "STT match threshold"), J("strong", null, "How closely must the transcript match?")], -1), J("output", null, B(se.value) + "%", 1)]),
 					J("input", {
 						type: "range",
@@ -21251,14 +21224,14 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 						disabled: !!o.value,
 						"aria-label": "STT match threshold",
 						onInput: ze
-					}, null, 40, AV),
+					}, null, 40, DV),
 					t[85] ||= J("div", { class: "tm-wake-verifier-scale" }, [J("span", null, "50% · more tolerant"), J("span", null, "100% · exact match")], -1),
 					J("footer", null, [J("small", null, B(re.value.description || "Higher is stricter; lower tolerates harmless STT substitutions. The on-device wake model remains the first check."), 1), J("button", {
 						class: "tv-button",
 						type: "button",
 						disabled: !!o.value || oe.value === ae.value,
 						onClick: Be
-					}, "Reset to " + B(Math.round(ae.value * 100)) + "%", 9, jV)])
+					}, "Reset to " + B(Math.round(ae.value * 100)) + "%", 9, OV)])
 				]),
 				(K(!0), q(G, null, W(ce.value, (e) => (K(), q("section", {
 					key: String(e.key),
@@ -21275,65 +21248,65 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 						"aria-label": String(e.label),
 						"aria-valuetext": `${Ve(e)} ms`,
 						onInput: (t) => He(e, t)
-					}, null, 40, MV),
-					J("div", NV, [J("span", null, B(e.min) + " ms · " + B(e.min_label), 1), J("span", null, B(e.max) + " ms · " + B(e.max_label), 1)]),
+					}, null, 40, kV),
+					J("div", AV, [J("span", null, B(e.min) + " ms · " + B(e.min_label), 1), J("span", null, B(e.max) + " ms · " + B(e.max_label), 1)]),
 					J("footer", null, [J("small", null, B(e.description), 1), J("button", {
 						class: "tv-button",
 						type: "button",
 						disabled: !!o.value || Ve(e) === Number(e.default),
 						onClick: (t) => Ue(e)
-					}, "Reset to " + B(e.default) + " ms", 9, PV)])
+					}, "Reset to " + B(e.default) + " ms", 9, jV)])
 				]))), 128)),
-				J("div", FV, [J("div", null, [t[86] ||= J("span", null, "Current results", -1), J("strong", null, B(ue.value), 1)]), J("div", null, [t[87] ||= J("span", null, "Configured STT", -1), J("strong", null, B(de.value), 1)])]),
+				J("div", MV, [J("div", null, [t[86] ||= J("span", null, "Current results", -1), J("strong", null, B(ue.value), 1)]), J("div", null, [t[87] ||= J("span", null, "Configured STT", -1), J("strong", null, B(de.value), 1)])]),
 				Array.isArray(le.value.rows) ? (K(), q("details", {
 					key: 0,
 					class: "tm-wake-results",
 					open: !!le.value.rows.length
-				}, [J("summary", null, [J("span", null, [t[88] ||= J("strong", null, "Results by satellite", -1), J("small", null, B(le.value.rows.length) + " satellite" + B(le.value.rows.length === 1 ? "" : "s") + " with verification data", 1)]), t[89] ||= J("b", null, "⌄", -1)]), J("div", LV, [J("table", null, [J("thead", null, [J("tr", null, [(K(!0), q(G, null, W(le.value.columns || [], (e) => (K(), q("th", { key: String(e.key) }, B(e.label || e.key), 1))), 128))])]), J("tbody", null, [(K(!0), q(G, null, W(le.value.rows, (e, t) => (K(), q("tr", { key: t }, [(K(!0), q(G, null, W(le.value.columns || [], (t) => (K(), q("td", { key: String(t.key) }, B(e[String(t.key)] ?? "—"), 1))), 128))]))), 128)), le.value.rows.length ? Z("", !0) : (K(), q("tr", RV, [J("td", { colspan: Math.max(1, (le.value.columns || []).length) }, "No verifier results yet. Observe mode is a good way to collect data safely.", 8, zV)]))])])])], 8, IV)) : Z("", !0),
-				J("div", BV, [J("button", {
+				}, [J("summary", null, [J("span", null, [t[88] ||= J("strong", null, "Results by satellite", -1), J("small", null, B(le.value.rows.length) + " satellite" + B(le.value.rows.length === 1 ? "" : "s") + " with verification data", 1)]), t[89] ||= J("b", null, "⌄", -1)]), J("div", PV, [J("table", null, [J("thead", null, [J("tr", null, [(K(!0), q(G, null, W(le.value.columns || [], (e) => (K(), q("th", { key: String(e.key) }, B(e.label || e.key), 1))), 128))])]), J("tbody", null, [(K(!0), q(G, null, W(le.value.rows, (e, t) => (K(), q("tr", { key: t }, [(K(!0), q(G, null, W(le.value.columns || [], (t) => (K(), q("td", { key: String(t.key) }, B(e[String(t.key)] ?? "—"), 1))), 128))]))), 128)), le.value.rows.length ? Z("", !0) : (K(), q("tr", FV, [J("td", { colspan: Math.max(1, (le.value.columns || []).length) }, "No verifier results yet. Observe mode is a good way to collect data safely.", 8, IV)]))])])])], 8, NV)) : Z("", !0),
+				J("div", LV, [J("button", {
 					class: "tv-button danger",
 					type: "button",
 					disabled: !!o.value,
 					onClick: Xe
-				}, "Reset Verification Stats", 8, VV)])
+				}, "Reset Verification Stats", 8, RV)])
 			])) : Z("", !0)
 		]));
 	}
-}), UV = { class: "tset-resource tmodels-resource tm-native-models" }, WV = {
+}), BV = { class: "tset-resource tmodels-resource tm-native-models" }, VV = {
 	key: 0,
 	class: "tv-tabs tmodels-tabs",
 	"aria-label": "Model settings sections"
-}, GV = ["onClick"], KV = {
+}, HV = ["onClick"], UV = {
 	key: 1,
 	class: "tmodels-context"
-}, qV = {
+}, WV = {
 	key: 2,
 	class: "tv-notice error",
 	"aria-live": "polite"
-}, JV = {
+}, GV = {
 	key: 3,
 	class: "tv-notice",
 	"aria-live": "polite"
-}, YV = {
+}, KV = {
 	key: 10,
 	class: "tm-stack"
-}, XV = {
+}, qV = {
 	key: 14,
 	class: "tset-save-bar tmodels-save-bar"
-}, ZV = ["disabled"], QV = {
+}, JV = ["disabled"], YV = {
 	class: "tv-modal tm-pocket-setup",
 	role: "dialog",
 	"aria-modal": "true",
 	"aria-labelledby": "tm-pocket-setup-title"
-}, $V = {
+}, XV = {
 	key: 0,
 	class: "tv-notice",
 	role: "status"
-}, eH = {
+}, ZV = {
 	key: 1,
 	class: "tv-notice error",
 	role: "alert"
-}, tH = { "aria-hidden": "true" }, nH = { class: "tm-pocket-setup-steps" }, rH = { class: "tm-pocket-setup-actions" }, iH = ["disabled"], aH = ["disabled"], oH = /* @__PURE__ */ fr({
+}, QV = { "aria-hidden": "true" }, $V = { class: "tm-pocket-setup-steps" }, eH = { class: "tm-pocket-setup-actions" }, tH = ["disabled"], nH = ["disabled"], rH = /* @__PURE__ */ fr({
 	__name: "ModelsSettings",
 	props: {
 		settings: {},
@@ -21395,7 +21368,7 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 				label: "Face ID",
 				short: "Local face recognition model and processing status."
 			}
-		], o = new Set(a.map((e) => e.id)), s = /* @__PURE__ */ H(I(r.initialTab)), c = /* @__PURE__ */ Dt({}), l = /* @__PURE__ */ Dt({}), u = /* @__PURE__ */ H(!1), d = /* @__PURE__ */ H(""), f = /* @__PURE__ */ H(""), p = /* @__PURE__ */ H(null), m = /* @__PURE__ */ H(null), h = /* @__PURE__ */ H(null), g = /* @__PURE__ */ H("people"), _ = /* @__PURE__ */ H(null), v = /* @__PURE__ */ H(null), y = /* @__PURE__ */ H({}), b = /* @__PURE__ */ H(!1), x = /* @__PURE__ */ H({}), S = /* @__PURE__ */ H(""), C = /* @__PURE__ */ H(!1), w = /* @__PURE__ */ H(!1), T = /* @__PURE__ */ H(!1), E = /* @__PURE__ */ H(""), D = /* @__PURE__ */ H(r.settings.hf_browser_integration && typeof r.settings.hf_browser_integration == "object" ? L(r.settings.hf_browser_integration) : {}), O = null, k = null, A = Q(() => a.find((e) => e.id === s.value) || a[0]), j = Q(() => c.local_llm_models && typeof c.local_llm_models == "object" ? c.local_llm_models : {}), M = Q(() => {
+		], o = new Set(a.map((e) => e.id)), s = /* @__PURE__ */ H(F(r.initialTab)), c = /* @__PURE__ */ Dt({}), l = /* @__PURE__ */ Dt({}), u = /* @__PURE__ */ H(!1), d = /* @__PURE__ */ H(""), f = /* @__PURE__ */ H(""), p = /* @__PURE__ */ H(null), m = /* @__PURE__ */ H(null), h = /* @__PURE__ */ H(null), g = /* @__PURE__ */ H("people"), _ = /* @__PURE__ */ H(null), v = /* @__PURE__ */ H(null), y = /* @__PURE__ */ H({}), b = /* @__PURE__ */ H(!1), x = /* @__PURE__ */ H({}), S = /* @__PURE__ */ H(""), C = /* @__PURE__ */ H(!1), w = /* @__PURE__ */ H(!1), T = /* @__PURE__ */ H(!1), E = /* @__PURE__ */ H(""), D = /* @__PURE__ */ H(r.settings.hf_browser_integration && typeof r.settings.hf_browser_integration == "object" ? I(r.settings.hf_browser_integration) : {}), O = null, k = null, A = Q(() => a.find((e) => e.id === s.value) || a[0]), j = Q(() => c.local_llm_models && typeof c.local_llm_models == "object" ? c.local_llm_models : {}), M = Q(() => {
 			switch (s.value) {
 				case "routing": return {
 					label: "Save & Apply LLM Settings",
@@ -21431,26 +21404,19 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 				};
 				case "faceid": return {
 					label: "Apply Face ID Settings",
-					note: "Updates the recognition model and live runtime state."
+					note: "Updates face recognition and live runtime state."
 				};
 				default: return null;
 			}
-		}), N = Q(() => c.face_id && typeof c.face_id == "object" ? c.face_id : {}), P = Q(() => Array.isArray(N.value.available_models) ? N.value.available_models : [{
-			id: "facenet512",
-			label: "FaceNet512"
-		}, {
-			id: "adaface_ir50_webface4m",
-			label: "AdaFace IR-50 · WebFace4M",
-			experimental: !0
-		}]), F = Q(() => !!D.value.ready && !T.value && !E.value);
-		function I(e) {
+		}), N = Q(() => c.face_id && typeof c.face_id == "object" ? c.face_id : {}), P = Q(() => !!D.value.ready && !T.value && !E.value);
+		function F(e) {
 			let t = String(e || "").trim().toLowerCase();
 			return o.has(t) ? t : "huggingface";
 		}
-		function L(e) {
+		function I(e) {
 			return JSON.parse(JSON.stringify(e ?? {}));
 		}
-		function R(e) {
+		function L(e) {
 			(!e.esphome_settings || typeof e.esphome_settings != "object") && (e.esphome_settings = {});
 			let t = e.esphome_settings, n = e.voice_model_ui && typeof e.voice_model_ui == "object" ? e.voice_model_ui : {};
 			(Array.isArray(n.sections) ? n.sections : []).forEach((e) => {
@@ -21465,37 +21431,37 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 				});
 			});
 		}
-		function ee(e, t = !1) {
+		function R(e, t = !1) {
 			let n = { ...l };
-			Object.keys(c).forEach((e) => delete c[e]), Object.assign(c, L(e || {})), c.hydra_llama_cpp_slot_count = Number(c.hydra_llama_cpp_slot_count || 1) >= 4 ? "5" : "1", Object.prototype.hasOwnProperty.call(c, "hydra_llm_thinking_enabled") || (c.hydra_llm_thinking_enabled = !1), Object.prototype.hasOwnProperty.call(c, "hydra_decision_router_mode") || (c.hydra_decision_router_mode = "off"), Object.prototype.hasOwnProperty.call(c, "hydra_decision_router_model") || (c.hydra_decision_router_model = ""), Object.prototype.hasOwnProperty.call(c, "hydra_decision_router_confidence") || (c.hydra_decision_router_confidence = .9), (!Array.isArray(c.hydra_base_servers) || !c.hydra_base_servers.length) && (c.hydra_base_servers = [{
+			Object.keys(c).forEach((e) => delete c[e]), Object.assign(c, I(e || {})), c.hydra_llama_cpp_slot_count = Number(c.hydra_llama_cpp_slot_count || 1) >= 4 ? "5" : "1", Object.prototype.hasOwnProperty.call(c, "hydra_llm_thinking_enabled") || (c.hydra_llm_thinking_enabled = !1), Object.prototype.hasOwnProperty.call(c, "hydra_decision_router_mode") || (c.hydra_decision_router_mode = "off"), Object.prototype.hasOwnProperty.call(c, "hydra_decision_router_model") || (c.hydra_decision_router_model = ""), Object.prototype.hasOwnProperty.call(c, "hydra_decision_router_confidence") || (c.hydra_decision_router_confidence = .9), (!Array.isArray(c.hydra_base_servers) || !c.hydra_base_servers.length) && (c.hydra_base_servers = [{
 				provider: c.hydra_llm_provider || "openai_compatible",
 				host: c.hydra_llm_host || "",
 				port: c.hydra_llm_port || "",
 				model: c.hydra_llm_model || "",
 				api_key: c.hydra_llm_api_key || "",
 				llama_cpp_slot: c.hydra_llama_cpp_base_slot || ""
-			}]), (!c.face_id || typeof c.face_id != "object") && (c.face_id = {}), R(c), Object.keys(l).forEach((e) => {
+			}]), (!c.face_id || typeof c.face_id != "object") && (c.face_id = {}), L(c), Object.keys(l).forEach((e) => {
 				l[e] = t ? !!n[e] : !1;
 			});
 		}
-		function te() {
+		function ee() {
 			l[s.value] = !0, d.value = "", f.value = "";
 		}
-		function ne(e) {
+		function te(e) {
 			g.value = e === "settings" ? "settings" : "people";
 		}
-		function re(e) {
-			s.value = I(e), s.value === "speakerid" && (g.value = "people"), d.value = "", f.value = "", r.onTabChange?.(s.value), [
+		function ne(e) {
+			s.value = F(e), s.value === "speakerid" && (g.value = "people"), d.value = "", f.value = "", r.onTabChange?.(s.value), [
 				"routing",
 				"vision",
 				"audio-understanding"
-			].includes(s.value) && ie(), s.value === "faceid" && je();
+			].includes(s.value) && re(), s.value === "faceid" && V();
 		}
-		async function ie() {
+		async function re() {
 			if (!C.value) {
 				C.value = !0;
 				try {
-					V(await Is(r.endpoints.modelsLocalLlm));
+					Ae(await Is(r.endpoints.modelsLocalLlm));
 				} catch (e) {
 					d.value = e instanceof Error ? e.message : "Installed models could not be refreshed.";
 				} finally {
@@ -21503,18 +21469,18 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 				}
 			}
 		}
-		function ae(e) {
+		function ie(e) {
 			return String(e || "") === "llama_cpp";
 		}
-		function oe(e, t, n = {}) {
+		function ae(e, t, n = {}) {
 			let r = String(e || ""), i = String(t || "").trim();
-			return ae(r) && i ? {
+			return ie(r) && i ? {
 				provider: r,
 				model: i,
 				...n
 			} : null;
 		}
-		function se(e) {
+		function oe(e) {
 			let t = /* @__PURE__ */ new Map();
 			return e.filter(Boolean).forEach((e) => {
 				let n = e, r = `${n.provider}|${n.model}`;
@@ -21528,10 +21494,10 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 				}
 			}), [...t.values()];
 		}
-		function ce(e) {
+		function se(e) {
 			return String(e ?? "").trim();
 		}
-		function le() {
+		function ce() {
 			let e = (Array.isArray(c.hydra_base_servers) ? c.hydra_base_servers : []).map((e) => ({
 				provider: String(e.provider || "openai_compatible"),
 				host: String(e.host || "").trim(),
@@ -21565,7 +21531,7 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 				"hydra_decision_router_confidence",
 				"hydra_beast_mode_enabled"
 			].map((e) => [e, c[e]]));
-			n.tater_open_webui_llm_port = ce(c.tater_open_webui_llm_port), Object.assign(n, {
+			n.tater_open_webui_llm_port = se(c.tater_open_webui_llm_port), Object.assign(n, {
 				hydra_llm_provider: t.provider || "openai_compatible",
 				hydra_llm_host: t.host || "",
 				hydra_llm_port: t.port || "",
@@ -21574,8 +21540,8 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 				hydra_llama_cpp_base_slot: t.llama_cpp_slot || "",
 				hydra_base_servers: e
 			});
-			let r = e.map((e) => oe(e.provider, e.model, { roles: ["Base"] }));
-			return c.tater_open_webui_llm_provider && r.push(oe(c.tater_open_webui_llm_provider, c.tater_open_webui_llm_model, { roles: ["Tater Open WebUI"] })), c.spudex_llm_provider && r.push(oe(c.spudex_llm_provider, c.spudex_llm_model)), ["observe", "active"].includes(String(c.hydra_decision_router_mode || "off")) && r.push(oe("llama_cpp", c.hydra_decision_router_model, { roles: ["Decision Router"] })), [
+			let r = e.map((e) => ae(e.provider, e.model, { roles: ["Base"] }));
+			return c.tater_open_webui_llm_provider && r.push(ae(c.tater_open_webui_llm_provider, c.tater_open_webui_llm_model, { roles: ["Tater Open WebUI"] })), c.spudex_llm_provider && r.push(ae(c.spudex_llm_provider, c.spudex_llm_model)), ["observe", "active"].includes(String(c.hydra_decision_router_mode || "off")) && r.push(ae("llama_cpp", c.hydra_decision_router_model, { roles: ["Decision Router"] })), [
 				"astraeus",
 				"thanatos",
 				"hermes"
@@ -21589,50 +21555,50 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 					"llama_cpp_slot"
 				].forEach((t) => {
 					let r = c[`hydra_llm_${e}_${t}`] ?? "";
-					n[`hydra_llm_${e}_${t}`] = t === "port" ? ce(r) : r;
-				}), r.push(oe(c[`hydra_llm_${e}_provider`], c[`hydra_llm_${e}_model`], { roles: [e] }));
-			}), n.hydra_local_model_load_targets = se(r), n;
+					n[`hydra_llm_${e}_${t}`] = t === "port" ? se(r) : r;
+				}), r.push(ae(c[`hydra_llm_${e}_provider`], c[`hydra_llm_${e}_model`], { roles: [e] }));
+			}), n.hydra_local_model_load_targets = oe(r), n;
 		}
-		function ue() {
-			let e = (Array.isArray(c.hydra_base_servers) ? c.hydra_base_servers : []).findIndex((e) => ae(e.provider) && !String(e.model || "").trim());
+		function le() {
+			let e = (Array.isArray(c.hydra_base_servers) ? c.hydra_base_servers : []).findIndex((e) => ie(e.provider) && !String(e.model || "").trim());
 			if (e >= 0) return `Choose a downloaded model for ${e === 0 ? "the primary Base server" : `fallback server ${e}`}.`;
 			if (c.tater_open_webui_llm_provider && !String(c.tater_open_webui_llm_model || "").trim()) return "Choose a model for Tater Open WebUI.";
-			if (c.spudex_llm_provider && ae(c.spudex_llm_provider) && !String(c.spudex_llm_model || "").trim()) return "Choose a downloaded model for Terminal.";
+			if (c.spudex_llm_provider && ie(c.spudex_llm_provider) && !String(c.spudex_llm_model || "").trim()) return "Choose a downloaded model for Terminal.";
 			if (["observe", "active"].includes(String(c.hydra_decision_router_mode || "off")) && !String(c.hydra_decision_router_model || "").trim()) return "Choose a downloaded model for the Decision Router.";
 			if (c.hydra_beast_mode_enabled) {
 				for (let e of [
 					"astraeus",
 					"thanatos",
 					"hermes"
-				]) if (ae(c[`hydra_llm_${e}_provider`]) && !String(c[`hydra_llm_${e}_model`] || "").trim()) return `Choose a downloaded model for ${e.charAt(0).toUpperCase() + e.slice(1)}.`;
+				]) if (ie(c[`hydra_llm_${e}_provider`]) && !String(c[`hydra_llm_${e}_model`] || "").trim()) return `Choose a downloaded model for ${e.charAt(0).toUpperCase() + e.slice(1)}.`;
 			}
 			return "";
 		}
-		let de = [
+		let ue = [
 			"speech_stt_backend",
 			"speech_qwen3_asr_model",
 			"speech_acceleration",
 			"speech_wyoming_stt_host",
 			"speech_wyoming_stt_port"
-		], fe = /* @__PURE__ */ "speech_tts_backend.speech_tts_model.speech_tts_voice.speech_pocket_tts_output_gain.speech_tts_clone_text.speech_qwen_tts_language.speech_qwen_tts_instruct.speech_omnivoice_tts_language.speech_omnivoice_tts_instruct.speech_wyoming_tts_host.speech_wyoming_tts_port.speech_wyoming_tts_voice.speech_openai_tts_base_url.speech_openai_tts_api_key.speech_announcement_tts_backend.speech_announcement_tts_model.speech_announcement_tts_voice.speech_announcement_pocket_tts_output_gain.speech_announcement_tts_clone_text.speech_announcement_qwen_tts_language.speech_announcement_qwen_tts_instruct.speech_announcement_omnivoice_tts_language.speech_announcement_omnivoice_tts_instruct.speech_satellite_ducking_target_percent.speech_satellite_ducking_attack_ms.speech_satellite_ducking_release_ms.speech_announcement_wyoming_tts_host.speech_announcement_wyoming_tts_port.speech_announcement_wyoming_tts_voice.speech_announcement_openai_tts_base_url.speech_announcement_openai_tts_api_key".split(".");
-		function pe() {
+		], de = /* @__PURE__ */ "speech_tts_backend.speech_tts_model.speech_tts_voice.speech_pocket_tts_output_gain.speech_tts_clone_text.speech_qwen_tts_language.speech_qwen_tts_instruct.speech_omnivoice_tts_language.speech_omnivoice_tts_instruct.speech_wyoming_tts_host.speech_wyoming_tts_port.speech_wyoming_tts_voice.speech_openai_tts_base_url.speech_openai_tts_api_key.speech_announcement_tts_backend.speech_announcement_tts_model.speech_announcement_tts_voice.speech_announcement_pocket_tts_output_gain.speech_announcement_tts_clone_text.speech_announcement_qwen_tts_language.speech_announcement_qwen_tts_instruct.speech_announcement_omnivoice_tts_language.speech_announcement_omnivoice_tts_instruct.speech_satellite_ducking_target_percent.speech_satellite_ducking_attack_ms.speech_satellite_ducking_release_ms.speech_announcement_wyoming_tts_host.speech_announcement_wyoming_tts_port.speech_announcement_wyoming_tts_voice.speech_announcement_openai_tts_base_url.speech_announcement_openai_tts_api_key".split(".");
+		function fe() {
 			return {
-				...Object.fromEntries(de.map((e) => [e, c[e]])),
-				esphome_settings: L(c.esphome_settings || {})
+				...Object.fromEntries(ue.map((e) => [e, c[e]])),
+				esphome_settings: I(c.esphome_settings || {})
 			};
 		}
-		function me() {
-			return Object.fromEntries(fe.map((e) => [e, c[e]]));
+		function pe() {
+			return Object.fromEntries(de.map((e) => [e, c[e]]));
 		}
-		function he(e) {
+		function me(e) {
 			return [e.speech_tts_backend, e.speech_announcement_tts_backend].some((e) => String(e || "").trim().toLowerCase() === "pocket_tts");
 		}
-		async function ge() {
+		async function he() {
 			if (T.value) return !1;
 			T.value = !0, E.value = "";
 			try {
 				let e = await Is(r.endpoints.modelsHuggingFaceStatus);
-				return D.value = e, c.hf_browser_integration = L(e), !!e.ready;
+				return D.value = e, c.hf_browser_integration = I(e), !!e.ready;
 			} catch (e) {
 				return E.value = e instanceof Error ? e.message : "Hugging Face setup status could not be checked.", D.value = {
 					...D.value,
@@ -21642,21 +21608,21 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 				T.value = !1;
 			}
 		}
-		function _e() {
+		function ge() {
 			w.value = !1;
 		}
-		function ve() {
-			_e();
+		function _e() {
+			ge();
 			let e = new URL(window.location.href);
 			e.hash = "/integrations", window.history.pushState({
 				...window.history.state || {},
 				taterView: "integrations"
 			}, "", e), window.dispatchEvent(new PopStateEvent("popstate", { state: window.history.state }));
 		}
-		async function ye() {
-			F.value && (w.value = !1, await Ae());
+		async function ve() {
+			P.value && (w.value = !1, await ke());
 		}
-		function be(e) {
+		function ye(e) {
 			let t = {}, n = [];
 			return e.forEach((e) => {
 				let r = e === "vision" ? "vision" : `${e}_understanding`;
@@ -21668,30 +21634,30 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 					"api_key"
 				].forEach((e) => {
 					t[`${r}_${e}`] = c[`${r}_${e}`];
-				}), e !== "vision" && (t[`${r}_max_seconds`] = Number(c[`${r}_max_seconds`] || (e === "audio" ? 60 : 15))), String(c[`${r}_mode`] || "") === "dedicated" && n.push(oe(c[`${r}_provider`], c[`${r}_model`], {
+				}), e !== "vision" && (t[`${r}_max_seconds`] = Number(c[`${r}_max_seconds`] || (e === "audio" ? 60 : 15))), String(c[`${r}_mode`] || "") === "dedicated" && n.push(ae(c[`${r}_provider`], c[`${r}_model`], {
 					roles: [e === "vision" ? "Image" : e === "audio" ? "Audio" : "Video"],
 					media_kinds: [e]
 				}));
-			}), e.includes("vision") && (t.hydra_llama_cpp_vision_context_tokens = c.hydra_llama_cpp_vision_context_tokens, t.hydra_llama_cpp_vision_slot = ""), t.hydra_local_model_load_targets = se(n), t;
+			}), e.includes("vision") && (t.hydra_llama_cpp_vision_context_tokens = c.hydra_llama_cpp_vision_context_tokens, t.hydra_llama_cpp_vision_slot = ""), t.hydra_local_model_load_targets = oe(n), t;
 		}
-		function xe(e) {
+		function be(e) {
 			for (let t of e) {
 				let e = t === "vision" ? "vision" : `${t}_understanding`;
 				if (String(c[`${e}_mode`] || "") === "dedicated" && !String(c[`${e}_model`] || "").trim()) return `Choose a dedicated ${t === "vision" ? "image" : t} model before saving.`;
 			}
 			return "";
 		}
-		async function Se(e, t) {
+		async function xe(e, t) {
 			let n = await Ls(r.endpoints.models, e);
-			i("changed", L(c));
+			i("changed", I(c));
 			let a = String(n.message || t);
 			return f.value = a, i("notify", a, "success"), n;
 		}
-		function Ce() {
+		function Se() {
 			k !== null && window.clearTimeout(k), k = null;
 		}
-		function we() {
-			Ce(), S.value = "", x.value = {
+		function Ce() {
+			Se(), S.value = "", x.value = {
 				running: !0,
 				ui_phase: "saving",
 				progress: 2,
@@ -21703,12 +21669,12 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 				load_models: !0
 			}, b.value = !0;
 		}
-		function Te(e) {
+		function we(e) {
 			let t = e.hf_llm_warmup && typeof e.hf_llm_warmup == "object" ? e.hf_llm_warmup : {};
-			x.value = L(t), S.value = "", t.running && Oe(450);
+			x.value = I(t), S.value = "", t.running && De(450);
 		}
-		function Ee(e) {
-			Ce(), x.value = {
+		function Te(e) {
+			Se(), x.value = {
 				...x.value,
 				running: !1,
 				ui_phase: "",
@@ -21716,31 +21682,31 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 				errors: [e]
 			}, S.value = "", b.value = !0;
 		}
-		async function De() {
+		async function Ee() {
 			k = null;
 			try {
 				let e = await Is(r.endpoints.modelsHfWarmup);
-				x.value = e, S.value = "", e.running && Oe(700);
+				x.value = e, S.value = "", e.running && De(700);
 			} catch (e) {
-				S.value = e instanceof Error ? e.message : "Live model progress is temporarily unavailable.", x.value.running && Oe(1600);
+				S.value = e instanceof Error ? e.message : "Live model progress is temporarily unavailable.", x.value.running && De(1600);
 			}
 		}
-		function Oe(e = 700) {
-			Ce(), k = window.setTimeout(De, e);
+		function De(e = 700) {
+			Se(), k = window.setTimeout(Ee, e);
 		}
-		async function ke() {
+		async function Oe() {
 			try {
 				let e = await Is(r.endpoints.modelsHfWarmup);
-				e.running && String(e.reason || "").startsWith("settings-save") && (x.value = e, S.value = "", b.value = !0, Oe(450));
+				e.running && String(e.reason || "").startsWith("settings-save") && (x.value = e, S.value = "", b.value = !0, De(450));
 			} catch {}
 		}
-		async function Ae() {
+		async function ke() {
 			if (!M.value || u.value || T.value) return;
 			u.value = !0, d.value = "", f.value = "";
 			let e = !1;
 			try {
-				if (s.value === "speech" && he(c)) {
-					if (!await ge()) {
+				if (s.value === "speech" && me(c)) {
+					if (!await he()) {
 						w.value = !0;
 						return;
 					}
@@ -21748,23 +21714,20 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 				}
 				let t = {};
 				if (s.value === "routing") {
-					let n = ue();
+					let n = le();
 					if (n) throw Error(n);
-					we(), e = !0, t = await Se(le(), "LLM settings saved and selected local models queued."), Te(t);
-				} else if (s.value === "listening") t = await Se(pe(), "Listening settings saved."), await _.value?.refreshWarmup?.();
-				else if (s.value === "speech") t = await Se(me(), "Speech settings saved."), await v.value?.refreshWarmup?.();
+					Ce(), e = !0, t = await xe(ce(), "LLM settings saved and selected local models queued."), we(t);
+				} else if (s.value === "listening") t = await xe(fe(), "Listening settings saved."), await _.value?.refreshWarmup?.();
+				else if (s.value === "speech") t = await xe(pe(), "Speech settings saved."), await v.value?.refreshWarmup?.();
 				else if (s.value === "vision") {
-					let n = xe(["vision"]);
+					let n = be(["vision"]);
 					if (n) throw Error(n);
-					we(), e = !0, t = await Se(be(["vision"]), "Vision settings saved."), Te(t);
+					Ce(), e = !0, t = await xe(ye(["vision"]), "Vision settings saved."), we(t);
 				} else if (s.value === "audio-understanding") {
-					let n = xe(["audio", "video"]);
+					let n = be(["audio", "video"]);
 					if (n) throw Error(n);
-					we(), e = !0, t = await Se(be(["audio", "video"]), "Audio and video settings saved."), Te(t);
-				} else s.value === "faceid" ? (t = await Se({
-					face_id_enabled: !!N.value.enabled,
-					face_id_model: String(N.value.model_id || "facenet512")
-				}, "Face ID settings applied."), await je()) : s.value === "wake" ? t = await p.value?.apply?.() || {
+					Ce(), e = !0, t = await xe(ye(["audio", "video"]), "Audio and video settings saved."), we(t);
+				} else s.value === "faceid" ? (t = await xe({ face_id_enabled: !!N.value.enabled }, "Face ID settings applied."), await V()) : s.value === "wake" ? t = await p.value?.apply?.() || {
 					ok: !1,
 					error: "Wake Word settings are not ready."
 				} : s.value === "speakerid" ? t = await m.value?.apply?.() || {
@@ -21777,17 +21740,17 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 				if (t && t.ok === !1) throw Error(String(t.error || "Settings could not be applied."));
 				l[s.value] = !1;
 			} catch (t) {
-				d.value = t instanceof Error ? t.message : "Model settings could not be applied.", e && Ee(d.value), i("notify", d.value, "error");
+				d.value = t instanceof Error ? t.message : "Model settings could not be applied.", e && Te(d.value), i("notify", d.value, "error");
 			} finally {
 				u.value = !1;
 			}
 		}
-		function V(e) {
+		function Ae(e) {
 			c.local_llm_models = e;
-			let t = L(c);
+			let t = I(c);
 			i("changed", t);
 		}
-		async function je() {
+		async function V() {
 			try {
 				y.value = await Is(r.endpoints.modelsFaceStatus);
 			} catch (e) {
@@ -21795,33 +21758,33 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 			}
 		}
 		return Nn(() => r.initialTab, (e) => {
-			let t = I(e);
-			t !== s.value && re(t);
-		}), Nn(() => r.settings, (e) => ee(e, !0), { deep: !0 }), Mr(() => {
-			ee(r.settings), r.onTabChange?.(s.value), s.value === "faceid" && je();
+			let t = F(e);
+			t !== s.value && ne(t);
+		}), Nn(() => r.settings, (e) => R(e, !0), { deep: !0 }), Mr(() => {
+			R(r.settings), r.onTabChange?.(s.value), s.value === "faceid" && V();
 			let e = r.settings.hf_llm_warmup && typeof r.settings.hf_llm_warmup == "object" ? r.settings.hf_llm_warmup : {};
-			e.running && String(e.reason || "").startsWith("settings-save") && (x.value = L(e), b.value = !0, Oe(450)), ke(), O = window.setInterval(() => {
-				s.value === "faceid" && document.visibilityState === "visible" && je();
+			e.running && String(e.reason || "").startsWith("settings-save") && (x.value = I(e), b.value = !0, De(450)), Oe(), O = window.setInterval(() => {
+				s.value === "faceid" && document.visibilityState === "visible" && V();
 			}, 5e3);
 		}), Fr(() => {
-			O !== null && window.clearInterval(O), Ce();
-		}), t({ hasUnsavedChanges: () => Object.values(l).some(Boolean) }), (t, n) => (K(), q("section", UV, [
-			e.embedded ? Z("", !0) : (K(), q("nav", WV, [(K(), q(G, null, W(a, (e) => J("button", {
+			O !== null && window.clearInterval(O), Se();
+		}), t({ hasUnsavedChanges: () => Object.values(l).some(Boolean) }), (t, n) => (K(), q("section", BV, [
+			e.embedded ? Z("", !0) : (K(), q("nav", VV, [(K(), q(G, null, W(a, (e) => J("button", {
 				key: e.id,
 				type: "button",
 				class: z({ active: s.value === e.id }),
-				onClick: (t) => re(e.id)
-			}, B(e.label), 11, GV)), 64))])),
-			e.embedded ? Z("", !0) : (K(), q("header", KV, [J("strong", null, B(A.value.label), 1), J("span", null, B(A.value.short), 1)])),
-			d.value ? (K(), q("div", qV, B(d.value), 1)) : Z("", !0),
-			f.value ? (K(), q("div", JV, B(f.value), 1)) : Z("", !0),
+				onClick: (t) => ne(e.id)
+			}, B(e.label), 11, HV)), 64))])),
+			e.embedded ? Z("", !0) : (K(), q("header", UV, [J("strong", null, B(A.value.label), 1), J("span", null, B(A.value.short), 1)])),
+			d.value ? (K(), q("div", WV, B(d.value), 1)) : Z("", !0),
+			f.value ? (K(), q("div", GV, B(f.value), 1)) : Z("", !0),
 			s.value === "huggingface" ? (K(), va(lj, {
 				key: 4,
 				"local-models": j.value,
 				endpoints: e.endpoints,
-				onLocalModels: V,
+				onLocalModels: Ae,
 				onNotify: n[0] ||= (e, t) => i("notify", e, t)
-			}, null, 8, ["local-models", "endpoints"])) : s.value === "routing" ? (K(), va(CL, {
+			}, null, 8, ["local-models", "endpoints"])) : s.value === "routing" ? (K(), va(bL, {
 				key: 5,
 				draft: c,
 				"local-models": j.value,
@@ -21829,7 +21792,7 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 				"context-estimate-endpoint": e.endpoints.modelsContextEstimate,
 				"decision-benchmark-endpoint": e.endpoints.modelsDecisionBenchmark,
 				"decision-results-endpoint": e.endpoints.modelsDecisionResults,
-				onDirty: te
+				onDirty: ee
 			}, null, 8, [
 				"draft",
 				"local-models",
@@ -21837,7 +21800,7 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 				"context-estimate-endpoint",
 				"decision-benchmark-endpoint",
 				"decision-results-endpoint"
-			])) : s.value === "listening" ? (K(), va(HP, {
+			])) : s.value === "listening" ? (K(), va(zP, {
 				key: 6,
 				ref_key: "listeningPanel",
 				ref: _,
@@ -21846,14 +21809,14 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 				"speech-ui": c.speech_ui || {},
 				"voice-model-ui": c.voice_model_ui || {},
 				"warmup-endpoint": e.endpoints.modelsSpeechWarmup,
-				onDirty: te
+				onDirty: ee
 			}, null, 8, [
 				"compact",
 				"draft",
 				"speech-ui",
 				"voice-model-ui",
 				"warmup-endpoint"
-			])) : s.value === "speech" ? (K(), va(Zz, {
+			])) : s.value === "speech" ? (K(), va(Jz, {
 				key: 7,
 				ref_key: "speechPanel",
 				ref: v,
@@ -21861,76 +21824,74 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 				"speech-ui": c.speech_ui || {},
 				"announcement-ui": c.announcement_speech_ui || {},
 				endpoints: e.endpoints,
-				onDirty: te,
+				onDirty: ee,
 				onNotify: n[1] ||= (e, t) => i("notify", e, t)
 			}, null, 8, [
 				"draft",
 				"speech-ui",
 				"announcement-ui",
 				"endpoints"
-			])) : s.value === "wake" ? (K(), va(HV, {
+			])) : s.value === "wake" ? (K(), va(zV, {
 				key: 8,
 				ref_key: "wakePanel",
 				ref: p,
 				"runtime-endpoint": e.endpoints.modelsVoiceRuntime,
 				"action-endpoint": e.endpoints.modelsVoiceAction,
-				onDirty: te,
+				onDirty: ee,
 				onNotify: n[2] ||= (e, t) => i("notify", e, t)
-			}, null, 8, ["runtime-endpoint", "action-endpoint"])) : s.value === "vision" ? (K(), va(OR, {
+			}, null, 8, ["runtime-endpoint", "action-endpoint"])) : s.value === "vision" ? (K(), va(TR, {
 				key: 9,
 				kind: "vision",
 				draft: c,
 				"local-models": j.value,
-				onDirty: te
-			}, null, 8, ["draft", "local-models"])) : s.value === "audio-understanding" ? (K(), q("section", YV, [Y(OR, {
+				onDirty: ee
+			}, null, 8, ["draft", "local-models"])) : s.value === "audio-understanding" ? (K(), q("section", KV, [Y(TR, {
 				kind: "audio",
 				draft: c,
 				"local-models": j.value,
-				onDirty: te
-			}, null, 8, ["draft", "local-models"]), Y(OR, {
+				onDirty: ee
+			}, null, 8, ["draft", "local-models"]), Y(TR, {
 				kind: "video",
 				draft: c,
 				"local-models": j.value,
-				onDirty: te
-			}, null, 8, ["draft", "local-models"])])) : s.value === "speakerid" ? (K(), va(IM, {
+				onDirty: ee
+			}, null, 8, ["draft", "local-models"])])) : s.value === "speakerid" ? (K(), va(NM, {
 				key: 11,
 				ref_key: "speakerPanel",
 				ref: m,
 				kind: "speakerid",
 				"runtime-endpoint": e.endpoints.modelsVoiceRuntime,
 				"action-endpoint": e.endpoints.modelsVoiceAction,
-				onDirty: te,
-				onSubtab: ne,
+				onDirty: ee,
+				onSubtab: te,
 				onNotify: n[3] ||= (e, t) => i("notify", e, t)
-			}, null, 8, ["runtime-endpoint", "action-endpoint"])) : s.value === "emotionid" ? (K(), va(IM, {
+			}, null, 8, ["runtime-endpoint", "action-endpoint"])) : s.value === "emotionid" ? (K(), va(NM, {
 				key: 12,
 				ref_key: "emotionPanel",
 				ref: h,
 				kind: "emotionid",
 				"runtime-endpoint": e.endpoints.modelsVoiceRuntime,
 				"action-endpoint": e.endpoints.modelsVoiceAction,
-				onDirty: te,
+				onDirty: ee,
 				onNotify: n[4] ||= (e, t) => i("notify", e, t)
-			}, null, 8, ["runtime-endpoint", "action-endpoint"])) : s.value === "faceid" ? (K(), va(wj, {
+			}, null, 8, ["runtime-endpoint", "action-endpoint"])) : s.value === "faceid" ? (K(), va(xj, {
 				key: 13,
 				settings: N.value,
 				status: y.value,
-				models: P.value,
 				busy: u.value,
-				onDirty: te
+				onDirty: ee
 			}, null, 8, [
 				"settings",
 				"status",
-				"models",
 				"busy"
 			])) : Z("", !0),
-			M.value ? (K(), q("footer", XV, [J("div", null, [J("strong", null, B(l[s.value] ? "Unsaved changes" : `${A.value.label} settings are synchronized`), 1), J("span", null, B(M.value.note), 1)]), J("button", {
+			M.value ? (K(), q("footer", qV, [J("div", null, [J("strong", null, B(l[s.value] ? "Unsaved changes" : `${A.value.label} settings are synchronized`), 1), J("span", null, B(M.value.note), 1)]), J("button", {
 				class: "tv-button primary",
 				type: "button",
 				disabled: u.value,
-				onClick: Ae
-			}, B(u.value ? "Applying…" : M.value.label), 9, ZV)])) : Z("", !0),
-			Y($L, {
+				onClick: ke
+			}, B(u.value ? "Applying…" : M.value.label), 9, JV)])) : Z("", !0),
+			Y(XL, {
 				open: b.value,
 				snapshot: x.value,
 				"poll-error": S.value,
@@ -21944,9 +21905,9 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 			Y(_f, {
 				open: w.value,
 				"backdrop-class": "tv-modal-backdrop tset-modal",
-				onClose: _e
+				onClose: ge
 			}, {
-				default: En(() => [J("section", QV, [
+				default: En(() => [J("section", YV, [
 					J("header", { class: "tv-modal-header" }, [n[7] ||= J("div", null, [
 						J("span", { class: "tv-eyebrow" }, "Pocket TTS access check"),
 						J("h2", { id: "tm-pocket-setup-title" }, "Pocket TTS cannot download its voice-cloning model"),
@@ -21954,13 +21915,13 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 					], -1), J("button", {
 						class: "tv-button",
 						type: "button",
-						onClick: _e
+						onClick: ge
 					}, "Close")]),
-					T.value ? (K(), q("div", $V, "Checking your Hugging Face setup…")) : E.value ? (K(), q("div", eH, B(E.value), 1)) : (K(), q("div", {
+					T.value ? (K(), q("div", XV, "Checking your Hugging Face setup…")) : E.value ? (K(), q("div", ZV, B(E.value), 1)) : (K(), q("div", {
 						key: 2,
 						class: z(["tm-pocket-setup-summary", { ready: D.value.ready }])
-					}, [J("i", tH, B(D.value.ready ? "✓" : "!"), 1), J("div", null, [J("strong", null, B(D.value.ready ? "Pocket TTS model access confirmed" : "Hugging Face setup needed"), 1), J("span", null, B(D.value.message || "Tater could not access the gated Pocket TTS weights."), 1)])], 2)),
-					J("ol", nH, [
+					}, [J("i", QV, B(D.value.ready ? "✓" : "!"), 1), J("div", null, [J("strong", null, B(D.value.ready ? "Pocket TTS model access confirmed" : "Hugging Face setup needed"), 1), J("span", null, B(D.value.message || "Tater could not access the gated Pocket TTS weights."), 1)])], 2)),
+					J("ol", $V, [
 						J("li", { class: z({ complete: D.value.installed && D.value.enabled }) }, [
 							n[8] ||= J("span", null, "1", -1),
 							n[9] ||= J("div", null, [J("strong", null, "Install and enable the Hugging Face integration"), J("p", null, "Open Integrations, install Hugging Face if needed, and make sure it is enabled.")], -1),
@@ -21985,95 +21946,95 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 							J("b", null, B(D.value.weights_accessible ? "Access confirmed" : "Access blocked"), 1)
 						], 2)
 					]),
-					J("footer", rH, [J("span", null, B(F.value ? "Model access confirmed. Pocket TTS can load now." : "Fix the blocked item, then refresh the access check."), 1), J("div", null, [
+					J("footer", eH, [J("span", null, B(P.value ? "Model access confirmed. Pocket TTS can load now." : "Fix the blocked item, then refresh the access check."), 1), J("div", null, [
 						J("button", {
 							class: "tv-button",
 							type: "button",
 							disabled: T.value,
-							onClick: ge
-						}, B(T.value ? "Checking model access…" : "Refresh access"), 9, iH),
+							onClick: he
+						}, B(T.value ? "Checking model access…" : "Refresh access"), 9, tH),
 						!D.value.installed || !D.value.enabled || !D.value.has_token ? (K(), q("button", {
 							key: 0,
 							class: "tv-button",
 							type: "button",
-							onClick: ve
+							onClick: _e
 						}, "Open Integrations")) : Z("", !0),
 						J("button", {
 							class: "tv-button primary",
 							type: "button",
-							disabled: !F.value,
-							onClick: ye
-						}, "Save & Load Pocket TTS", 8, aH)
+							disabled: !P.value,
+							onClick: ve
+						}, "Save & Load Pocket TTS", 8, nH)
 					])])
 				])]),
 				_: 1
 			}, 8, ["open"])
 		]));
 	}
-}), sH = { class: "tset-resource tpeople" }, cH = { class: "tv-panel tpeople-overview" }, lH = ["disabled"], uH = { class: "tv-metrics tpeople-metrics" }, dH = {
+}), iH = { class: "tset-resource tpeople" }, aH = { class: "tv-panel tpeople-overview" }, oH = ["disabled"], sH = { class: "tv-metrics tpeople-metrics" }, cH = {
 	class: "tv-tabs tpeople-tabs",
 	"aria-label": "People sections"
-}, fH = { class: "tv-panel tset-form-card" }, pH = { class: "tpeople-section-head" }, mH = { class: "people-create-panel" }, hH = { class: "people-create-body" }, gH = { class: "people-field" }, _H = ["onKeydown"], vH = ["disabled"], yH = {
+}, lH = { class: "tv-panel tset-form-card" }, uH = { class: "tpeople-section-head" }, dH = { class: "people-create-panel" }, fH = { class: "people-create-body" }, pH = { class: "people-field" }, mH = ["onKeydown"], hH = ["disabled"], gH = {
 	key: 0,
 	class: "people-directory-grid"
-}, bH = ["onClick", "onKeydown"], xH = ["src", "alt"], SH = { key: 1 }, CH = { class: "people-person-card-copy" }, wH = { class: "card-head people-person-card-head" }, TH = { class: "card-title" }, EH = { class: "people-person-badges" }, DH = {
+}, _H = ["onClick", "onKeydown"], vH = ["src", "alt"], yH = { key: 1 }, bH = { class: "people-person-card-copy" }, xH = { class: "card-head people-person-card-head" }, SH = { class: "card-title" }, CH = { class: "people-person-badges" }, wH = {
 	key: 0,
 	class: "people-badge admin"
-}, OH = { class: "people-person-stats" }, kH = { class: "people-person-card-footer" }, AH = ["onClick"], jH = {
+}, TH = { class: "people-person-stats" }, EH = { class: "people-person-card-footer" }, DH = ["onClick"], OH = {
 	key: 1,
 	class: "tv-empty"
-}, MH = {
+}, kH = {
 	key: 2,
 	class: "tv-panel tset-form-card"
-}, NH = {
+}, AH = {
 	key: 0,
 	class: "people-identity-list"
-}, PH = { class: "people-platform-mark" }, FH = { class: "people-identity-copy" }, IH = { class: "people-identity-title-row" }, LH = { class: "people-identity-actions" }, RH = ["onUpdate:modelValue"], zH = ["value"], BH = ["disabled", "onClick"], VH = ["disabled", "onClick"], HH = {
+}, jH = { class: "people-platform-mark" }, MH = { class: "people-identity-copy" }, NH = { class: "people-identity-title-row" }, PH = { class: "people-identity-actions" }, FH = ["onUpdate:modelValue"], IH = ["value"], LH = ["disabled", "onClick"], RH = ["disabled", "onClick"], zH = {
 	key: 1,
 	class: "tv-empty"
-}, UH = { class: "tv-panel tset-form-card" }, WH = { class: "tpeople-section-head" }, GH = { class: "tpeople-head-actions" }, KH = ["disabled"], qH = {
+}, BH = { class: "tv-panel tset-form-card" }, VH = { class: "tpeople-section-head" }, HH = { class: "tpeople-head-actions" }, UH = ["disabled"], WH = {
 	key: 0,
 	class: "people-face-grid"
-}, JH = { class: "people-face-summary" }, YH = { class: "people-face-avatar" }, XH = ["src", "alt"], ZH = { key: 1 }, QH = { class: "people-face-copy" }, $H = { class: "people-identity-title-row" }, eU = { class: "people-face-fields" }, tU = { class: "people-field" }, nU = ["onUpdate:modelValue"], rU = ["value"], iU = { class: "people-field" }, aU = ["onUpdate:modelValue"], oU = ["disabled", "onClick"], sU = ["onClick"], cU = { class: "people-face-review-trigger-copy" }, lU = { class: "people-face-footer" }, uU = ["onUpdate:modelValue"], dU = ["value"], fU = ["disabled", "onClick"], pU = ["disabled", "onClick"], mU = {
+}, GH = { class: "people-face-summary" }, KH = { class: "people-face-avatar" }, qH = ["src", "alt"], JH = { key: 1 }, YH = { class: "people-face-copy" }, XH = { class: "people-identity-title-row" }, ZH = { class: "people-face-fields" }, QH = { class: "people-field" }, $H = ["onUpdate:modelValue"], eU = ["value"], tU = { class: "people-field" }, nU = ["onUpdate:modelValue"], rU = ["disabled", "onClick"], iU = ["onClick"], aU = { class: "people-face-review-trigger-copy" }, oU = { class: "people-face-footer" }, sU = ["onUpdate:modelValue"], cU = ["value"], lU = ["disabled", "onClick"], uU = ["disabled", "onClick"], dU = {
 	key: 1,
 	class: "tv-empty"
-}, hU = {
+}, fU = {
 	key: 0,
 	class: "tv-modal people-person-dialog",
 	role: "dialog",
 	"aria-modal": "true",
 	"aria-labelledby": "people-person-dialog-title"
-}, gU = { id: "people-person-dialog-title" }, _U = { class: "people-person-manage-body" }, vU = { class: "people-edit-grid" }, yU = { class: "people-field" }, bU = { class: "tv-toggle people-admin-toggle" }, xU = { class: "people-field people-instructions-field" }, SU = { class: "people-person-actions" }, CU = ["disabled"], wU = ["disabled"], TU = { class: "people-linked-section" }, EU = {
+}, pU = { id: "people-person-dialog-title" }, mU = { class: "people-person-manage-body" }, hU = { class: "people-edit-grid" }, gU = { class: "people-field" }, _U = { class: "tv-toggle people-admin-toggle" }, vU = { class: "people-field people-instructions-field" }, yU = { class: "people-person-actions" }, bU = ["disabled"], xU = ["disabled"], SU = { class: "people-linked-section" }, CU = {
 	key: 0,
 	class: "people-alias-list"
-}, DU = { class: "people-platform-mark" }, OU = { class: "people-alias-copy" }, kU = ["disabled", "onClick"], AU = {
+}, wU = { class: "people-platform-mark" }, TU = { class: "people-alias-copy" }, EU = ["disabled", "onClick"], DU = {
 	key: 1,
 	class: "people-empty-inline"
-}, jU = {
+}, OU = {
 	key: 0,
 	class: "tv-modal people-face-review-dialog",
 	role: "dialog",
 	"aria-modal": "true",
 	"aria-labelledby": "people-face-review-title"
-}, MU = { id: "people-face-review-title" }, NU = { class: "people-face-review-toolbar" }, PU = { class: "people-face-review-selection-tools" }, FU = { class: "people-face-selection-count" }, IU = ["disabled"], LU = ["disabled"], RU = { class: "people-face-gallery-filters" }, zU = { value: "all" }, BU = { value: "trusted" }, VU = { value: "provisional" }, HU = { value: "unreviewed" }, UU = {
+}, kU = { id: "people-face-review-title" }, AU = { class: "people-face-review-toolbar" }, jU = { class: "people-face-review-selection-tools" }, MU = { class: "people-face-selection-count" }, NU = ["disabled"], PU = ["disabled"], FU = { class: "people-face-gallery-filters" }, IU = { value: "all" }, LU = { value: "trusted" }, RU = { value: "provisional" }, zU = { value: "unreviewed" }, BU = {
 	key: 0,
 	class: "tv-notice error"
-}, WU = {
+}, VU = {
 	key: 1,
 	class: "people-face-gallery"
-}, GU = ["aria-pressed", "onClick"], KU = ["src", "alt"], qU = { class: "people-face-capture-meta" }, JU = { class: "people-face-capture-time" }, YU = { class: "people-face-capture-source" }, XU = {
+}, HU = ["aria-pressed", "onClick"], UU = ["src", "alt"], WU = { class: "people-face-capture-meta" }, GU = { class: "people-face-capture-time" }, KU = { class: "people-face-capture-source" }, qU = {
 	key: 2,
 	class: "people-empty-inline"
-}, ZU = ["disabled"], QU = {
+}, JU = ["disabled"], YU = {
 	key: 4,
 	class: "people-face-gallery-loading"
-}, $U = { class: "people-face-review-actions" }, eW = { class: "people-face-trust-actions" }, tW = ["disabled"], nW = ["disabled"], rW = { class: "people-face-destination" }, iW = ["value"], aW = ["disabled"], oW = ["disabled"], sW = {
+}, XU = { class: "people-face-review-actions" }, ZU = { class: "people-face-trust-actions" }, QU = ["disabled"], $U = ["disabled"], eW = { class: "people-face-destination" }, tW = ["value"], nW = ["disabled"], rW = ["disabled"], iW = {
 	key: 0,
 	class: "tv-modal people-face-enroll-dialog",
 	role: "dialog",
 	"aria-modal": "true",
 	"aria-labelledby": "people-face-enroll-title"
-}, cW = { class: "people-face-enroll-form" }, lW = { class: "people-field" }, uW = ["value"], dW = { class: "people-field" }, fW = { class: "tpeople-camera-actions" }, pW = ["src"], mW = { class: "people-face-enroll-note" }, hW = ["disabled"], gW = 48, _W = /* @__PURE__ */ fr({
+}, aW = { class: "people-face-enroll-form" }, oW = { class: "people-field" }, sW = ["value"], cW = { class: "people-field" }, lW = { class: "tpeople-camera-actions" }, uW = ["src"], dW = { class: "people-face-enroll-note" }, fW = ["disabled"], pW = 48, mW = /* @__PURE__ */ fr({
 	__name: "PeopleSettings",
 	props: {
 		payload: {},
@@ -22297,7 +22258,7 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 			try {
 				let i = e ? 0 : g.value.length, a = new URLSearchParams({
 					offset: String(i),
-					limit: String(gW),
+					limit: String(pW),
 					status: S.value
 				}), o = await Is(`${n.endpoint}/faces/${encodeURIComponent(t)}/observations?${a.toString()}`);
 				if (r !== j || t !== p.value) return;
@@ -22433,13 +22394,13 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 		}
 		return Nn(() => n.payload, (e) => {
 			i.value = e || {}, ge();
-		}, { immediate: !0 }), Fr(He), (e, t) => (K(), q("section", sH, [
+		}, { immediate: !0 }), Fr(He), (e, t) => (K(), q("section", iH, [
 			u.value || l.value ? (K(), q("div", {
 				key: 0,
 				class: z(["tv-notice", { error: !!l.value }]),
 				"aria-live": "polite"
 			}, B(l.value || u.value), 3)) : Z("", !0),
-			J("section", cH, [J("header", null, [t[16] ||= J("div", null, [
+			J("section", aH, [J("header", null, [t[16] ||= J("div", null, [
 				J("span", { class: "tv-eyebrow" }, "Identity directory"),
 				J("h2", null, "Everyone Tater knows"),
 				J("p", null, "Bring faces, portal users, and voice speakers together as the same person.")
@@ -22448,8 +22409,8 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 				type: "button",
 				disabled: s.value,
 				onClick: ye
-			}, B(s.value ? "Refreshing…" : "Refresh"), 9, lH)]), J("div", uH, [(K(!0), q(G, null, W(R.value, (e) => (K(), q("div", { key: e.label }, [J("span", null, B(e.label), 1), J("strong", null, B(Number(e.value || 0)), 1)]))), 128))])]),
-			J("nav", dH, [
+			}, B(s.value ? "Refreshing…" : "Refresh"), 9, oH)]), J("div", sH, [(K(!0), q(G, null, W(R.value, (e) => (K(), q("div", { key: e.label }, [J("span", null, B(e.label), 1), J("strong", null, B(Number(e.value || 0)), 1)]))), 128))])]),
+			J("nav", cH, [
 				J("button", {
 					type: "button",
 					class: z({ active: a.value === "people" }),
@@ -22466,7 +22427,7 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 					onClick: t[2] ||= (e) => se("identities")
 				}, "Identities", 2)
 			]),
-			a.value === "people" ? (K(), q(G, { key: 1 }, [J("section", fH, [J("header", pH, [t[19] ||= J("div", null, [
+			a.value === "people" ? (K(), q(G, { key: 1 }, [J("section", lH, [J("header", uH, [t[19] ||= J("div", null, [
 				J("span", { class: "tv-eyebrow" }, "Directory"),
 				J("h2", null, "People"),
 				J("p", null, "Open a card to manage access, instructions, and linked identities.")
@@ -22477,17 +22438,17 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 				J("option", { value: "recent" }, "Recently seen", -1),
 				J("option", { value: "name" }, "Name", -1),
 				J("option", { value: "face" }, "Face ID linked", -1)
-			]], 544), [[_s, o.value]])])]), J("details", mH, [t[21] ||= J("summary", null, "Add a person", -1), J("div", hH, [J("label", gH, [t[20] ||= X("Display name", -1), U(J("input", {
+			]], 544), [[_s, o.value]])])]), J("details", dH, [t[21] ||= J("summary", null, "Add a person", -1), J("div", fH, [J("label", pH, [t[20] ||= X("Display name", -1), U(J("input", {
 				"onUpdate:modelValue": t[4] ||= (e) => d.value = e,
 				type: "text",
 				placeholder: "Fred",
 				onKeydown: Os(Es(xe, ["prevent"]), ["enter"])
-			}, null, 40, _H), [[$, d.value]])]), J("button", {
+			}, null, 40, mH), [[$, d.value]])]), J("button", {
 				class: "tv-button primary",
 				type: "button",
 				disabled: !!c.value,
 				onClick: xe
-			}, "Create person", 8, vH)])])]), re.value.length ? (K(), q("div", yH, [(K(!0), q(G, null, W(re.value, (e) => (K(), q("article", {
+			}, "Create person", 8, hH)])])]), re.value.length ? (K(), q("div", gH, [(K(!0), q(G, null, W(re.value, (e) => (K(), q("article", {
 				key: e.id,
 				class: "card people-person-card"
 			}, [J("div", {
@@ -22501,29 +22462,29 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 				src: ue(e).image_src,
 				alt: `${e.display_name} Face ID profile`,
 				loading: "lazy"
-			}, null, 8, xH)) : (K(), q("span", SH, B(fe(e.display_name)), 1))], 2), J("div", CH, [
-				J("div", wH, [J("div", null, [J("h3", TH, B(e.display_name || "Person"), 1), J("div", EH, [J("span", { class: z(["people-badge", ue(e).linked ? "face" : "muted"]) }, B(ue(e).linked ? "Face ID" : "No Face ID"), 3), e.is_admin ? (K(), q("span", DH, "Admin")) : Z("", !0)])])]),
+			}, null, 8, vH)) : (K(), q("span", yH, B(fe(e.display_name)), 1))], 2), J("div", bH, [
+				J("div", xH, [J("div", null, [J("h3", SH, B(e.display_name || "Person"), 1), J("div", CH, [J("span", { class: z(["people-badge", ue(e).linked ? "face" : "muted"]) }, B(ue(e).linked ? "Face ID" : "No Face ID"), 3), e.is_admin ? (K(), q("span", wH, "Admin")) : Z("", !0)])])]),
 				J("div", { class: z(["people-last-seen", { "is-seen": !!ue(e).last_seen }]) }, [t[22] ||= J("span", { class: "people-presence-dot" }, null, -1), J("span", null, B(ue(e).last_seen_camera ? `Last seen at ${ue(e).last_seen_camera} · ` : "") + B(he(ue(e).last_seen)), 1)], 2),
-				J("div", OH, [
+				J("div", TH, [
 					J("span", null, [J("strong", null, B(de(e).length), 1), t[23] ||= X(" linked identities", -1)]),
 					J("span", null, [J("strong", null, B(Number(ue(e).identity_count || 0)), 1), t[24] ||= X(" face profiles", -1)]),
 					J("span", null, [J("strong", null, B(Number(ue(e).capture_count || 0)), 1), t[25] ||= X(" captures", -1)])
 				])
-			])], 40, bH), J("div", kH, [J("button", {
+			])], 40, _H), J("div", EH, [J("button", {
 				class: "people-person-open",
 				type: "button",
 				onClick: (t) => Se(e)
-			}, "Manage person", 8, AH)])]))), 128))])) : (K(), q("p", jH, "No people yet. Create a person, then link discovered identities."))], 64)) : a.value === "identities" ? (K(), q("section", MH, [t[27] ||= J("header", null, [
+			}, "Manage person", 8, DH)])]))), 128))])) : (K(), q("p", OH, "No people yet. Create a person, then link discovered identities."))], 64)) : a.value === "identities" ? (K(), q("section", kH, [t[27] ||= J("header", null, [
 				J("span", { class: "tv-eyebrow" }, "Discovered accounts"),
 				J("h2", null, "Identities"),
 				J("p", null, "Link portal, WebUI, voice, and memory identities to the correct person.")
-			], -1), I.value.length ? (K(), q("div", NH, [(K(!0), q(G, null, W(I.value, (e) => (K(), q("article", {
+			], -1), I.value.length ? (K(), q("div", AH, [(K(!0), q(G, null, W(I.value, (e) => (K(), q("article", {
 				key: le(e),
 				class: "people-identity-card"
 			}, [
-				J("span", PH, B(fe(pe(e.platform), "I")), 1),
-				J("div", FH, [
-					J("div", IH, [J("strong", null, B(e.label || e.external_id), 1), J("span", { class: z(["people-badge", e.person_id ? "linked" : "muted"]) }, B(e.person_id ? `Linked to ${e.person_name}` : "Unlinked"), 3)]),
+				J("span", jH, B(fe(pe(e.platform), "I")), 1),
+				J("div", MH, [
+					J("div", NH, [J("strong", null, B(e.label || e.external_id), 1), J("span", { class: z(["people-badge", e.person_id ? "linked" : "muted"]) }, B(e.person_id ? `Linked to ${e.person_name}` : "Unlinked"), 3)]),
 					J("span", null, B([
 						pe(e.platform),
 						String(e.kind || "user").replaceAll("_", " "),
@@ -22532,110 +22493,110 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 					].filter(Boolean).join(" · ")), 1),
 					J("small", null, B(e.external_id), 1)
 				]),
-				J("div", LH, [
+				J("div", PH, [
 					U(J("select", { "onUpdate:modelValue": (t) => P[le(e)] = t }, [t[26] ||= J("option", { value: "" }, "Choose person…", -1), (K(!0), q(G, null, W(F.value, (e) => (K(), q("option", {
 						key: e.id,
 						value: e.id
-					}, B(e.display_name), 9, zH))), 128))], 8, RH), [[_s, P[le(e)]]]),
+					}, B(e.display_name), 9, IH))), 128))], 8, FH), [[_s, P[le(e)]]]),
 					J("button", {
 						class: "tv-button",
 						type: "button",
 						disabled: !!c.value || !P[le(e)],
 						onClick: (t) => De(e)
-					}, B(e.person_id ? "Update link" : "Link"), 9, BH),
+					}, B(e.person_id ? "Update link" : "Link"), 9, LH),
 					e.forgettable && !e.person_id ? (K(), q("button", {
 						key: 0,
 						class: "tv-button danger",
 						type: "button",
 						disabled: !!c.value,
 						onClick: (t) => Oe(e)
-					}, "Forget", 8, VH)) : Z("", !0)
+					}, "Forget", 8, RH)) : Z("", !0)
 				])
-			]))), 128))])) : (K(), q("p", HH, "No portal or voice identities have been discovered yet."))])) : (K(), q(G, { key: 3 }, [J("section", UH, [J("header", WH, [t[28] ||= J("div", null, [
+			]))), 128))])) : (K(), q("p", zH, "No portal or voice identities have been discovered yet."))])) : (K(), q(G, { key: 3 }, [J("section", BH, [J("header", VH, [t[28] ||= J("div", null, [
 				J("span", { class: "tv-eyebrow" }, "Face ID"),
 				J("h2", null, "Known faces"),
 				J("p", null, "Link faces to people, review captures, and merge duplicates.")
-			], -1), J("div", GH, [J("span", { class: z(["people-badge", ee.value.loaded ? "linked" : "muted"]) }, B(ee.value.loaded ? "Model ready" : "Model not ready"), 3), J("button", {
+			], -1), J("div", HH, [J("span", { class: z(["people-badge", ee.value.loaded ? "linked" : "muted"]) }, B(ee.value.loaded ? "Model ready" : "Model not ready"), 3), J("button", {
 				class: "tv-button primary",
 				type: "button",
 				disabled: !F.value.length,
 				onClick: Ve
-			}, "Add a face", 8, KH)])])]), ie.value.length ? (K(), q("div", qH, [(K(!0), q(G, null, W(ie.value, (e) => (K(), q("article", {
+			}, "Add a face", 8, UH)])])]), ie.value.length ? (K(), q("div", WH, [(K(!0), q(G, null, W(ie.value, (e) => (K(), q("article", {
 				key: e.face.id,
 				class: "people-face-card"
 			}, [
-				J("div", JH, [J("div", YH, [e.face.image_src ? (K(), q("img", {
+				J("div", GH, [J("div", KH, [e.face.image_src ? (K(), q("img", {
 					key: 0,
 					src: e.face.image_src,
 					alt: e.face.name || "Unknown face",
 					loading: "lazy"
-				}, null, 8, XH)) : (K(), q("span", ZH, B(fe(e.face.name, "?")), 1))]), J("div", QH, [
-					J("div", $H, [J("strong", null, B(e.face.name || `Unknown face · ${String(e.face.id).slice(-6)}`), 1), J("span", { class: z(["people-badge", e.face.person_id ? "linked" : "muted"]) }, B(e.face.person_id ? `Linked to ${e.face.person_name}` : "Not linked"), 3)]),
+				}, null, 8, qH)) : (K(), q("span", JH, B(fe(e.face.name, "?")), 1))]), J("div", YH, [
+					J("div", XH, [J("strong", null, B(e.face.name || `Unknown face · ${String(e.face.id).slice(-6)}`), 1), J("span", { class: z(["people-badge", e.face.person_id ? "linked" : "muted"]) }, B(e.face.person_id ? `Linked to ${e.face.person_name}` : "Not linked"), 3)]),
 					J("span", null, B(Number(e.face.capture_count || 0)) + " captures · " + B(Number(e.face.event_count || 0)) + " events", 1),
 					J("small", null, B(he(e.face.last_seen)), 1)
 				])]),
-				J("div", eU, [
-					J("label", tU, [t[30] ||= X("Person", -1), U(J("select", { "onUpdate:modelValue": (t) => e.draft.person_id = t }, [t[29] ||= J("option", { value: "" }, "Not linked", -1), (K(!0), q(G, null, W(F.value, (e) => (K(), q("option", {
+				J("div", ZH, [
+					J("label", QH, [t[30] ||= X("Person", -1), U(J("select", { "onUpdate:modelValue": (t) => e.draft.person_id = t }, [t[29] ||= J("option", { value: "" }, "Not linked", -1), (K(!0), q(G, null, W(F.value, (e) => (K(), q("option", {
 						key: e.id,
 						value: e.id
-					}, B(e.display_name), 9, rU))), 128))], 8, nU), [[_s, e.draft.person_id]])]),
-					J("label", iU, [t[31] ||= X("Face name", -1), U(J("input", {
+					}, B(e.display_name), 9, eU))), 128))], 8, $H), [[_s, e.draft.person_id]])]),
+					J("label", tU, [t[31] ||= X("Face name", -1), U(J("input", {
 						"onUpdate:modelValue": (t) => e.draft.name = t,
 						type: "text",
 						maxlength: "80",
 						placeholder: "Used when not linked"
-					}, null, 8, aU), [[$, e.draft.name]])]),
+					}, null, 8, nU), [[$, e.draft.name]])]),
 					J("button", {
 						class: "tv-button",
 						type: "button",
 						disabled: !!c.value,
 						onClick: (t) => ke(e.face, e.draft)
-					}, "Save", 8, oU)
+					}, "Save", 8, rU)
 				]),
 				Number(e.face.capture_count || 0) ? (K(), q("button", {
 					key: 0,
 					class: "people-face-review-trigger",
 					type: "button",
 					onClick: (t) => Me(e.face)
-				}, [J("span", cU, [J("small", null, B(e.face.review_required ? "Review needed" : "Saved face images"), 1), J("strong", null, "Browse all " + B(Number(e.face.capture_count || 0)) + " images", 1)]), t[32] ||= J("span", { class: "people-face-review-trigger-action" }, "Open gallery →", -1)], 8, sU)) : Z("", !0),
-				J("div", lU, [
+				}, [J("span", aU, [J("small", null, B(e.face.review_required ? "Review needed" : "Saved face images"), 1), J("strong", null, "Browse all " + B(Number(e.face.capture_count || 0)) + " images", 1)]), t[32] ||= J("span", { class: "people-face-review-trigger-action" }, "Open gallery →", -1)], 8, iU)) : Z("", !0),
+				J("div", oU, [
 					U(J("select", { "onUpdate:modelValue": (t) => e.draft.merge_target = t }, [t[33] ||= J("option", { value: "" }, "Merge profile into…", -1), (K(!0), q(G, null, W(L.value.filter((t) => t.id !== e.face.id), (e) => (K(), q("option", {
 						key: e.id,
 						value: e.id
-					}, B(e.name || `Unknown face · ${String(e.id).slice(-6)}`), 9, dU))), 128))], 8, uU), [[_s, e.draft.merge_target]]),
+					}, B(e.name || `Unknown face · ${String(e.id).slice(-6)}`), 9, cU))), 128))], 8, sU), [[_s, e.draft.merge_target]]),
 					J("button", {
 						class: "tv-button",
 						type: "button",
 						disabled: !!c.value || !e.draft.merge_target,
 						onClick: (t) => Ae(e.face, e.draft)
-					}, "Merge", 8, fU),
+					}, "Merge", 8, lU),
 					J("button", {
 						class: "tv-button danger",
 						type: "button",
 						disabled: !!c.value,
 						onClick: (t) => V(e.face)
-					}, "Remove profile", 8, pU)
+					}, "Remove profile", 8, uU)
 				])
-			]))), 128))])) : (K(), q("p", mU, B(ee.value.enabled ? "No faces have been added yet." : "Face ID is disabled. Enable it under Models › Face ID."), 1))], 64)),
+			]))), 128))])) : (K(), q("p", dU, B(ee.value.enabled ? "No faces have been added yet." : "Face ID is disabled. Enable it under Models › Face ID."), 1))], 64)),
 			Y(_f, {
 				open: !!te.value,
 				"backdrop-class": "tv-modal-backdrop tpeople tset-modal",
 				onClose: Ce
 			}, {
-				default: En(() => [te.value ? (K(), q("section", hU, [J("header", null, [J("div", null, [t[34] ||= J("span", { class: "tv-eyebrow" }, "Tater person", -1), J("h2", gU, B(te.value.display_name), 1)]), J("button", {
+				default: En(() => [te.value ? (K(), q("section", fU, [J("header", null, [J("div", null, [t[34] ||= J("span", { class: "tv-eyebrow" }, "Tater person", -1), J("h2", pU, B(te.value.display_name), 1)]), J("button", {
 					class: "tv-button",
 					type: "button",
 					onClick: Ce
-				}, "Close")]), J("div", _U, [
-					J("div", vU, [J("label", yU, [t[35] ||= X("Display name", -1), U(J("input", {
+				}, "Close")]), J("div", mU, [
+					J("div", hU, [J("label", gU, [t[35] ||= X("Display name", -1), U(J("input", {
 						"onUpdate:modelValue": t[5] ||= (e) => M.display_name = e,
 						type: "text"
-					}, null, 512), [[$, M.display_name]])]), J("label", bU, [U(J("input", {
+					}, null, 512), [[$, M.display_name]])]), J("label", _U, [U(J("input", {
 						"onUpdate:modelValue": t[6] ||= (e) => M.is_admin = e,
 						class: "tv-checkbox",
 						type: "checkbox"
 					}, null, 512), [[ms, M.is_admin]]), t[36] ||= J("span", null, [J("strong", null, "Admin access"), J("small", null, "Allow admin-only tools from linked identities.")], -1)])]),
-					J("label", xU, [
+					J("label", vU, [
 						t[37] ||= X("Response instructions", -1),
 						U(J("textarea", {
 							"onUpdate:modelValue": t[7] ||= (e) => M.instructions = e,
@@ -22644,23 +22605,23 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 						}, null, 512), [[$, M.instructions]]),
 						t[38] ||= J("small", null, "Used only when Tater resolves the current user to this person.", -1)
 					]),
-					J("div", SU, [J("button", {
+					J("div", yU, [J("button", {
 						class: "tv-button primary",
 						type: "button",
 						disabled: !!c.value,
 						onClick: we
-					}, "Save person", 8, CU), J("button", {
+					}, "Save person", 8, bU), J("button", {
 						class: "tv-button danger",
 						type: "button",
 						disabled: !!c.value,
 						onClick: Te
-					}, "Delete", 8, wU)]),
-					J("section", TU, [t[39] ||= J("div", { class: "people-section-label" }, "Linked identities", -1), de(te.value).length ? (K(), q("div", EU, [(K(!0), q(G, null, W(de(te.value), (e) => (K(), q("div", {
+					}, "Delete", 8, xU)]),
+					J("section", SU, [t[39] ||= J("div", { class: "people-section-label" }, "Linked identities", -1), de(te.value).length ? (K(), q("div", CU, [(K(!0), q(G, null, W(de(te.value), (e) => (K(), q("div", {
 						key: le(e),
 						class: "people-alias-row"
 					}, [
-						J("span", DU, B(fe(pe(e.platform), "I")), 1),
-						J("div", OU, [
+						J("span", wU, B(fe(pe(e.platform), "I")), 1),
+						J("div", TU, [
 							J("strong", null, B(e.label || e.external_id), 1),
 							J("span", null, B(pe(e.platform)) + " · " + B(String(e.kind || "user").replaceAll("_", " ")), 1),
 							J("small", null, B(e.external_id), 1)
@@ -22670,8 +22631,8 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 							type: "button",
 							disabled: !!c.value,
 							onClick: (t) => Ee(e)
-						}, "Unlink", 8, kU)
-					]))), 128))])) : (K(), q("p", AU, "No identities linked yet."))])
+						}, "Unlink", 8, EU)
+					]))), 128))])) : (K(), q("p", DU, "No identities linked yet."))])
 				])])) : Z("", !0)]),
 				_: 1
 			}, 8, ["open"]),
@@ -22680,42 +22641,42 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 				"backdrop-class": "tv-modal-backdrop tpeople tset-modal",
 				onClose: Ne
 			}, {
-				default: En(() => [ne.value ? (K(), q("section", jU, [
+				default: En(() => [ne.value ? (K(), q("section", OU, [
 					J("header", null, [J("div", null, [
 						t[40] ||= J("span", { class: "tv-eyebrow" }, "Face ID gallery", -1),
-						J("h2", MU, B(ne.value.name || "Unknown face"), 1),
+						J("h2", kU, B(ne.value.name || "Unknown face"), 1),
 						J("p", null, "Showing " + B(g.value.length) + " of " + B(_.value) + " " + B(S.value === "all" ? `saved images (${v.value} total)` : `${S.value} images`) + ".", 1)
 					]), J("button", {
 						class: "tv-button",
 						type: "button",
 						onClick: Ne
 					}, "Close")]),
-					J("div", NU, [t[41] ||= J("div", null, [J("strong", null, "Choose saved images"), J("span", null, "Trust correct captures so they can improve matching. Move or remove incorrect ones.")], -1), J("div", PU, [
-						J("span", FU, B(m.value.length) + " selected", 1),
+					J("div", AU, [t[41] ||= J("div", null, [J("strong", null, "Choose saved images"), J("span", null, "Trust correct captures so they can improve matching. Move or remove incorrect ones.")], -1), J("div", jU, [
+						J("span", MU, B(m.value.length) + " selected", 1),
 						J("button", {
 							class: "tv-button",
 							type: "button",
 							disabled: !g.value.length || m.value.length === g.value.length,
 							onClick: t[8] ||= (e) => m.value = g.value.map((e) => String(e.id))
-						}, "Select shown", 8, IU),
+						}, "Select shown", 8, NU),
 						J("button", {
 							class: "tv-button",
 							type: "button",
 							disabled: !m.value.length,
 							onClick: t[9] ||= (e) => m.value = []
-						}, "Clear", 8, LU)
+						}, "Clear", 8, PU)
 					])]),
-					J("div", RU, [J("label", null, [t[42] ||= X("Status", -1), U(J("select", {
+					J("div", FU, [J("label", null, [t[42] ||= X("Status", -1), U(J("select", {
 						"onUpdate:modelValue": t[10] ||= (e) => S.value = e,
 						onChange: Pe
 					}, [
-						J("option", zU, "All (" + B(v.value) + ")", 1),
-						J("option", BU, "Trusted (" + B(Number(C.value.trusted || 0)) + ")", 1),
-						J("option", VU, "Provisional (" + B(Number(C.value.provisional || 0)) + ")", 1),
-						J("option", HU, "Unreviewed (" + B(Number(C.value.unreviewed || 0)) + ")", 1)
+						J("option", IU, "All (" + B(v.value) + ")", 1),
+						J("option", LU, "Trusted (" + B(Number(C.value.trusted || 0)) + ")", 1),
+						J("option", RU, "Provisional (" + B(Number(C.value.provisional || 0)) + ")", 1),
+						J("option", zU, "Unreviewed (" + B(Number(C.value.unreviewed || 0)) + ")", 1)
 					], 544), [[_s, S.value]])]), t[43] ||= J("span", null, "Only trusted images are used to recognize a linked person.", -1)]),
-					x.value ? (K(), q("div", UU, B(x.value), 1)) : Z("", !0),
-					g.value.length ? (K(), q("div", WU, [(K(!0), q(G, null, W(g.value, (e) => (K(), q("button", {
+					x.value ? (K(), q("div", BU, B(x.value), 1)) : Z("", !0),
+					g.value.length ? (K(), q("div", VU, [(K(!0), q(G, null, W(g.value, (e) => (K(), q("button", {
 						key: e.id,
 						class: z(["people-face-capture", { "is-selected": m.value.includes(String(e.id)) }]),
 						type: "button",
@@ -22726,36 +22687,36 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 							src: e.image_src,
 							alt: `Face captured ${he(e.seen_at)}`,
 							loading: "lazy"
-						}, null, 8, KU),
-						J("span", qU, [J("span", JU, B(he(e.seen_at)), 1), J("span", { class: z(["people-face-reference-status", String(e.reference_status || "unreviewed")]) }, B(ze(e.reference_status)), 3)]),
-						J("small", YU, B(Be(e)), 1),
+						}, null, 8, UU),
+						J("span", WU, [J("span", GU, B(he(e.seen_at)), 1), J("span", { class: z(["people-face-reference-status", String(e.reference_status || "unreviewed")]) }, B(ze(e.reference_status)), 3)]),
+						J("small", KU, B(Be(e)), 1),
 						t[44] ||= J("span", { class: "people-face-selection-mark" }, "✓", -1)
-					], 10, GU))), 128))])) : !b.value && !x.value ? (K(), q("p", XU, "No " + B(S.value === "all" ? "saved" : S.value) + " face images.", 1)) : Z("", !0),
+					], 10, HU))), 128))])) : !b.value && !x.value ? (K(), q("p", qU, "No " + B(S.value === "all" ? "saved" : S.value) + " face images.", 1)) : Z("", !0),
 					y.value ? (K(), q("button", {
 						key: 3,
 						class: "tv-button people-face-load-more",
 						type: "button",
 						disabled: b.value,
 						onClick: t[11] ||= (e) => je(!1)
-					}, B(b.value ? "Loading…" : `Load more (${g.value.length} of ${_.value})`), 9, ZU)) : b.value ? (K(), q("div", QU, "Loading saved images…")) : Z("", !0),
-					J("div", $U, [
-						J("div", eW, [J("button", {
+					}, B(b.value ? "Loading…" : `Load more (${g.value.length} of ${_.value})`), 9, JU)) : b.value ? (K(), q("div", YU, "Loading saved images…")) : Z("", !0),
+					J("div", XU, [
+						J("div", ZU, [J("button", {
 							class: "tv-button primary",
 							type: "button",
 							disabled: !!c.value || !m.value.length,
 							onClick: t[12] ||= (e) => Re(!0)
-						}, "Trust selected", 8, tW), J("button", {
+						}, "Trust selected", 8, QU), J("button", {
 							class: "tv-button",
 							type: "button",
 							disabled: !!c.value || !m.value.length,
 							onClick: t[13] ||= (e) => Re(!1)
-						}, "Mark provisional", 8, nW)]),
-						J("label", rW, [t[47] ||= X("Move selected images to", -1), U(J("select", { "onUpdate:modelValue": t[14] ||= (e) => h.value = e }, [
+						}, "Mark provisional", 8, $U)]),
+						J("label", eW, [t[47] ||= X("Move selected images to", -1), U(J("select", { "onUpdate:modelValue": t[14] ||= (e) => h.value = e }, [
 							t[45] ||= J("option", { value: "" }, "Choose face profile…", -1),
 							(K(!0), q(G, null, W(L.value.filter((e) => e.id !== ne.value?.id), (e) => (K(), q("option", {
 								key: e.id,
 								value: e.id
-							}, B(e.name || `Unknown face · ${String(e.id).slice(-6)}`), 9, iW))), 128)),
+							}, B(e.name || `Unknown face · ${String(e.id).slice(-6)}`), 9, tW))), 128)),
 							t[46] ||= J("option", { value: "__new_unknown__" }, "New unknown face", -1)
 						], 512), [[_s, h.value]])]),
 						J("button", {
@@ -22763,13 +22724,13 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 							type: "button",
 							disabled: !!c.value || !m.value.length || !h.value,
 							onClick: Ie
-						}, "Move selected", 8, aW),
+						}, "Move selected", 8, nW),
 						J("button", {
 							class: "tv-button danger",
 							type: "button",
 							disabled: !!c.value || !m.value.length,
 							onClick: Le
-						}, "Permanently delete", 8, oW)
+						}, "Permanently delete", 8, rW)
 					])
 				])) : Z("", !0)]),
 				_: 1
@@ -22779,7 +22740,7 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 				"backdrop-class": "tv-modal-backdrop tpeople tset-modal",
 				onClose: Ue
 			}, {
-				default: En(() => [w.value ? (K(), q("section", sW, [J("header", null, [t[48] ||= J("div", null, [
+				default: En(() => [w.value ? (K(), q("section", iW, [J("header", null, [t[48] ||= J("div", null, [
 					J("span", { class: "tv-eyebrow" }, "Face ID enrollment"),
 					J("h2", { id: "people-face-enroll-title" }, "Add a face"),
 					J("p", null, "Choose a person and provide one clear, front-facing photo.")
@@ -22787,18 +22748,18 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 					class: "tv-button",
 					type: "button",
 					onClick: Ue
-				}, "Close")]), J("div", cW, [
-					J("label", lW, [t[50] ||= X("Person", -1), U(J("select", { "onUpdate:modelValue": t[15] ||= (e) => T.value = e }, [t[49] ||= J("option", { value: "" }, "Choose a person", -1), (K(!0), q(G, null, W(F.value, (e) => (K(), q("option", {
+				}, "Close")]), J("div", aW, [
+					J("label", oW, [t[50] ||= X("Person", -1), U(J("select", { "onUpdate:modelValue": t[15] ||= (e) => T.value = e }, [t[49] ||= J("option", { value: "" }, "Choose a person", -1), (K(!0), q(G, null, W(F.value, (e) => (K(), q("option", {
 						key: e.id,
 						value: e.id
-					}, B(e.display_name), 9, uW))), 128))], 512), [[_s, T.value]])]),
-					J("label", dW, [t[51] ||= X("Face photo", -1), J("input", {
+					}, B(e.display_name), 9, sW))), 128))], 512), [[_s, T.value]])]),
+					J("label", cW, [t[51] ||= X("Face photo", -1), J("input", {
 						type: "file",
 						accept: "image/jpeg,image/png,image/webp",
 						capture: "user",
 						onChange: Ge
 					}, null, 32)]),
-					J("div", fW, [
+					J("div", lW, [
 						J("button", {
 							class: "tv-button",
 							type: "button",
@@ -22829,27 +22790,27 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 						class: "tpeople-enrollment-preview",
 						src: D.value,
 						alt: "Face enrollment preview"
-					}, null, 8, pW)) : Z("", !0),
-					J("div", mW, B(ee.value.loaded ? "Face ID is ready. The photo will be checked before it is saved." : "The Face ID model is not ready. Enable or load it under Models before adding a face."), 1),
+					}, null, 8, uW)) : Z("", !0),
+					J("div", dW, B(ee.value.loaded ? "Face ID is ready. The photo will be checked before it is saved." : "The Face ID model is not ready. Enable or load it under Models before adding a face."), 1),
 					J("button", {
 						class: "tv-button primary",
 						type: "button",
 						disabled: !!c.value || !T.value || !E.value,
 						onClick: Je
-					}, B(c.value === "people_face_enroll" ? "Adding…" : "Add face to person"), 9, hW)
+					}, B(c.value === "people_face_enroll" ? "Adding…" : "Add face to person"), 9, fW)
 				])])) : Z("", !0)]),
 				_: 1
 			}, 8, ["open"])
 		]));
 	}
-}), vW = { class: "tset-resource tredis-resource" }, yW = { class: "tv-panel tredis-hero" }, bW = { class: "tredis-hero-actions" }, xW = ["disabled"], SW = { class: "tm-metrics tredis-metrics" }, CW = {
+}), hW = { class: "tset-resource tredis-resource" }, gW = { class: "tv-panel tredis-hero" }, _W = { class: "tredis-hero-actions" }, vW = ["disabled"], yW = { class: "tm-metrics tredis-metrics" }, bW = {
 	key: 1,
 	class: "tv-notice error",
 	"aria-live": "polite"
-}, wW = { class: "tredis-grid" }, TW = { class: "tv-panel tset-form-card tredis-connection-card" }, EW = { class: "tv-panel-head" }, DW = { class: "tv-form-grid" }, OW = ["disabled"], kW = { key: 0 }, AW = ["disabled"], jW = ["disabled"], MW = ["disabled"], NW = ["disabled"], PW = ["placeholder", "disabled"], FW = ["disabled"], IW = { class: "tv-toggle tredis-toggle" }, LW = ["disabled"], RW = { class: "tv-toggle tredis-toggle" }, zW = ["disabled"], BW = {
+}, xW = { class: "tredis-grid" }, SW = { class: "tv-panel tset-form-card tredis-connection-card" }, CW = { class: "tv-panel-head" }, wW = { class: "tv-form-grid" }, TW = ["disabled"], EW = { key: 0 }, DW = ["disabled"], OW = ["disabled"], kW = ["disabled"], AW = ["disabled"], jW = ["placeholder", "disabled"], MW = ["disabled"], NW = { class: "tv-toggle tredis-toggle" }, PW = ["disabled"], FW = { class: "tv-toggle tredis-toggle" }, IW = ["disabled"], LW = {
 	key: 0,
 	class: "full"
-}, VW = ["disabled"], HW = { class: "tredis-card-actions" }, UW = ["disabled"], WW = ["disabled", "title"], GW = { class: "tv-panel tset-form-card tredis-encryption-card" }, KW = { class: "tv-panel-head" }, qW = { class: "tredis-details" }, JW = { class: "tredis-card-actions" }, YW = ["disabled"], XW = ["disabled"], ZW = { class: "tv-panel tredis-runtime-card" }, QW = { class: "tredis-details compact" }, $W = { class: "tset-save-bar tredis-save-bar" }, eG = ["disabled"], tG = /* @__PURE__ */ fr({
+}, RW = ["disabled"], zW = { class: "tredis-card-actions" }, BW = ["disabled"], VW = ["disabled", "title"], HW = { class: "tv-panel tset-form-card tredis-encryption-card" }, UW = { class: "tv-panel-head" }, WW = { class: "tredis-details" }, GW = { class: "tredis-card-actions" }, KW = ["disabled"], qW = ["disabled"], JW = { class: "tv-panel tredis-runtime-card" }, YW = { class: "tredis-details compact" }, XW = { class: "tset-save-bar tredis-save-bar" }, ZW = ["disabled"], QW = /* @__PURE__ */ fr({
 	__name: "RedisSettings",
 	props: {
 		initialStatus: {},
@@ -23073,18 +23034,18 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 			}, 1e4);
 		}), Fr(() => {
 			p !== null && window.clearInterval(p);
-		}), t({ hasUnsavedChanges: () => c.value }), (e, t) => (K(), q("section", vW, [
-			J("section", yW, [t[12] ||= J("div", null, [
+		}), t({ hasUnsavedChanges: () => c.value }), (e, t) => (K(), q("section", hW, [
+			J("section", gW, [t[12] ||= J("div", null, [
 				J("span", { class: "tv-eyebrow" }, "Live data service"),
 				J("h2", null, "Redis connection and encryption"),
 				J("p", null, "Connection health refreshes automatically while unsaved form edits stay untouched.")
-			], -1), J("div", bW, [J("span", { class: z(["tv-live-pill", { warning: !j.value }]) }, [t[11] ||= J("i", null, null, -1), X(B(u.value ? "Updating" : j.value ? "Connected" : "Needs attention"), 1)], 2), J("button", {
+			], -1), J("div", _W, [J("span", { class: z(["tv-live-pill", { warning: !j.value }]) }, [t[11] ||= J("i", null, null, -1), X(B(u.value ? "Updating" : j.value ? "Connected" : "Needs attention"), 1)], 2), J("button", {
 				class: "tv-button",
 				type: "button",
 				disabled: !!l.value || u.value,
 				onClick: t[0] ||= (e) => w(!1)
-			}, "Refresh", 8, xW)])]),
-			J("div", SW, [
+			}, "Refresh", 8, vW)])]),
+			J("div", yW, [
 				J("article", null, [t[13] ||= J("span", null, "Mode", -1), J("strong", null, B(A.value ? "Internal" : "External"), 1)]),
 				J("article", null, [t[14] ||= J("span", null, "Connection", -1), J("strong", null, B(j.value ? "Healthy" : "Unavailable"), 1)]),
 				J("article", null, [t[15] ||= J("span", null, "Store", -1), J("strong", null, B(L.value), 1)]),
@@ -23095,32 +23056,32 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 				class: z(["tv-notice", { error: !!d.value }]),
 				"aria-live": "polite"
 			}, B(d.value || f.value), 3)) : Z("", !0),
-			o.value.fallback_reason ? (K(), q("div", CW, " Redis recovered to the internal store: " + B(o.value.fallback_reason), 1)) : Z("", !0),
-			J("div", wW, [
-				J("section", TW, [
-					J("header", EW, [J("div", null, [
+			o.value.fallback_reason ? (K(), q("div", bW, " Redis recovered to the internal store: " + B(o.value.fallback_reason), 1)) : Z("", !0),
+			J("div", xW, [
+				J("section", SW, [
+					J("header", CW, [J("div", null, [
 						t[17] ||= J("span", { class: "tv-eyebrow" }, "Connection", -1),
 						t[18] ||= J("h2", null, "Redis server", -1),
 						J("p", null, B(F.value), 1)
 					]), J("span", { class: z(["tredis-state", { connected: j.value }]) }, [t[19] ||= J("i", null, null, -1), X(B(j.value ? "Live" : "Offline"), 1)], 2)]),
-					J("div", DW, [
+					J("div", wW, [
 						J("label", null, [t[21] ||= X(" Mode ", -1), U(J("select", {
 							"onUpdate:modelValue": t[1] ||= (e) => a.mode = e,
 							disabled: !!l.value,
 							onChange: y
-						}, [...t[20] ||= [J("option", { value: "internal" }, "Internal", -1), J("option", { value: "external" }, "External", -1)]], 40, OW), [[_s, a.mode]])]),
-						A.value ? (K(), q("label", kW, [t[22] ||= X(" Internal data file ", -1), U(J("input", {
+						}, [...t[20] ||= [J("option", { value: "internal" }, "Internal", -1), J("option", { value: "external" }, "External", -1)]], 40, TW), [[_s, a.mode]])]),
+						A.value ? (K(), q("label", EW, [t[22] ||= X(" Internal data file ", -1), U(J("input", {
 							"onUpdate:modelValue": t[2] ||= (e) => a.data_path = e,
 							type: "text",
 							disabled: !!l.value,
 							onInput: y
-						}, null, 40, AW), [[$, a.data_path]])])) : (K(), q(G, { key: 1 }, [
+						}, null, 40, DW), [[$, a.data_path]])])) : (K(), q(G, { key: 1 }, [
 							J("label", null, [t[23] ||= X(" Host ", -1), U(J("input", {
 								"onUpdate:modelValue": t[3] ||= (e) => a.host = e,
 								type: "text",
 								disabled: !!l.value,
 								onInput: y
-							}, null, 40, jW), [[$, a.host]])]),
+							}, null, 40, OW), [[$, a.host]])]),
 							J("label", null, [t[24] ||= X(" Port ", -1), U(J("input", {
 								"onUpdate:modelValue": t[4] ||= (e) => a.port = e,
 								type: "number",
@@ -23128,7 +23089,7 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 								max: "65535",
 								disabled: !!l.value,
 								onInput: y
-							}, null, 40, MW), [[
+							}, null, 40, kW), [[
 								$,
 								a.port,
 								void 0,
@@ -23143,7 +23104,7 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 									autocomplete: "username",
 									disabled: !!l.value,
 									onInput: y
-								}, null, 40, NW), [[$, a.username]])
+								}, null, 40, AW), [[$, a.username]])
 							]),
 							J("label", null, [
 								t[27] ||= X(" Password ", -1),
@@ -23155,7 +23116,7 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 									placeholder: o.value.password_set ? "Saved password will be kept" : "",
 									disabled: !!l.value,
 									onInput: y
-								}, null, 40, PW), [[$, a.password]])
+								}, null, 40, jW), [[$, a.password]])
 							])
 						], 64)),
 						J("label", null, [t[28] ||= X(" Database ", -1), U(J("input", {
@@ -23164,28 +23125,28 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 							min: "0",
 							disabled: !!l.value,
 							onInput: y
-						}, null, 40, FW), [[
+						}, null, 40, MW), [[
 							$,
 							a.db,
 							void 0,
 							{ number: !0 }
 						]])]),
 						A.value ? Z("", !0) : (K(), q(G, { key: 2 }, [
-							J("label", IW, [U(J("input", {
+							J("label", NW, [U(J("input", {
 								"onUpdate:modelValue": t[8] ||= (e) => a.use_tls = e,
 								class: "tv-checkbox",
 								type: "checkbox",
 								disabled: !!l.value,
 								onChange: y
-							}, null, 40, LW), [[ms, a.use_tls]]), t[29] ||= J("span", null, [J("strong", null, "Use TLS"), J("small", null, "Encrypt the Redis network connection.")], -1)]),
-							J("label", RW, [U(J("input", {
+							}, null, 40, PW), [[ms, a.use_tls]]), t[29] ||= J("span", null, [J("strong", null, "Use TLS"), J("small", null, "Encrypt the Redis network connection.")], -1)]),
+							J("label", FW, [U(J("input", {
 								"onUpdate:modelValue": t[9] ||= (e) => a.verify_tls = e,
 								class: "tv-checkbox",
 								type: "checkbox",
 								disabled: !!l.value || !a.use_tls,
 								onChange: y
-							}, null, 40, zW), [[ms, a.verify_tls]]), t[30] ||= J("span", null, [J("strong", null, "Verify TLS certificate"), J("small", null, "Recommended for external Redis.")], -1)]),
-							a.use_tls ? (K(), q("label", BW, [
+							}, null, 40, IW), [[ms, a.verify_tls]]), t[30] ||= J("span", null, [J("strong", null, "Verify TLS certificate"), J("small", null, "Recommended for external Redis.")], -1)]),
+							a.use_tls ? (K(), q("label", LW, [
 								t[31] ||= X(" CA certificate path ", -1),
 								t[32] ||= J("small", null, "Optional", -1),
 								U(J("input", {
@@ -23193,53 +23154,53 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 									type: "text",
 									disabled: !!l.value,
 									onInput: y
-								}, null, 40, VW), [[$, a.ca_cert_path]])
+								}, null, 40, RW), [[$, a.ca_cert_path]])
 							])) : Z("", !0)
 						], 64))
 					]),
-					J("div", HW, [J("button", {
+					J("div", zW, [J("button", {
 						class: "tv-button",
 						type: "button",
 						disabled: !!l.value,
 						onClick: T
-					}, B(l.value === "test" ? "Testing…" : "Test Connection"), 9, UW), J("button", {
+					}, B(l.value === "test" ? "Testing…" : "Test Connection"), 9, BW), J("button", {
 						class: "tv-button",
 						type: "button",
 						disabled: !M.value,
 						title: o.value.internal ? "Redis is already internal." : j.value ? "" : "Connect external Redis before migrating.",
 						onClick: D
-					}, B(l.value === "migrate" ? "Migrating…" : "Migrate to Internal"), 9, WW)])
+					}, B(l.value === "migrate" ? "Migrating…" : "Migrate to Internal"), 9, VW)])
 				]),
-				J("section", GW, [
-					J("header", KW, [J("div", null, [
+				J("section", HW, [
+					J("header", UW, [J("div", null, [
 						t[33] ||= J("span", { class: "tv-eyebrow" }, "At-rest protection", -1),
 						t[34] ||= J("h2", null, "Live value encryption", -1),
 						J("p", null, B(I.value), 1)
 					]), J("span", { class: z(["tredis-state", { connected: N.value }]) }, [t[35] ||= J("i", null, null, -1), X(B(N.value ? "Encrypted" : "Plaintext"), 1)], 2)]),
-					J("dl", qW, [
+					J("dl", WW, [
 						J("div", null, [t[36] ||= J("dt", null, "Key file", -1), J("dd", null, B(s.value.key_path || "Not available"), 1)]),
 						J("div", null, [t[37] ||= J("dt", null, "Mode state file", -1), J("dd", null, B(s.value.live_encryption_state_path || "Not available"), 1)]),
 						J("div", null, [t[38] ||= J("dt", null, "Last updated", -1), J("dd", null, B(s.value.live_encryption_updated || "Not recorded"), 1)]),
 						J("div", null, [t[39] ||= J("dt", null, "Key fingerprint", -1), J("dd", null, B(s.value.key_fingerprint || "Not created"), 1)])
 					]),
 					t[40] ||= J("p", { class: "tredis-help" }, "Encrypt transforms existing values in place, creates a key when needed, and encrypts future writes. Decrypt reverses the values and returns future writes to plaintext.", -1),
-					J("div", JW, [J("button", {
+					J("div", GW, [J("button", {
 						class: "tv-button",
 						type: "button",
 						disabled: !!l.value || !j.value || !P.value || N.value,
 						onClick: O
-					}, B(l.value === "encrypt" ? "Encrypting…" : "Encrypt Live Redis"), 9, YW), J("button", {
+					}, B(l.value === "encrypt" ? "Encrypting…" : "Encrypt Live Redis"), 9, KW), J("button", {
 						class: "tv-button danger",
 						type: "button",
 						disabled: !!l.value || !j.value || !P.value || !N.value,
 						onClick: k
-					}, B(l.value === "decrypt" ? "Decrypting…" : "Decrypt Live Redis"), 9, XW)])
+					}, B(l.value === "decrypt" ? "Decrypting…" : "Decrypt Live Redis"), 9, qW)])
 				]),
-				J("section", ZW, [t[47] ||= J("header", null, [
+				J("section", JW, [t[47] ||= J("header", null, [
 					J("span", { class: "tv-eyebrow" }, "Runtime details"),
 					J("h2", null, "Storage health"),
 					J("p", null, "Useful paths and process details for recovery and diagnostics.")
-				], -1), J("dl", QW, [
+				], -1), J("dl", YW, [
 					J("div", null, [t[41] ||= J("dt", null, "Configuration source", -1), J("dd", null, B(o.value.source || "Unknown"), 1)]),
 					J("div", null, [t[42] ||= J("dt", null, "Configuration file", -1), J("dd", null, B(o.value.config_path || "Not reported"), 1)]),
 					J("div", null, [t[43] ||= J("dt", null, "Data directory", -1), J("dd", null, B(o.value.data_dir || "External service"), 1)]),
@@ -23248,47 +23209,47 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 					J("div", null, [t[46] ||= J("dt", null, "Process ID", -1), J("dd", null, B(o.value.redis_pid || "Not reported"), 1)])
 				])])
 			]),
-			J("section", $W, [J("div", null, [J("strong", null, B(c.value ? "Unsaved Redis changes" : "Redis settings are synchronized"), 1), t[48] ||= J("span", null, "Live health continues to refresh without replacing edits in progress.", -1)]), J("button", {
+			J("section", XW, [J("div", null, [J("strong", null, B(c.value ? "Unsaved Redis changes" : "Redis settings are synchronized"), 1), t[48] ||= J("span", null, "Live health continues to refresh without replacing edits in progress.", -1)]), J("button", {
 				class: "tv-button primary",
 				type: "button",
 				disabled: !!l.value || !c.value,
 				onClick: E
-			}, B(l.value === "save" ? "Saving…" : "Save Redis Settings"), 9, eG)])
+			}, B(l.value === "save" ? "Saving…" : "Save Redis Settings"), 9, ZW)])
 		]));
 	}
-}), nG = { class: "tset-resource tlink-resource" }, rG = { class: "tv-panel tlink-hero" }, iG = { class: "tlink-live" }, aG = {
+}), $W = { class: "tset-resource tlink-resource" }, eG = { class: "tv-panel tlink-hero" }, tG = { class: "tlink-live" }, nG = {
 	class: "tv-tabs tlink-tabs",
 	"aria-label": "Spud Link sections"
-}, oG = { class: "tlink-pair-grid" }, sG = { class: "tv-panel tlink-pair-card" }, cG = ["disabled"], lG = { class: "tv-panel tlink-pair-card" }, uG = ["disabled"], dG = { class: "tv-panel tlink-pair-card tlink-webui-card" }, fG = ["disabled"], pG = { class: "tv-panel tlink-nodes" }, mG = { class: "tv-panel-head" }, hG = { class: "tlink-head-actions" }, gG = { class: "tv-live-pill" }, _G = ["disabled"], vG = {
+}, rG = { class: "tlink-pair-grid" }, iG = { class: "tv-panel tlink-pair-card" }, aG = ["disabled"], oG = { class: "tv-panel tlink-pair-card" }, sG = ["disabled"], cG = { class: "tv-panel tlink-pair-card tlink-webui-card" }, lG = ["disabled"], uG = { class: "tv-panel tlink-nodes" }, dG = { class: "tv-panel-head" }, fG = { class: "tlink-head-actions" }, pG = { class: "tv-live-pill" }, mG = ["disabled"], hG = {
 	key: 0,
 	class: "tlink-node-list"
-}, yG = { class: "tlink-facts" }, bG = { key: 0 }, xG = { key: 1 }, SG = { key: 2 }, CG = ["disabled", "onClick"], wG = {
+}, gG = { class: "tlink-facts" }, _G = { key: 0 }, vG = { key: 1 }, yG = { key: 2 }, bG = ["disabled", "onClick"], xG = {
 	key: 1,
 	class: "tv-empty"
-}, TG = { class: "tv-panel tset-form-card tlink-connect" }, EG = { class: "tv-form-grid" }, DG = { class: "full" }, OG = { class: "full" }, kG = { class: "tlink-actions" }, AG = ["disabled"], jG = ["disabled"], MG = { class: "tv-panel tlink-routing" }, NG = { class: "tv-panel-head" }, PG = { class: "tv-toggle compact" }, FG = { class: "tlink-route-grid" }, IG = { key: 0 }, LG = ["onUpdate:modelValue", "disabled"], RG = { class: "tlink-settings-grid" }, zG = { class: "tv-panel tset-form-card" }, BG = { class: "tv-form-grid" }, VG = { class: "tlink-mode-help" }, HG = { class: "tv-panel tset-form-card" }, UG = { class: "tlink-toggle-grid" }, WG = { class: "tv-toggle" }, GG = { class: "tv-toggle" }, KG = { class: "tv-toggle" }, qG = { class: "tv-toggle" }, JG = { class: "tv-toggle" }, YG = { class: "tv-toggle" }, XG = { class: "tv-toggle" }, ZG = { class: "tv-panel tlink-endpoints" }, QG = {
+}, SG = { class: "tv-panel tset-form-card tlink-connect" }, CG = { class: "tv-form-grid" }, wG = { class: "full" }, TG = { class: "full" }, EG = { class: "tlink-actions" }, DG = ["disabled"], OG = ["disabled"], kG = { class: "tv-panel tlink-routing" }, AG = { class: "tv-panel-head" }, jG = { class: "tv-toggle compact" }, MG = { class: "tlink-route-grid" }, NG = { key: 0 }, PG = ["onUpdate:modelValue", "disabled"], FG = { class: "tlink-settings-grid" }, IG = { class: "tv-panel tset-form-card" }, LG = { class: "tv-form-grid" }, RG = { class: "tlink-mode-help" }, zG = { class: "tv-panel tset-form-card" }, BG = { class: "tlink-toggle-grid" }, VG = { class: "tv-toggle" }, HG = { class: "tv-toggle" }, UG = { class: "tv-toggle" }, WG = { class: "tv-toggle" }, GG = { class: "tv-toggle" }, KG = { class: "tv-toggle" }, qG = { class: "tv-toggle" }, JG = { class: "tv-panel tlink-endpoints" }, YG = {
 	key: 4,
 	class: "tset-save-bar"
-}, $G = ["disabled"], eK = {
+}, XG = ["disabled"], ZG = {
 	class: "tlink-modal",
 	role: "dialog",
 	"aria-modal": "true",
 	"aria-labelledby": "tlink-pair-title"
-}, tK = { id: "tlink-pair-title" }, nK = {
+}, QG = { id: "tlink-pair-title" }, $G = {
 	key: 0,
 	class: "tlink-modal-state"
-}, rK = {
+}, eK = {
 	key: 1,
 	class: "tlink-modal-state success"
-}, iK = {
+}, tK = {
 	key: 2,
 	class: "tlink-modal-state error"
-}, aK = {
+}, nK = {
 	key: 3,
 	class: "tlink-modal-state"
-}, oK = ["src"], sK = {
+}, rK = ["src"], iK = {
 	key: 1,
 	class: "tlink-code"
-}, cK = { key: 0 }, lK = /* @__PURE__ */ fr({
+}, aK = { key: 0 }, oK = /* @__PURE__ */ fr({
 	__name: "SpudLinkSettings",
 	props: {
 		settings: {},
@@ -23616,14 +23577,14 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 			await I(!0), L();
 		}), Fr(() => {
 			x = !0, window.clearTimeout(y), window.clearTimeout(b);
-		}), t({ hasUnsavedChanges: () => f.value }), (t, n) => (K(), q("section", nG, [
+		}), t({ hasUnsavedChanges: () => f.value }), (t, n) => (K(), q("section", $W, [
 			m.value || p.value ? (K(), q("div", {
 				key: 0,
 				class: z(["tv-notice", { error: !!p.value }]),
 				"aria-live": "polite"
 			}, B(p.value || m.value), 3)) : Z("", !0),
-			J("section", rG, [n[21] ||= Ea("<div class=\"tlink-orbit\" aria-hidden=\"true\"><i class=\"hub\"></i><i class=\"spudlet\"></i><i class=\"little\"></i></div><div><span class=\"tv-eyebrow\">One Tater, every surface connected</span><h2>Spud Link</h2><p> Share models and tools with Spudlets, Little Spuds, and the dedicated Tater Open WebUI experience. </p></div>", 2), J("div", iG, [J("span", { class: z({ connected: w.value || S.value.length > 0 }) }, null, 2), X(" " + B(w.value ? "Hub connected" : S.value.length ? `${S.value.length} linked` : E.value), 1)])]),
-			J("nav", aG, [
+			J("section", eG, [n[21] ||= Ea("<div class=\"tlink-orbit\" aria-hidden=\"true\"><i class=\"hub\"></i><i class=\"spudlet\"></i><i class=\"little\"></i></div><div><span class=\"tv-eyebrow\">One Tater, every surface connected</span><h2>Spud Link</h2><p> Share models and tools with Spudlets, Little Spuds, and the dedicated Tater Open WebUI experience. </p></div>", 2), J("div", tG, [J("span", { class: z({ connected: w.value || S.value.length > 0 }) }, null, 2), X(" " + B(w.value ? "Hub connected" : S.value.length ? `${S.value.length} linked` : E.value), 1)])]),
+			J("nav", nG, [
 				J("button", {
 					type: "button",
 					class: z({ active: c.value === "pair" }),
@@ -23640,8 +23601,8 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 					onClick: n[2] ||= (e) => M("settings")
 				}, " Settings ", 2)
 			]),
-			c.value === "pair" ? (K(), q(G, { key: 1 }, [J("div", oG, [
-				J("section", sG, [
+			c.value === "pair" ? (K(), q(G, { key: 1 }, [J("div", rG, [
+				J("section", iG, [
 					n[26] ||= J("header", null, [
 						J("span", { class: "tv-eyebrow" }, "Little Spud"),
 						J("h2", null, "Pair by QR"),
@@ -23672,30 +23633,30 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 						type: "button",
 						disabled: T.value,
 						onClick: n[5] ||= (e) => ne("little_spud")
-					}, " Show Little Spud QR ", 8, cG)
+					}, " Show Little Spud QR ", 8, aG)
 				]),
-				J("section", lG, [n[27] ||= Ea("<header><span class=\"tv-eyebrow\">Spudlet</span><h2>Link another Tater</h2><p> Create a short, single-use code to paste into another full Tater. </p></header><div class=\"tlink-pair-steps\"><strong>1</strong><span>Open Spud Link on the other Tater.</span><strong>2</strong><span>Paste the Hub URL and code there.</span><strong>3</strong><span>The permanent token is saved automatically.</span></div>", 2), J("button", {
+				J("section", oG, [n[27] ||= Ea("<header><span class=\"tv-eyebrow\">Spudlet</span><h2>Link another Tater</h2><p> Create a short, single-use code to paste into another full Tater. </p></header><div class=\"tlink-pair-steps\"><strong>1</strong><span>Open Spud Link on the other Tater.</span><strong>2</strong><span>Paste the Hub URL and code there.</span><strong>3</strong><span>The permanent token is saved automatically.</span></div>", 2), J("button", {
 					class: "tv-button primary",
 					type: "button",
 					disabled: T.value,
 					onClick: n[6] ||= (e) => ne("spudlet")
-				}, " Create Spudlet code ", 8, uG)]),
-				J("section", dG, [n[28] ||= Ea("<header><span class=\"tv-eyebrow\">Tater Open WebUI</span><h2>Link the coding workspace</h2><p> Give Tater Open WebUI normal chat, Hydra tools, speech recognition, and Tater&#39;s configured voice through one revocable connection. </p></header><div class=\"tlink-pair-steps\"><strong>1</strong><span>Open Tater settings in Tater Open WebUI.</span><strong>2</strong><span>Enter this Tater&#39;s URL and the one-time code.</span><strong>3</strong><span>Chat, Hydra, STT, and TTS connect together.</span></div>", 2), J("button", {
+				}, " Create Spudlet code ", 8, sG)]),
+				J("section", cG, [n[28] ||= Ea("<header><span class=\"tv-eyebrow\">Tater Open WebUI</span><h2>Link the coding workspace</h2><p> Give Tater Open WebUI normal chat, Hydra tools, speech recognition, and Tater&#39;s configured voice through one revocable connection. </p></header><div class=\"tlink-pair-steps\"><strong>1</strong><span>Open Tater settings in Tater Open WebUI.</span><strong>2</strong><span>Enter this Tater&#39;s URL and the one-time code.</span><strong>3</strong><span>Chat, Hydra, STT, and TTS connect together.</span></div>", 2), J("button", {
 					class: "tv-button primary",
 					type: "button",
 					disabled: T.value,
 					onClick: n[7] ||= (e) => ne("tater_open_webui")
-				}, " Create Tater Open WebUI code ", 8, fG)])
-			]), J("section", pG, [J("header", mG, [n[30] ||= J("div", null, [
+				}, " Create Tater Open WebUI code ", 8, lG)])
+			]), J("section", uG, [J("header", dG, [n[30] ||= J("div", null, [
 				J("span", { class: "tv-eyebrow" }, "Linked Spuds"),
 				J("h2", null, "Devices connected to this Tater"),
 				J("p", null, "Live status refreshes every five seconds.")
-			], -1), J("div", hG, [J("span", gG, [n[29] ||= J("i", null, null, -1), X(B(S.value.length) + " linked", 1)]), J("button", {
+			], -1), J("div", fG, [J("span", pG, [n[29] ||= J("i", null, null, -1), X(B(S.value.length) + " linked", 1)]), J("button", {
 				class: "tv-button",
 				type: "button",
 				disabled: d.value,
 				onClick: n[8] ||= (e) => I()
-			}, B(d.value ? "Refreshing…" : "Refresh"), 9, _G)])]), S.value.length ? (K(), q("div", vG, [(K(!0), q(G, null, W(S.value, (e) => (K(), q("article", {
+			}, B(d.value ? "Refreshing…" : "Refresh"), 9, mG)])]), S.value.length ? (K(), q("div", hG, [(K(!0), q(G, null, W(S.value, (e) => (K(), q("article", {
 				key: String(e.id || e.name),
 				class: "tlink-node-row"
 			}, [
@@ -23703,10 +23664,10 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 				J("div", null, [
 					J("strong", null, B(e.name || e.id || "Linked Spud"), 1),
 					J("small", null, B(se(e.role)) + " · last seen " + B(ce(e.last_seen_at)), 1),
-					J("div", yG, [
-						e.last_remote_addr ? (K(), q("span", bG, "IP " + B(e.last_remote_addr), 1)) : Z("", !0),
-						e.version ? (K(), q("span", xG, "v" + B(e.version), 1)) : Z("", !0),
-						e.remote_mode ? (K(), q("span", SG, B(e.remote_mode), 1)) : Z("", !0)
+					J("div", gG, [
+						e.last_remote_addr ? (K(), q("span", _G, "IP " + B(e.last_remote_addr), 1)) : Z("", !0),
+						e.version ? (K(), q("span", vG, "v" + B(e.version), 1)) : Z("", !0),
+						e.remote_mode ? (K(), q("span", yG, B(e.remote_mode), 1)) : Z("", !0)
 					])
 				]),
 				J("button", {
@@ -23714,14 +23675,14 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 					type: "button",
 					disabled: g.value === String(e.id || ""),
 					onClick: (t) => oe(e)
-				}, B(g.value === String(e.id || "") ? "Revoking…" : "Revoke"), 9, CG)
-			]))), 128))])) : (K(), q("div", wG, " No linked clients yet. Create a QR or pairing code above to connect one. "))])], 64)) : c.value === "spudlet" ? (K(), q(G, { key: 2 }, [J("section", TG, [
+				}, B(g.value === String(e.id || "") ? "Revoking…" : "Revoke"), 9, bG)
+			]))), 128))])) : (K(), q("div", xG, " No linked clients yet. Create a QR or pairing code above to connect one. "))])], 64)) : c.value === "spudlet" ? (K(), q(G, { key: 2 }, [J("section", SG, [
 				n[36] ||= J("header", { class: "tv-panel-head" }, [J("div", null, [
 					J("span", { class: "tv-eyebrow" }, "Upstream Hub"),
 					J("h2", null, "Connect this Tater to a Spud Hub"),
 					J("p", null, " Create a Spudlet code on the main Tater, then paste its address and code here. ")
 				]), J("span", { class: "tlink-mode-chip" }, "Spudlet")], -1),
-				J("div", EG, [J("label", DG, [
+				J("div", CG, [J("label", wG, [
 					n[32] ||= X("Spud Hub URL", -1),
 					U(J("input", {
 						"onUpdate:modelValue": n[9] ||= (e) => _.hub_url = e,
@@ -23730,38 +23691,38 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 						onInput: j
 					}, null, 544), [[$, _.hub_url]]),
 					n[33] ||= J("small", null, "Use its LAN address at home or its public Tater Tunnel address.", -1)
-				]), J("label", OG, [n[34] ||= X("Spudlet pairing code", -1), U(J("input", {
+				]), J("label", TG, [n[34] ||= X("Spudlet pairing code", -1), U(J("input", {
 					"onUpdate:modelValue": n[10] ||= (e) => h.value = e,
 					type: "text",
 					autocomplete: "off",
 					placeholder: "SPUD-XXXXXX-XXXXXX"
 				}, null, 512), [[$, h.value]])])]),
 				J("div", { class: z(["tlink-connection", { connected: w.value }]) }, [n[35] ||= J("span", { class: "tlink-node-dot" }, null, -1), J("div", null, [J("strong", null, B(w.value ? `Connected to ${C.value.hub_name || "Spud Hub"}` : "Not connected to a Spud Hub"), 1), J("small", null, B(w.value ? `${C.value.hub_url || _.hub_url} · paired ${ce(C.value.connected_at)}` : "Connecting changes this Tater to Spudlet mode and saves its private token."), 1)])], 2),
-				J("div", kG, [J("button", {
+				J("div", EG, [J("button", {
 					class: "tv-button primary",
 					type: "button",
 					disabled: u.value,
 					onClick: ie
-				}, B(u.value ? "Connecting…" : "Connect to Spud Hub"), 9, AG), w.value ? (K(), q("button", {
+				}, B(u.value ? "Connecting…" : "Connect to Spud Hub"), 9, DG), w.value ? (K(), q("button", {
 					key: 0,
 					class: "tv-button danger",
 					type: "button",
 					disabled: l.value,
 					onClick: ae
-				}, " Disconnect ", 8, jG)) : Z("", !0)])
-			]), J("section", MG, [J("header", NG, [n[38] ||= J("div", null, [
+				}, " Disconnect ", 8, OG)) : Z("", !0)])
+			]), J("section", kG, [J("header", AG, [n[38] ||= J("div", null, [
 				J("span", { class: "tv-eyebrow" }, "Model routing"),
 				J("h2", null, "Choose what runs on the Hub"),
 				J("p", null, " Wake word detection stays on this device. Other model work can run here or on the paired Hub. ")
-			], -1), J("label", PG, [U(J("input", {
+			], -1), J("label", jG, [U(J("input", {
 				"onUpdate:modelValue": n[11] ||= (e) => _.model_routing_enabled = e,
 				class: "tv-checkbox",
 				type: "checkbox",
 				onChange: j
-			}, null, 544), [[ms, _.model_routing_enabled]]), n[37] ||= J("span", null, [J("strong", null, "Use Hub for all models"), J("small", null, "Recommended on low-power installs")], -1)])]), J("div", FG, [(K(), q(G, null, W(a, (e) => J("label", {
+			}, null, 544), [[ms, _.model_routing_enabled]]), n[37] ||= J("span", null, [J("strong", null, "Use Hub for all models"), J("small", null, "Recommended on low-power installs")], -1)])]), J("div", MG, [(K(), q(G, null, W(a, (e) => J("label", {
 				key: e.id,
 				class: z(["tlink-route", { hub: k(e.id) }])
-			}, [J("span", null, [J("strong", null, B(e.label), 1), J("small", null, B(e.note), 1)]), J("span", null, [e.id === "llm" ? (K(), q("em", IG, "Spud Hub")) : U((K(), q("select", {
+			}, [J("span", null, [J("strong", null, B(e.label), 1), J("small", null, B(e.note), 1)]), J("span", null, [e.id === "llm" ? (K(), q("em", NG, "Spud Hub")) : U((K(), q("select", {
 				key: 1,
 				"onUpdate:modelValue": (t) => _.routes[e.id] = t,
 				disabled: _.model_routing_enabled,
@@ -23770,9 +23731,9 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 				J("option", { value: "auto" }, "Auto", -1),
 				J("option", { value: "hub" }, "Spud Hub", -1),
 				J("option", { value: "local" }, "This Tater", -1)
-			]], 40, LG)), [[_s, _.routes[e.id]]]), J("small", null, B(k(e.id) ? "Loaded on Spud Hub" : "Runs on this Tater"), 1)])], 2)), 64))])])], 64)) : (K(), q(G, { key: 3 }, [J("div", RG, [J("section", zG, [
+			]], 40, PG)), [[_s, _.routes[e.id]]]), J("small", null, B(k(e.id) ? "Loaded on Spud Hub" : "Runs on this Tater"), 1)])], 2)), 64))])])], 64)) : (K(), q(G, { key: 3 }, [J("div", FG, [J("section", IG, [
 				n[44] ||= J("header", null, [J("span", { class: "tv-eyebrow" }, "Role"), J("h2", null, "How this Tater uses Spud Link")], -1),
-				J("div", BG, [J("label", null, [n[41] ||= X("Spud Link mode", -1), U(J("select", {
+				J("div", LG, [J("label", null, [n[41] ||= X("Spud Link mode", -1), U(J("select", {
 					"onUpdate:modelValue": n[12] ||= (e) => _.mode = e,
 					onChange: j
 				}, [...n[40] ||= [
@@ -23788,51 +23749,51 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 					}, null, 544), [[$, _.node_name]]),
 					n[43] ||= J("small", null, "Shown to linked devices and the upstream Hub.", -1)
 				])]),
-				J("div", VG, [J("strong", null, B(E.value), 1), J("span", null, B(D.value), 1)])
-			]), J("section", HG, [n[52] ||= J("header", null, [J("span", { class: "tv-eyebrow" }, "Pairing & privacy"), J("h2", null, "Connection policy")], -1), J("div", UG, [
-				J("label", WG, [U(J("input", {
+				J("div", RG, [J("strong", null, B(E.value), 1), J("span", null, B(D.value), 1)])
+			]), J("section", zG, [n[52] ||= J("header", null, [J("span", { class: "tv-eyebrow" }, "Pairing & privacy"), J("h2", null, "Connection policy")], -1), J("div", BG, [
+				J("label", VG, [U(J("input", {
 					"onUpdate:modelValue": n[14] ||= (e) => _.pairing_enabled = e,
 					class: "tv-checkbox",
 					type: "checkbox",
 					onChange: j
 				}, null, 544), [[ms, _.pairing_enabled]]), n[45] ||= J("span", null, [J("strong", null, "Allow new pairing invites"), J("small", null, "Pair buttons enable this automatically.")], -1)]),
-				J("label", GG, [U(J("input", {
+				J("label", HG, [U(J("input", {
 					"onUpdate:modelValue": n[15] ||= (e) => _.allow_spudlets = e,
 					class: "tv-checkbox",
 					type: "checkbox",
 					onChange: j
 				}, null, 544), [[ms, _.allow_spudlets]]), n[46] ||= J("span", null, [J("strong", null, "Allow Spudlets"), J("small", null, "Full Tater clients may connect.")], -1)]),
-				J("label", KG, [U(J("input", {
+				J("label", UG, [U(J("input", {
 					"onUpdate:modelValue": n[16] ||= (e) => _.allow_tater_open_webui = e,
 					class: "tv-checkbox",
 					type: "checkbox",
 					onChange: j
 				}, null, 544), [[ms, _.allow_tater_open_webui]]), n[47] ||= J("span", null, [J("strong", null, "Allow Tater Open WebUI"), J("small", null, "The paired coding workspace may use chat, Hydra, STT, and TTS.")], -1)]),
-				J("label", qG, [U(J("input", {
+				J("label", WG, [U(J("input", {
 					"onUpdate:modelValue": n[17] ||= (e) => _.allow_little_spuds = e,
 					class: "tv-checkbox",
 					type: "checkbox",
 					onChange: j
 				}, null, 544), [[ms, _.allow_little_spuds]]), n[48] ||= J("span", null, [J("strong", null, "Allow Little Spuds"), J("small", null, "Lightweight companions may connect.")], -1)]),
-				J("label", JG, [U(J("input", {
+				J("label", GG, [U(J("input", {
 					"onUpdate:modelValue": n[18] ||= (e) => _.little_spud_tools_enabled = e,
 					class: "tv-checkbox",
 					type: "checkbox",
 					onChange: j
 				}, null, 544), [[ms, _.little_spud_tools_enabled]]), n[49] ||= J("span", null, [J("strong", null, "Little Spud tool use"), J("small", null, "Allow paired companions to use Hydra tools.")], -1)]),
-				J("label", YG, [U(J("input", {
+				J("label", KG, [U(J("input", {
 					"onUpdate:modelValue": n[19] ||= (e) => _.telemetry_enabled = e,
 					class: "tv-checkbox",
 					type: "checkbox",
 					onChange: j
 				}, null, 544), [[ms, _.telemetry_enabled]]), n[50] ||= J("span", null, [J("strong", null, "Telemetry"), J("small", null, "Keep linked-device health and activity metadata.")], -1)]),
-				J("label", XG, [U(J("input", {
+				J("label", qG, [U(J("input", {
 					"onUpdate:modelValue": n[20] ||= (e) => _.request_previews_enabled = e,
 					class: "tv-checkbox",
 					type: "checkbox",
 					onChange: j
 				}, null, 544), [[ms, _.request_previews_enabled]]), n[51] ||= J("span", null, [J("strong", null, "Request previews"), J("small", null, "Off by default so activity remains metadata-first.")], -1)])
-			])])]), J("details", ZG, [n[56] ||= J("summary", null, "Technical endpoints", -1), J("div", null, [
+			])])]), J("details", JG, [n[56] ||= J("summary", null, "Technical endpoints", -1), J("div", null, [
 				n[53] ||= J("span", null, "LLM route", -1),
 				J("code", null, B(e.llmApiUrl), 1),
 				n[54] ||= J("span", null, "Model gateway", -1),
@@ -23840,47 +23801,47 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 				n[55] ||= J("span", null, "Pair", -1),
 				J("code", null, B(e.pairApiUrl), 1)
 			])])], 64)),
-			c.value === "pair" ? Z("", !0) : (K(), q("footer", QG, [J("div", null, [J("strong", null, B(f.value ? "Unsaved Spud Link changes" : "Spud Link is synchronized"), 1), n[57] ||= J("span", null, "Live connection status continues to refresh while this tab is open.", -1)]), J("button", {
+			c.value === "pair" ? Z("", !0) : (K(), q("footer", YG, [J("div", null, [J("strong", null, B(f.value ? "Unsaved Spud Link changes" : "Spud Link is synchronized"), 1), n[57] ||= J("span", null, "Live connection status continues to refresh while this tab is open.", -1)]), J("button", {
 				class: "tv-button primary",
 				type: "button",
 				disabled: l.value || !f.value,
 				onClick: F
-			}, B(l.value ? "Saving…" : "Save Spud Link settings"), 9, $G)])),
+			}, B(l.value ? "Saving…" : "Save Spud Link settings"), 9, XG)])),
 			Y(_f, {
 				open: v.open,
 				"backdrop-class": "tlink-modal-backdrop",
 				role: "presentation",
 				onClose: ee
 			}, {
-				default: En(() => [J("section", eK, [J("header", null, [J("div", null, [n[58] ||= J("span", { class: "tv-eyebrow" }, "Spud Link", -1), J("h2", tK, B(v.role === "spudlet" ? "Link a Spudlet" : v.role === "tater_open_webui" ? "Link Tater Open WebUI" : "Pair a Little Spud"), 1)]), J("button", {
+				default: En(() => [J("section", ZG, [J("header", null, [J("div", null, [n[58] ||= J("span", { class: "tv-eyebrow" }, "Spud Link", -1), J("h2", QG, B(v.role === "spudlet" ? "Link a Spudlet" : v.role === "tater_open_webui" ? "Link Tater Open WebUI" : "Pair a Little Spud"), 1)]), J("button", {
 					class: "tv-button",
 					type: "button",
 					onClick: ee
-				}, " Close ")]), v.phase === "loading" ? (K(), q("div", nK, [
+				}, " Close ")]), v.phase === "loading" ? (K(), q("div", $G, [
 					n[59] ||= J("span", { class: "tlink-loader" }, null, -1),
 					n[60] ||= J("strong", null, "Creating a secure invitation…", -1),
 					J("small", null, B(v.message), 1)
-				])) : v.phase === "success" ? (K(), q("div", rK, [
+				])) : v.phase === "success" ? (K(), q("div", eK, [
 					n[61] ||= J("span", { class: "tlink-check" }, "✓", -1),
 					n[62] ||= J("strong", null, "Connected!", -1),
 					J("small", null, B(v.message), 1)
-				])) : v.phase === "error" ? (K(), q("div", iK, [
+				])) : v.phase === "error" ? (K(), q("div", tK, [
 					n[63] ||= J("span", { class: "tlink-check" }, "!", -1),
 					n[64] ||= J("strong", null, "Pairing failed", -1),
 					J("small", null, B(v.message), 1)
-				])) : (K(), q("div", aK, [
+				])) : (K(), q("div", nK, [
 					v.role === "little_spud" ? (K(), q("img", {
 						key: 0,
 						class: "tlink-qr",
 						src: v.qr,
 						alt: "Little Spud pairing QR code"
-					}, null, 8, oK)) : (K(), q("div", sK, [J("code", null, B(v.code), 1), J("button", {
+					}, null, 8, rK)) : (K(), q("div", iK, [J("code", null, B(v.code), 1), J("button", {
 						class: "tv-button",
 						type: "button",
 						onClick: re
 					}, " Copy ")])),
 					J("strong", null, B(v.message), 1),
-					J("small", null, [n[65] ||= X("Waiting for connection", -1), v.expiresAt ? (K(), q("span", cK, " · expires " + B((/* @__PURE__ */ new Date(v.expiresAt * 1e3)).toLocaleTimeString([], {
+					J("small", null, [n[65] ||= X("Waiting for connection", -1), v.expiresAt ? (K(), q("span", aK, " · expires " + B((/* @__PURE__ */ new Date(v.expiresAt * 1e3)).toLocaleTimeString([], {
 						hour: "numeric",
 						minute: "2-digit"
 					})), 1)) : Z("", !0)])
@@ -23889,15 +23850,15 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 			}, 8, ["open"])
 		]));
 	}
-}), uK = { class: "system-task-process" }, dK = { key: 0 }, fK = { class: "system-task-cell" }, pK = { class: "system-task-cell" }, mK = { class: "system-task-cell" }, hK = {
+}), sK = { class: "system-task-process" }, cK = { key: 0 }, lK = { class: "system-task-cell" }, uK = { class: "system-task-cell" }, dK = { class: "system-task-cell" }, fK = {
 	key: 0,
 	class: "system-task-error"
-}, gK = { class: "system-task-command" }, _K = ["disabled"], vK = {
+}, pK = { class: "system-task-command" }, mK = ["disabled"], hK = {
 	key: 1,
 	class: "tv-button",
 	type: "button",
 	disabled: ""
-}, yK = /* @__PURE__ */ fr({
+}, gK = /* @__PURE__ */ fr({
 	__name: "SystemTaskCard",
 	props: {
 		task: {},
@@ -23958,51 +23919,51 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 			return t ? t < 60 ? `Every ${Math.round(t)}s` : t < 3600 ? `Every ${Math.round(t / 60)}m` : t < 86400 ? `Every ${Math.round(t / 3600)}h` : `Every ${Math.round(t / 86400)}d` : "Off";
 		}
 		return (t, n) => (K(), q("article", { class: z(["system-task-card", `tone-${g.value}`]) }, [
-			J("div", uK, [
+			J("div", sK, [
 				J("div", null, [n[1] ||= J("i", { class: "system-task-process-dot" }, null, -1), J("h3", null, B(o.value), 1)]),
-				s.value ? (K(), q("p", dK, B(s.value), 1)) : Z("", !0),
+				s.value ? (K(), q("p", cK, B(s.value), 1)) : Z("", !0),
 				J("small", null, B(Number(e.task.run_count || 0) ? `${Number(e.task.run_count)} completed run${Number(e.task.run_count) === 1 ? "" : "s"}` : "Waiting for its first run"), 1)
 			]),
-			J("div", fK, [n[2] ||= J("span", null, "Schedule", -1), J("strong", null, B(m.value), 1)]),
-			J("div", pK, [
+			J("div", lK, [n[2] ||= J("span", null, "Schedule", -1), J("strong", null, B(m.value), 1)]),
+			J("div", uK, [
 				n[3] ||= J("span", null, "Last activity", -1),
 				J("strong", null, B(y(e.task.finished_at)), 1),
 				J("small", null, B(_.value === "—" ? "No duration yet" : _.value), 1)
 			]),
-			J("div", mK, [J("span", null, B(e.task.next_run_label ? "Trigger" : "Next / trigger"), 1), J("strong", null, B(v.value), 1)]),
-			e.task.last_error ? (K(), q("div", hK, B(e.task.last_error), 1)) : Z("", !0),
-			J("div", gK, [J("span", { class: z(["system-task-status", `tone-${g.value}`]) }, [n[4] ||= J("i", null, null, -1), X(B(h.value), 1)], 2), d.value ? (K(), q("button", {
+			J("div", dK, [J("span", null, B(e.task.next_run_label ? "Trigger" : "Next / trigger"), 1), J("strong", null, B(v.value), 1)]),
+			e.task.last_error ? (K(), q("div", fK, B(e.task.last_error), 1)) : Z("", !0),
+			J("div", pK, [J("span", { class: z(["system-task-status", `tone-${g.value}`]) }, [n[4] ||= J("i", null, null, -1), X(B(h.value), 1)], 2), d.value ? (K(), q("button", {
 				key: 0,
 				class: "tv-button",
 				type: "button",
 				disabled: p.value,
 				onClick: n[0] ||= (t) => r("run", a.value, e.coreKey)
-			}, B(e.busy ? "Starting…" : l.value ? "Running…" : "Run now"), 9, _K)) : (K(), q("button", vK, "Automatic"))])
+			}, B(e.busy ? "Starting…" : l.value ? "Running…" : "Run now"), 9, mK)) : (K(), q("button", hK, "Automatic"))])
 		], 2));
 	}
-}), bK = { class: "tset-resource tsystem-tasks" }, xK = {
+}), _K = { class: "tset-resource tsystem-tasks" }, vK = {
 	key: 0,
 	class: "tv-notice error",
 	"aria-live": "polite"
-}, SK = { class: "tv-panel tset-form-card" }, CK = { class: "tsystem-head" }, wK = { class: "tsystem-live-state" }, TK = { class: "system-task-health" }, EK = { key: 0 }, DK = { class: "system-task-summary" }, OK = {
+}, yK = { class: "tv-panel tset-form-card" }, bK = { class: "tsystem-head" }, xK = { class: "tsystem-live-state" }, SK = { class: "system-task-health" }, CK = { key: 0 }, wK = { class: "system-task-summary" }, TK = {
 	key: 1,
 	class: "system-task-sections"
-}, kK = { class: "system-task-section" }, AK = { class: "system-task-section-head" }, jK = {
+}, EK = { class: "system-task-section" }, DK = { class: "system-task-section-head" }, OK = {
 	key: 0,
 	class: "system-task-grid"
-}, MK = {
+}, kK = {
 	key: 1,
 	class: "tv-empty"
-}, NK = { class: "system-task-section" }, PK = { class: "system-task-section-head" }, FK = { class: "system-task-core-groups" }, IK = { class: "system-task-group-head" }, LK = {
+}, AK = { class: "system-task-section" }, jK = { class: "system-task-section-head" }, MK = { class: "system-task-core-groups" }, NK = { class: "system-task-group-head" }, PK = {
 	key: 0,
 	class: "system-task-grid"
-}, RK = {
+}, FK = {
 	key: 1,
 	class: "tv-empty"
-}, zK = {
+}, IK = {
 	key: 0,
 	class: "tv-empty"
-}, BK = /* @__PURE__ */ fr({
+}, LK = /* @__PURE__ */ fr({
 	__name: "SystemTasksSettings",
 	props: {
 		endpoint: {},
@@ -24085,9 +24046,9 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 			u = !0, await F(), P(2e3);
 		}), Fr(() => {
 			u = !1, N();
-		}), (e, t) => (K(), q("section", bK, [
-			s.value ? (K(), q("div", xK, B(s.value), 1)) : Z("", !0),
-			J("section", SK, [J("header", CK, [t[1] ||= J("div", null, [
+		}), (e, t) => (K(), q("section", _K, [
+			s.value ? (K(), q("div", vK, B(s.value), 1)) : Z("", !0),
+			J("section", yK, [J("header", bK, [t[1] ||= J("div", null, [
 				J("span", { class: "tv-eyebrow" }, "Background work"),
 				J("h2", null, "System tasks"),
 				J("p", null, "Live status for snapshots, maintenance jobs, and tasks provided by installed Cores.")
@@ -24095,23 +24056,23 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 				class: z(["tsystem-live", { issue: !!s.value }]),
 				role: "status",
 				"aria-live": "polite"
-			}, [J("span", wK, [t[0] ||= J("i", null, null, -1), X(B(D.value), 1)]), J("small", null, B(o.value ? `Updated ${O.value}` : "Loading process status…"), 1)], 2)]), J("div", {
+			}, [J("span", xK, [t[0] ||= J("i", null, null, -1), X(B(D.value), 1)]), J("small", null, B(o.value ? `Updated ${O.value}` : "Loading process status…"), 1)], 2)]), J("div", {
 				class: z(["system-task-overview", `tone-${T.value}`]),
 				"aria-live": "polite"
-			}, [J("div", TK, [J("div", {
+			}, [J("div", SK, [J("div", {
 				class: "system-task-health-ring",
 				style: ne(w.value)
 			}, [J("span", null, B(C.value) + "%", 1), t[2] ||= J("small", null, "healthy", -1)], 4), J("div", null, [
 				t[3] ||= J("span", null, "Overall process health", -1),
 				J("strong", null, B(E.value), 1),
-				J("small", null, [X(B(f.value.length) + " Tater · " + B(h.value.length) + " Core", 1), b.value ? (K(), q("span", EK, " · " + B(b.value) + " disabled", 1)) : Z("", !0)])
-			])]), J("div", DK, [
+				J("small", null, [X(B(f.value.length) + " Tater · " + B(h.value.length) + " Core", 1), b.value ? (K(), q("span", CK, " · " + B(b.value) + " disabled", 1)) : Z("", !0)])
+			])]), J("div", wK, [
 				J("div", null, [t[4] ||= J("span", null, "Processes", -1), J("strong", null, B(_.value), 1)]),
 				J("div", null, [t[5] ||= J("span", null, "Running", -1), J("strong", null, B(v.value), 1)]),
 				J("div", null, [t[6] ||= J("span", null, "Ready", -1), J("strong", null, B(x.value), 1)]),
 				J("div", { class: z({ alert: y.value }) }, [t[7] ||= J("span", null, "Issues", -1), J("strong", null, B(y.value), 1)], 2)
 			])], 2)]),
-			o.value ? (K(), q("div", OK, [J("section", kK, [J("header", AK, [t[8] ||= J("div", null, [J("span", null, "Tater"), J("h2", null, "Scheduled tasks")], -1), J("strong", null, B(f.value.length) + " process" + B(f.value.length === 1 ? "" : "es"), 1)]), f.value.length ? (K(), q("div", jK, [t[9] ||= J("div", {
+			o.value ? (K(), q("div", TK, [J("section", EK, [J("header", DK, [t[8] ||= J("div", null, [J("span", null, "Tater"), J("h2", null, "Scheduled tasks")], -1), J("strong", null, B(f.value.length) + " process" + B(f.value.length === 1 ? "" : "es"), 1)]), f.value.length ? (K(), q("div", OK, [t[9] ||= J("div", {
 				class: "system-task-list-head",
 				"aria-hidden": "true"
 			}, [
@@ -24120,16 +24081,16 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 				J("span", null, "Last activity"),
 				J("span", null, "Next / trigger"),
 				J("span", null, "Status")
-			], -1), (K(!0), q(G, null, W(f.value, (e) => (K(), va(yK, {
+			], -1), (K(!0), q(G, null, W(f.value, (e) => (K(), va(gK, {
 				key: e.id,
 				task: e,
 				busy: j(e.id),
 				onRun: I
-			}, null, 8, ["task", "busy"]))), 128))])) : (K(), q("p", MK, "No Tater system tasks are registered."))]), J("section", NK, [J("header", PK, [t[10] ||= J("div", null, [J("span", null, "Installed Cores"), J("h2", null, "Core tasks")], -1), J("strong", null, B(h.value.length) + " process" + B(h.value.length === 1 ? "" : "es"), 1)]), J("div", FK, [
+			}, null, 8, ["task", "busy"]))), 128))])) : (K(), q("p", kK, "No Tater system tasks are registered."))]), J("section", AK, [J("header", jK, [t[10] ||= J("div", null, [J("span", null, "Installed Cores"), J("h2", null, "Core tasks")], -1), J("strong", null, B(h.value.length) + " process" + B(h.value.length === 1 ? "" : "es"), 1)]), J("div", MK, [
 				(K(!0), q(G, null, W(p.value, (e) => (K(), q("section", {
 					key: e.core_key,
 					class: "system-task-core-group"
-				}, [J("header", IK, [J("div", null, [t[11] ||= J("span", null, "Core tasks", -1), J("h3", null, B(e.label || e.core_key || "Core"), 1)]), J("span", { class: z(["system-task-core-state", e.running ? "running" : "stopped"]) }, [t[12] ||= J("i", null, null, -1), X(B(e.running ? "Core running" : "Core stopped"), 1)], 2)]), Array.isArray(e.tasks) && e.tasks.length ? (K(), q("div", LK, [t[13] ||= J("div", {
+				}, [J("header", NK, [J("div", null, [t[11] ||= J("span", null, "Core tasks", -1), J("h3", null, B(e.label || e.core_key || "Core"), 1)]), J("span", { class: z(["system-task-core-state", e.running ? "running" : "stopped"]) }, [t[12] ||= J("i", null, null, -1), X(B(e.running ? "Core running" : "Core stopped"), 1)], 2)]), Array.isArray(e.tasks) && e.tasks.length ? (K(), q("div", PK, [t[13] ||= J("div", {
 					class: "system-task-list-head",
 					"aria-hidden": "true"
 				}, [
@@ -24138,7 +24099,7 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 					J("span", null, "Last activity"),
 					J("span", null, "Next / trigger"),
 					J("span", null, "Status")
-				], -1), (K(!0), q(G, null, W(e.tasks, (t) => (K(), va(yK, {
+				], -1), (K(!0), q(G, null, W(e.tasks, (t) => (K(), va(gK, {
 					key: t.id,
 					task: t,
 					"core-key": String(e.core_key || ""),
@@ -24148,8 +24109,8 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 					"task",
 					"core-key",
 					"busy"
-				]))), 128))])) : (K(), q("p", RK, "This Core does not expose background tasks."))]))), 128)),
-				p.value.length ? Z("", !0) : (K(), q("p", zK, "No installed Cores expose background tasks yet.")),
+				]))), 128))])) : (K(), q("p", FK, "This Core does not expose background tasks."))]))), 128)),
+				p.value.length ? Z("", !0) : (K(), q("p", IK, "No installed Cores expose background tasks yet.")),
 				(K(!0), q(G, null, W(m.value, (e) => (K(), q("div", {
 					key: `${e.core_key}-${e.error}`,
 					class: "tv-notice error"
@@ -24160,11 +24121,11 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 });
 //#endregion
 //#region src/settings/components/voice/runtime.ts
-function VK(e, t) {
+function RK(e, t) {
 	let n = e.ui && typeof e.ui == "object" ? e.ui : {}, r = Array.isArray(n.item_forms) ? n.item_forms : [];
 	return t ? r.filter((e) => String(e.group || "") === t) : r;
 }
-function HK(e = []) {
+function zK(e = []) {
 	let t = {};
 	return e.forEach((e) => {
 		let n = String(e.key || e.id || "").trim(), r = String(e.type || "").trim().toLowerCase();
@@ -24176,27 +24137,27 @@ function HK(e = []) {
 		].includes(r) || (t[n] = e.value ?? e.default ?? (String(e.type || "") !== "checkbox" && ""));
 	}), t;
 }
-function UK(e = []) {
+function BK(e = []) {
 	let t = {};
-	return e.forEach((e) => Object.assign(t, HK(Array.isArray(e.fields) ? e.fields : []))), t;
+	return e.forEach((e) => Object.assign(t, zK(Array.isArray(e.fields) ? e.fields : []))), t;
 }
-function WK(e) {
+function VK(e) {
 	return e && Array.isArray(e.sections) ? e.sections : [];
 }
-async function GK(e, t, n = {}) {
+async function HK(e, t, n = {}) {
 	return Ls(e, {
 		action: t,
 		payload: n
 	});
 }
-function KK(e) {
+function UK(e) {
 	if (e && typeof e == "object") {
 		let t = e;
 		return String(t.value ?? t.id ?? t.key ?? "");
 	}
 	return String(e ?? "");
 }
-function qK(e) {
+function WK(e) {
 	if (e && typeof e == "object") {
 		let t = e;
 		return String(t.label ?? t.name ?? t.value ?? t.id ?? "");
@@ -24205,51 +24166,51 @@ function qK(e) {
 }
 //#endregion
 //#region src/settings/components/voice/VoiceFirmware.vue?vue&type=script&setup=true&lang.ts
-var JK = { class: "tm-stack tvoice-firmware" }, YK = {
+var GK = { class: "tm-stack tvoice-firmware" }, KK = {
 	key: 0,
 	class: "tv-notice error"
-}, XK = { class: "tm-form-card tvoice-firmware-overview" }, ZK = { class: "tvoice-firmware-summary" }, QK = {
+}, qK = { class: "tm-form-card tvoice-firmware-overview" }, JK = { class: "tvoice-firmware-summary" }, YK = {
 	key: 0,
 	class: "tvoice-updates"
-}, $K = ["disabled"], eq = { class: "tvoice-update-list" }, tq = ["disabled", "onClick"], nq = {
+}, XK = ["disabled"], ZK = { class: "tvoice-update-list" }, QK = ["disabled", "onClick"], $K = {
 	key: 1,
 	class: "tm-status-card live"
-}, rq = { class: "tm-inline-actions tvoice-firmware-primary-actions" }, iq = ["disabled"], aq = ["disabled"], oq = { class: "tvoice-progress-icon" }, sq = {
+}, eq = { class: "tm-inline-actions tvoice-firmware-primary-actions" }, tq = ["disabled"], nq = ["disabled"], rq = { class: "tvoice-progress-icon" }, iq = {
 	class: "tv-modal tvoice-flasher-modal",
 	role: "dialog",
 	"aria-modal": "true",
 	"aria-labelledby": "tvoice-flasher-title"
-}, cq = {
+}, aq = {
 	class: "tvoice-flash-methods",
 	role: "tablist",
 	"aria-label": "Firmware install method"
-}, lq = { class: "tvoice-flash-step" }, uq = { class: "tvoice-target-picker" }, dq = ["onClick"], fq = ["src", "alt"], pq = {
+}, oq = { class: "tvoice-flash-step" }, sq = { class: "tvoice-target-picker" }, cq = ["onClick"], lq = ["src", "alt"], uq = {
 	key: 0,
 	class: "tv-notice"
-}, mq = {
+}, dq = {
 	key: 0,
 	class: "tvoice-flash-step"
-}, hq = { class: "tvoice-image-picker" }, gq = {
+}, fq = { class: "tvoice-image-picker" }, pq = {
 	key: 1,
 	class: "tvoice-flash-step"
-}, _q = { class: "tm-field" }, vq = ["value"], yq = {
+}, mq = { class: "tm-field" }, hq = ["value"], gq = {
 	key: 2,
 	class: "tvoice-firmware-target"
-}, bq = ["src", "alt"], xq = { class: "tm-detail-list" }, Sq = {
+}, _q = ["src", "alt"], vq = { class: "tm-detail-list" }, yq = {
 	key: 3,
 	class: "tm-status-card"
-}, Cq = {
+}, bq = {
 	key: 4,
 	class: "tm-status-card live"
-}, wq = ["href"], Tq = { class: "tvoice-flasher-footer" }, Eq = ["disabled"], Dq = ["disabled"], Oq = ["disabled"], kq = ["disabled"], Aq = ["disabled"], jq = {
+}, xq = ["href"], Sq = { class: "tvoice-flasher-footer" }, Cq = ["disabled"], wq = ["disabled"], Tq = ["disabled"], Eq = ["disabled"], Dq = ["disabled"], Oq = {
 	class: "tv-modal tvoice-progress-modal",
 	role: "dialog",
 	"aria-modal": "true",
 	"aria-labelledby": "tvoice-progress-title"
-}, Mq = { class: "tv-eyebrow" }, Nq = { id: "tvoice-progress-title" }, Pq = ["value"], Fq = {
+}, kq = { class: "tv-eyebrow" }, Aq = { id: "tvoice-progress-title" }, jq = ["value"], Mq = {
 	key: 0,
 	class: "tvoice-update-queue"
-}, Iq = { class: "tvoice-firmware-session" }, Lq = ["disabled"], Rq = /* @__PURE__ */ fr({
+}, Nq = { class: "tvoice-firmware-session" }, Pq = ["disabled"], Fq = /* @__PURE__ */ fr({
 	__name: "VoiceFirmware",
 	props: {
 		payload: {},
@@ -24258,7 +24219,7 @@ var JK = { class: "tm-stack tvoice-firmware" }, YK = {
 	emits: ["refresh", "notify"],
 	setup(e, { emit: t }) {
 		let n = e, r = t, i = /* @__PURE__ */ H("ota"), a = /* @__PURE__ */ H(""), o = /* @__PURE__ */ H(""), s = /* @__PURE__ */ H("factory"), c = /* @__PURE__ */ H([]), l = /* @__PURE__ */ H(""), u = /* @__PURE__ */ H(""), d = /* @__PURE__ */ H(""), f = /* @__PURE__ */ H(null), p = /* @__PURE__ */ H([]), m = /* @__PURE__ */ H(null), h = /* @__PURE__ */ H(0), g = /* @__PURE__ */ H(!1), _ = /* @__PURE__ */ H(!1), v = /* @__PURE__ */ H("Firmware update"), y = /* @__PURE__ */ H(""), b = /* @__PURE__ */ H([]), x = /* @__PURE__ */ H(-1), S = /* @__PURE__ */ H(!1), C = null, w = Q(() => n.payload.firmware && typeof n.payload.firmware == "object" ? n.payload.firmware : {}), T = Q(() => Array.isArray(w.value.templates) ? w.value.templates : []), E = Q(() => Array.isArray(w.value.devices) ? w.value.devices : []), D = Q(() => E.value.filter((e) => !!e.connected && String(e.value || "") !== "__usb_recovery__")), O = Q(() => Array.isArray(w.value.firmware_updates) ? w.value.firmware_updates : []), k = Q(() => Array.isArray(w.value.firmware_flash_targets) ? w.value.firmware_flash_targets : []), A = Q(() => Array.isArray(w.value.warnings) ? w.value.warnings.map(String) : []), j = Q(() => w.value.prebuilt_firmware && typeof w.value.prebuilt_firmware == "object" ? w.value.prebuilt_firmware : {}), M = Q(() => w.value.variants && typeof w.value.variants == "object" ? w.value.variants : {}), N = Q(() => T.value.filter((e) => {
-			let t = M.value[KK(e)];
+			let t = M.value[UK(e)];
 			return !!(t && typeof t == "object" && t.__usb_recovery__);
 		})), P = Q(() => i.value === "ota" ? D.value : N.value), F = Q(() => {
 			let e = a.value, t = i.value === "ota" ? o.value : "__usb_recovery__", n = M.value[e];
@@ -24292,7 +24253,7 @@ var JK = { class: "tm-stack tvoice-firmware" }, YK = {
 				let e = D.value.map((e) => String(e.value || ""));
 				e.includes(o.value) || (o.value = String(w.value.active_selector || e[0] || "")), a.value = he(o.value) || String(w.value.active_template_key || "");
 			} else {
-				let e = N.value.map(KK);
+				let e = N.value.map(UK);
 				e.includes(a.value) || (a.value = String(w.value.active_template_key || e[0] || "")), o.value = "__usb_recovery__";
 			}
 		}
@@ -24303,8 +24264,8 @@ var JK = { class: "tm-stack tvoice-firmware" }, YK = {
 			i.value === "ota" ? (o.value = e, a.value = he(e)) : a.value = e, m.value = null, c.value = [], l.value = "", i.value === "local_usb" && Fe(!1);
 		}
 		function ye(e, t = "") {
-			let n = E.value.find((t) => String(t.value || t.selector || "") === e), r = T.value.find((e) => KK(e) === t);
-			return qK(n || r || { label: e || t || "Satellite" });
+			let n = E.value.find((t) => String(t.value || t.selector || "") === e), r = T.value.find((e) => UK(e) === t);
+			return WK(n || r || { label: e || t || "Satellite" });
 		}
 		function be() {
 			ge(), g.value = !0, i.value === "local_usb" && Fe(!1);
@@ -24316,7 +24277,7 @@ var JK = { class: "tm-stack tvoice-firmware" }, YK = {
 			_.value = !0;
 		}
 		async function Ce(e, t = {}) {
-			return GK(n.actionEndpoint, e, t);
+			return HK(n.actionEndpoint, e, t);
 		}
 		function we(e = o.value, t = a.value) {
 			return {
@@ -24486,7 +24447,7 @@ var JK = { class: "tm-stack tvoice-firmware" }, YK = {
 		async function Fe(e = !0) {
 			if (!(!a.value || ne.value === "amlogic_usb_burn")) try {
 				let t = await Ce("voice_firmware_esp_usb_ports", we("__usb_recovery__", a.value));
-				c.value = Array.isArray(t.ports) ? t.ports : [], c.value.some((e) => KK(e) === l.value) || (l.value = KK(c.value[0] || "")), e && r("notify", String(t.message || `Found ${c.value.length} serial port(s).`), t.available === !1 ? "error" : "success");
+				c.value = Array.isArray(t.ports) ? t.ports : [], c.value.some((e) => UK(e) === l.value) || (l.value = UK(c.value[0] || "")), e && r("notify", String(t.message || `Found ${c.value.length} serial port(s).`), t.available === !1 ? "error" : "success");
 			} catch (e) {
 				d.value = e instanceof Error ? e.message : "USB ports could not be loaded.";
 			}
@@ -24508,7 +24469,7 @@ var JK = { class: "tm-stack tvoice-firmware" }, YK = {
 		async function Le() {
 			if (!l.value) try {
 				let e = await Ce("voice_firmware_local_usb_log_ports", { template_key: a.value });
-				c.value = Array.isArray(e.ports) ? e.ports : [], l.value = KK(c.value[0] || "");
+				c.value = Array.isArray(e.ports) ? e.ports : [], l.value = UK(c.value[0] || "");
 			} catch (e) {
 				d.value = e instanceof Error ? e.message : "USB log ports could not be loaded.";
 				return;
@@ -24560,29 +24521,29 @@ var JK = { class: "tm-stack tvoice-firmware" }, YK = {
 		}, {
 			deep: !0,
 			immediate: !0
-		}), Fr(V), (e, t) => (K(), q("section", JK, [
-			d.value ? (K(), q("div", YK, B(d.value), 1)) : Z("", !0),
+		}), Fr(V), (e, t) => (K(), q("section", GK, [
+			d.value ? (K(), q("div", KK, B(d.value), 1)) : Z("", !0),
 			(K(!0), q(G, null, W(A.value, (e) => (K(), q("div", {
 				key: e,
 				class: "tv-notice warning"
 			}, B(e), 1))), 128)),
-			J("article", XK, [
+			J("article", qK, [
 				J("header", null, [J("div", null, [
 					t[12] ||= J("span", { class: "tv-eyebrow" }, "Official Tater firmware", -1),
 					J("h3", null, B(j.value.available ? j.value.version || "Latest release ready" : "Firmware manifest unavailable"), 1),
 					t[13] ||= J("p", null, "Tater matches each connected satellite to its verified firmware family and installs updates one device at a time.", -1)
 				]), J("span", { class: z(["tv-live-pill", { warning: !j.value.available }]) }, [t[14] ||= J("i", null, null, -1), X(B(j.value.available ? `${j.value.device_count || 0} families ready` : "Unavailable"), 1)], 2)]),
-				J("div", ZK, [
+				J("div", JK, [
 					J("div", null, [t[15] ||= J("span", null, "Connected targets", -1), J("strong", null, B(k.value.length), 1)]),
 					J("div", { class: z({ attention: O.value.length }) }, [t[16] ||= J("span", null, "Updates ready", -1), J("strong", null, B(O.value.length), 1)], 2),
 					t[17] ||= J("div", null, [J("span", null, "Install method"), J("strong", null, "Verified OTA")], -1)
 				]),
-				O.value.length ? (K(), q("section", QK, [J("header", null, [t[18] ||= J("div", null, [J("h4", null, "Ready to update"), J("p", null, "Offline satellites are skipped. Updates continue if a device fails, with a result shown for each satellite.")], -1), J("button", {
+				O.value.length ? (K(), q("section", YK, [J("header", null, [t[18] ||= J("div", null, [J("h4", null, "Ready to update"), J("p", null, "Offline satellites are skipped. Updates continue if a device fails, with a result shown for each satellite.")], -1), J("button", {
 					class: "tv-button primary",
 					type: "button",
 					disabled: !!u.value,
 					onClick: t[0] ||= (e) => Ne(O.value)
-				}, "Update All (" + B(O.value.length) + ")", 9, $K)]), J("div", eq, [(K(!0), q(G, null, W(O.value, (e) => (K(), q("div", { key: `${e.selector}:${e.template_key}` }, [
+				}, "Update All (" + B(O.value.length) + ")", 9, XK)]), J("div", ZK, [(K(!0), q(G, null, W(O.value, (e) => (K(), q("div", { key: `${e.selector}:${e.template_key}` }, [
 					t[20] ||= J("span", { class: "tvoice-update-mark" }, "↑", -1),
 					J("div", null, [J("strong", null, B(e.title || e.selector), 1), J("span", null, [
 						J("b", null, "App " + B(e.installed || "unknown") + " · Linux " + B(e.installed_system || "unknown"), 1),
@@ -24594,25 +24555,25 @@ var JK = { class: "tm-stack tvoice-firmware" }, YK = {
 						type: "button",
 						disabled: !!u.value || e.connected === !1,
 						onClick: (t) => Me(e)
-					}, B(e.connected === !1 ? "Offline" : "Update"), 9, tq)
-				]))), 128))])])) : (K(), q("div", nq, [J("div", null, [t[21] ||= J("strong", null, "Connected satellites are current", -1), J("span", null, B(k.value.length ? "No newer firmware is available for the matched devices." : "Connect a supported satellite to check its installed version."), 1)])])),
-				J("div", rq, [!O.value.length && k.value.length ? (K(), q("button", {
+					}, B(e.connected === !1 ? "Offline" : "Update"), 9, QK)
+				]))), 128))])])) : (K(), q("div", $K, [J("div", null, [t[21] ||= J("strong", null, "Connected satellites are current", -1), J("span", null, B(k.value.length ? "No newer firmware is available for the matched devices." : "Connect a supported satellite to check its installed version."), 1)])])),
+				J("div", eq, [!O.value.length && k.value.length ? (K(), q("button", {
 					key: 0,
 					class: "tv-button",
 					type: "button",
 					disabled: !!u.value,
 					onClick: t[1] ||= (e) => Ne(k.value)
-				}, "Reinstall All Connected (" + B(k.value.length) + ")", 9, iq)) : Z("", !0), J("button", {
+				}, "Reinstall All Connected (" + B(k.value.length) + ")", 9, tq)) : Z("", !0), J("button", {
 					class: "tv-button",
 					type: "button",
 					disabled: !!u.value,
 					onClick: be
-				}, "Manual install or recovery", 8, aq)])
+				}, "Manual install or recovery", 8, nq)])
 			]),
 			f.value || p.value.length ? (K(), q("article", {
 				key: 1,
 				class: z(["tm-form-card tvoice-progress-dock", `state-${fe.value}`])
-			}, [J("div", null, [J("span", oq, B(ae.value ? "↻" : fe.value === "failed" ? "!" : "✓"), 1), J("div", null, [J("strong", null, B(v.value), 1), J("small", null, [X(B(f.value?.message || pe.value), 1), y.value ? (K(), q(G, { key: 0 }, [X(" · " + B(y.value), 1)], 64)) : Z("", !0)])])]), J("div", null, [J("span", null, B(Math.round(de.value)) + "%", 1), J("button", {
+			}, [J("div", null, [J("span", rq, B(ae.value ? "↻" : fe.value === "failed" ? "!" : "✓"), 1), J("div", null, [J("strong", null, B(v.value), 1), J("small", null, [X(B(f.value?.message || pe.value), 1), y.value ? (K(), q(G, { key: 0 }, [X(" · " + B(y.value), 1)], 64)) : Z("", !0)])])]), J("div", null, [J("span", null, B(Math.round(de.value)) + "%", 1), J("button", {
 				class: "tv-button",
 				type: "button",
 				onClick: Se
@@ -24622,7 +24583,7 @@ var JK = { class: "tm-stack tvoice-firmware" }, YK = {
 				"backdrop-class": "tv-modal-backdrop tset-modal",
 				onClose: t[11] ||= (e) => g.value = !1
 			}, {
-				default: En(() => [J("section", sq, [
+				default: En(() => [J("section", iq, [
 					J("header", null, [t[22] ||= J("div", null, [
 						J("span", { class: "tv-eyebrow" }, "Install or recover"),
 						J("h2", { id: "tvoice-flasher-title" }, "Manual firmware tools"),
@@ -24632,7 +24593,7 @@ var JK = { class: "tm-stack tvoice-firmware" }, YK = {
 						type: "button",
 						onClick: t[2] ||= (e) => g.value = !1
 					}, "Close")]),
-					J("div", cq, [
+					J("div", aq, [
 						J("button", {
 							type: "button",
 							class: z({ active: i.value === "ota" }),
@@ -24649,28 +24610,28 @@ var JK = { class: "tm-stack tvoice-firmware" }, YK = {
 							onClick: t[5] ||= (e) => _e("browser_usb")
 						}, [...t[25] ||= [J("b", null, "Browser USB", -1), J("span", null, "Prepare an image for the secure web flasher.", -1)]], 2)
 					]),
-					J("section", lq, [
+					J("section", oq, [
 						J("header", null, [t[27] ||= J("span", null, "1", -1), J("div", null, [J("h3", null, B(i.value === "ota" ? "Choose a connected satellite" : "Choose the hardware family"), 1), t[26] ||= J("p", null, "Tater only shows targets compatible with this install method.", -1)])]),
-						J("div", uq, [(K(!0), q(G, null, W(P.value, (e) => (K(), q("button", {
-							key: Ut(KK)(e),
+						J("div", sq, [(K(!0), q(G, null, W(P.value, (e) => (K(), q("button", {
+							key: Ut(UK)(e),
 							type: "button",
 							class: z({
-								active: (i.value === "ota" ? o.value : a.value) === Ut(KK)(e),
+								active: (i.value === "ota" ? o.value : a.value) === Ut(UK)(e),
 								"no-image": !e.hero_image_src
 							}),
-							onClick: (t) => ve(Ut(KK)(e))
+							onClick: (t) => ve(Ut(UK)(e))
 						}, [
 							e.hero_image_src ? (K(), q("img", {
 								key: 0,
 								src: String(e.hero_image_src),
-								alt: String(e.hero_image_alt || Ut(qK)(e))
-							}, null, 8, fq)) : Z("", !0),
-							J("span", null, [J("b", null, B(e.title || Ut(qK)(e)), 1), J("small", null, B(e.detail || e.host || e.template_key || "Official Tater firmware"), 1)]),
+								alt: String(e.hero_image_alt || Ut(WK)(e))
+							}, null, 8, lq)) : Z("", !0),
+							J("span", null, [J("b", null, B(e.title || Ut(WK)(e)), 1), J("small", null, B(e.detail || e.host || e.template_key || "Official Tater firmware"), 1)]),
 							t[28] ||= J("i", null, null, -1)
-						], 10, dq))), 128))]),
-						P.value.length ? Z("", !0) : (K(), q("div", pq, B(w.value.empty_message || "No compatible firmware target is available."), 1))
+						], 10, cq))), 128))]),
+						P.value.length ? Z("", !0) : (K(), q("div", uq, B(w.value.empty_message || "No compatible firmware target is available."), 1))
 					]),
-					i.value !== "ota" && ee.value.path ? (K(), q("section", mq, [t[31] ||= J("header", null, [J("span", null, "2"), J("div", null, [J("h3", null, "Choose what to preserve"), J("p", null, "A factory image is best for recovery; keep settings for a normal reinstall.")])], -1), J("div", hq, [J("button", {
+					i.value !== "ota" && ee.value.path ? (K(), q("section", dq, [t[31] ||= J("header", null, [J("span", null, "2"), J("div", null, [J("h3", null, "Choose what to preserve"), J("p", null, "A factory image is best for recovery; keep settings for a normal reinstall.")])], -1), J("div", fq, [J("button", {
 						type: "button",
 						class: z({ active: s.value === "factory" }),
 						onClick: t[6] ||= (e) => s.value = "factory"
@@ -24679,27 +24640,27 @@ var JK = { class: "tm-stack tvoice-firmware" }, YK = {
 						class: z({ active: s.value === "ota" }),
 						onClick: t[7] ||= (e) => s.value = "ota"
 					}, [...t[30] ||= [J("b", null, "Keep settings", -1), J("span", null, "Install firmware without clearing provisioning.", -1)]], 2)])])) : Z("", !0),
-					i.value === "local_usb" && ne.value !== "amlogic_usb_burn" ? (K(), q("section", gq, [
+					i.value === "local_usb" && ne.value !== "amlogic_usb_burn" ? (K(), q("section", pq, [
 						J("header", null, [J("span", null, B(ee.value.path ? "3" : "2"), 1), t[32] ||= J("div", null, [J("h3", null, "Select the USB serial port"), J("p", null, "Connect the satellite with a data cable before refreshing ports.")], -1)]),
-						J("label", _q, [t[34] ||= J("span", { class: "tm-field-label" }, "Serial port", -1), U(J("select", { "onUpdate:modelValue": t[8] ||= (e) => l.value = e }, [t[33] ||= J("option", { value: "" }, "Select a port", -1), (K(!0), q(G, null, W(c.value, (e) => (K(), q("option", {
-							key: Ut(KK)(e),
-							value: Ut(KK)(e)
-						}, B(Ut(qK)(e)), 9, vq))), 128))], 512), [[_s, l.value]])]),
+						J("label", mq, [t[34] ||= J("span", { class: "tm-field-label" }, "Serial port", -1), U(J("select", { "onUpdate:modelValue": t[8] ||= (e) => l.value = e }, [t[33] ||= J("option", { value: "" }, "Select a port", -1), (K(!0), q(G, null, W(c.value, (e) => (K(), q("option", {
+							key: Ut(UK)(e),
+							value: Ut(UK)(e)
+						}, B(Ut(WK)(e)), 9, hq))), 128))], 512), [[_s, l.value]])]),
 						J("button", {
 							class: "tm-link-button",
 							type: "button",
 							onClick: t[9] ||= (e) => Fe()
 						}, "Refresh connected ports")
 					])) : Z("", !0),
-					Object.keys(F.value).length ? (K(), q("section", yq, [F.value.hero_image_src ? (K(), q("img", {
+					Object.keys(F.value).length ? (K(), q("section", gq, [F.value.hero_image_src ? (K(), q("img", {
 						key: 0,
 						src: String(F.value.hero_image_src),
 						alt: String(F.value.hero_image_alt || F.value.title)
-					}, null, 8, bq)) : Z("", !0), J("div", null, [
+					}, null, 8, _q)) : Z("", !0), J("div", null, [
 						t[39] ||= J("span", { class: "tv-eyebrow" }, "Ready target", -1),
 						J("h4", null, B(F.value.title || o.value || a.value), 1),
 						J("p", null, B(F.value.subtitle || F.value.detail), 1),
-						J("dl", xq, [
+						J("dl", vq, [
 							t[35] ||= J("dt", null, "App", -1),
 							J("dd", null, B(F.value.installed_firmware_version || "unknown"), 1),
 							t[36] ||= J("dt", null, "Tater Linux", -1),
@@ -24710,36 +24671,36 @@ var JK = { class: "tm-stack tvoice-firmware" }, YK = {
 							J("dd", null, B(i.value === "ota" ? "Verified app + A/B system OTA" : ne.value === "amlogic_usb_burn" ? "Amlogic USB" : "ESP serial"), 1)
 						])
 					])])) : Z("", !0),
-					i.value === "ota" && F.value.usb_upgrade_required ? (K(), q("div", Sq, [J("div", null, [t[40] ||= J("strong", null, "One-time USB upgrade required", -1), J("span", null, B(F.value.firmware_update_status), 1)])])) : Z("", !0),
-					m.value ? (K(), q("div", Cq, [J("div", null, [t[41] ||= J("strong", null, "Browser image ready", -1), J("span", null, B(m.value.message), 1)]), m.value.binary_url ? (K(), q("a", {
+					i.value === "ota" && F.value.usb_upgrade_required ? (K(), q("div", yq, [J("div", null, [t[40] ||= J("strong", null, "One-time USB upgrade required", -1), J("span", null, B(F.value.firmware_update_status), 1)])])) : Z("", !0),
+					m.value ? (K(), q("div", bq, [J("div", null, [t[41] ||= J("strong", null, "Browser image ready", -1), J("span", null, B(m.value.message), 1)]), m.value.binary_url ? (K(), q("a", {
 						key: 0,
 						href: Te(m.value.binary_url),
 						class: "tv-button",
 						target: "_blank",
 						rel: "noreferrer"
-					}, "Download firmware image", 8, wq)) : Z("", !0)])) : Z("", !0),
-					J("footer", Tq, [J("button", {
+					}, "Download firmware image", 8, xq)) : Z("", !0)])) : Z("", !0),
+					J("footer", Sq, [J("button", {
 						class: "tv-button danger",
 						type: "button",
 						disabled: !!u.value,
 						onClick: ze
-					}, "Clean firmware cache", 8, Eq), J("div", null, [i.value === "ota" ? (K(), q("button", {
+					}, "Clean firmware cache", 8, Cq), J("div", null, [i.value === "ota" ? (K(), q("button", {
 						key: 0,
 						class: "tv-button primary",
 						type: "button",
 						disabled: !!u.value || !re.value,
 						onClick: t[10] ||= (e) => Me()
-					}, B(u.value === "ota" ? "Starting…" : "Install Latest OTA"), 9, Dq)) : i.value === "local_usb" ? (K(), q(G, { key: 1 }, [J("button", {
+					}, B(u.value === "ota" ? "Starting…" : "Install Latest OTA"), 9, wq)) : i.value === "local_usb" ? (K(), q(G, { key: 1 }, [J("button", {
 						class: "tv-button",
 						type: "button",
 						disabled: !!u.value,
 						onClick: Le
-					}, "Open USB Logs", 8, Oq), J("button", {
+					}, "Open USB Logs", 8, Tq), J("button", {
 						class: "tv-button primary",
 						type: "button",
 						disabled: !!u.value || !ie.value,
 						onClick: Ie
-					}, B(u.value === "local-usb" ? "Starting…" : "Start Local USB Flash"), 9, kq)], 64)) : (K(), q(G, { key: 2 }, [t[42] ||= J("a", {
+					}, B(u.value === "local-usb" ? "Starting…" : "Start Local USB Flash"), 9, Eq)], 64)) : (K(), q(G, { key: 2 }, [t[42] ||= J("a", {
 						class: "tv-button",
 						href: "https://taterassistant.com/usb-flasher/",
 						target: "_blank",
@@ -24749,7 +24710,7 @@ var JK = { class: "tm-stack tvoice-firmware" }, YK = {
 						type: "button",
 						disabled: !!u.value || !ie.value,
 						onClick: Re
-					}, B(u.value === "browser" ? "Preparing…" : "Prepare Browser USB Image"), 9, Aq)], 64))])])
+					}, B(u.value === "browser" ? "Preparing…" : "Prepare Browser USB Image"), 9, Dq)], 64))])])
 				])]),
 				_: 1
 			}, 8, ["open"]),
@@ -24758,10 +24719,10 @@ var JK = { class: "tm-stack tvoice-firmware" }, YK = {
 				"backdrop-class": "tv-modal-backdrop tset-modal",
 				onClose: xe
 			}, {
-				default: En(() => [J("section", jq, [
+				default: En(() => [J("section", Oq, [
 					J("header", null, [J("div", null, [
-						J("span", Mq, B(ae.value ? "Firmware operation in progress" : fe.value === "failed" ? "Firmware operation needs attention" : "Firmware operation complete"), 1),
-						J("h2", Nq, B(v.value), 1),
+						J("span", kq, B(ae.value ? "Firmware operation in progress" : fe.value === "failed" ? "Firmware operation needs attention" : "Firmware operation complete"), 1),
+						J("h2", Aq, B(v.value), 1),
 						J("p", null, B(y.value || "Tater satellite firmware"), 1)
 					]), J("button", {
 						class: "tv-button",
@@ -24774,9 +24735,9 @@ var JK = { class: "tm-stack tvoice-firmware" }, YK = {
 						J("progress", {
 							value: de.value,
 							max: "100"
-						}, null, 8, Pq)
+						}, null, 8, jq)
 					])], 2),
-					b.value.length ? (K(), q("div", Fq, [t[43] ||= J("header", null, [J("h3", null, "Update queue"), J("span", null, "One satellite at a time")], -1), J("ol", null, [(K(!0), q(G, null, W(b.value, (e, t) => (K(), q("li", {
+					b.value.length ? (K(), q("div", Mq, [t[43] ||= J("header", null, [J("h3", null, "Update queue"), J("span", null, "One satellite at a time")], -1), J("ol", null, [(K(!0), q(G, null, W(b.value, (e, t) => (K(), q("li", {
 						key: String(e.key),
 						class: z(`state-${e.status}`)
 					}, [
@@ -24784,14 +24745,14 @@ var JK = { class: "tm-stack tvoice-firmware" }, YK = {
 						J("span", null, [J("strong", null, B(e.title), 1), J("small", null, B(e.message || e.subtitle || (e.status === "queued" ? "Waiting" : e.status)), 1)]),
 						J("b", null, B(e.status === "running" ? `${Math.round(Number(e.progress || 0))}%` : e.status), 1)
 					], 2))), 128))])])) : Z("", !0),
-					J("details", Iq, [J("summary", null, [J("span", null, [t[44] ||= J("b", null, "Technical details", -1), J("small", null, B(p.value.length) + " log entr" + B(p.value.length === 1 ? "y" : "ies"), 1)]), J("span", null, B(f.value?.phase || f.value?.status || "starting"), 1)]), J("pre", null, B(p.value.map((e) => e.display || e.message || e.text).filter(Boolean).join("\n") || "Waiting for device output…"), 1)]),
+					J("details", Nq, [J("summary", null, [J("span", null, [t[44] ||= J("b", null, "Technical details", -1), J("small", null, B(p.value.length) + " log entr" + B(p.value.length === 1 ? "y" : "ies"), 1)]), J("span", null, B(f.value?.phase || f.value?.status || "starting"), 1)]), J("pre", null, B(p.value.map((e) => e.display || e.message || e.text).filter(Boolean).join("\n") || "Waiting for device output…"), 1)]),
 					J("footer", null, [J("span", null, B(ae.value ? "You can hide this window; the update will keep running." : f.value?.message || pe.value), 1), ae.value ? (K(), q("button", {
 						key: 0,
 						class: "tv-button danger",
 						type: "button",
 						disabled: !f.value?.session_id && u.value !== "batch",
 						onClick: Pe
-					}, B(u.value === "batch" ? "Stop queue" : f.value?.session_id ? "Stop" : "Starting…"), 9, Lq)) : (K(), q("button", {
+					}, B(u.value === "batch" ? "Stop queue" : f.value?.session_id ? "Stop" : "Starting…"), 9, Pq)) : (K(), q("button", {
 						key: 1,
 						class: "tv-button primary",
 						type: "button",
@@ -24802,20 +24763,20 @@ var JK = { class: "tm-stack tvoice-firmware" }, YK = {
 			}, 8, ["open"])
 		]));
 	}
-}), zq = { class: "tm-stack tvoice-airplay" }, Bq = {
+}), Iq = { class: "tm-stack tvoice-airplay" }, Lq = {
 	key: 0,
 	class: "tv-notice error",
 	"aria-live": "polite"
-}, Vq = { class: "tm-form-card tvoice-airplay-hero" }, Hq = { class: "tvoice-airplay-summary" }, Uq = { class: "tm-form-card tvoice-airplay-control" }, Wq = { class: "tv-toggle tvoice-airplay-toggle" }, Gq = ["disabled"], Kq = {
+}, Rq = { class: "tm-form-card tvoice-airplay-hero" }, zq = { class: "tvoice-airplay-summary" }, Bq = { class: "tm-form-card tvoice-airplay-control" }, Vq = { class: "tv-toggle tvoice-airplay-toggle" }, Hq = ["disabled"], Uq = {
 	key: 0,
 	class: "tv-notice error"
-}, qq = { class: "tm-form-card tvoice-airplay-identity" }, Jq = { class: "tvoice-airplay-fields" }, Yq = ["disabled"], Xq = ["disabled"], Zq = { class: "tm-form-card tvoice-airplay-destinations" }, Qq = { class: "tvoice-section-mark" }, $q = {
+}, Wq = { class: "tm-form-card tvoice-airplay-identity" }, Gq = { class: "tvoice-airplay-fields" }, Kq = ["disabled"], qq = ["disabled"], Jq = { class: "tm-form-card tvoice-airplay-destinations" }, Yq = { class: "tvoice-section-mark" }, Xq = {
 	key: 0,
 	class: "tvoice-airplay-grid"
-}, eJ = ["disabled", "onClick"], tJ = { class: "tvoice-airplay-target-mark" }, nJ = { class: "tvoice-airplay-target-copy" }, rJ = { class: "tvoice-airplay-check" }, iJ = {
+}, Zq = ["disabled", "onClick"], Qq = { class: "tvoice-airplay-target-mark" }, $q = { class: "tvoice-airplay-target-copy" }, eJ = { class: "tvoice-airplay-check" }, tJ = {
 	key: 1,
 	class: "tv-notice"
-}, aJ = { class: "tm-form-card tvoice-save-bar tvoice-airplay-save" }, oJ = { class: "tm-inline-actions" }, sJ = ["disabled"], cJ = ["disabled"], lJ = /* @__PURE__ */ fr({
+}, nJ = { class: "tm-form-card tvoice-save-bar tvoice-airplay-save" }, rJ = { class: "tm-inline-actions" }, iJ = ["disabled"], aJ = ["disabled"], oJ = /* @__PURE__ */ fr({
 	__name: "VoiceAirPlay",
 	props: {
 		payload: {},
@@ -24884,7 +24845,7 @@ var JK = { class: "tm-stack tvoice-firmware" }, YK = {
 			if (!o.value) {
 				o.value = "save", s.value = "";
 				try {
-					let e = await GK(n.actionEndpoint, "voice_airplay_input_save", { values: {
+					let e = await HK(n.actionEndpoint, "voice_airplay_input_save", { values: {
 						enabled: i.enabled,
 						receiver_name: i.receiver_name,
 						receiver_pin: i.receiver_pin,
@@ -24902,7 +24863,7 @@ var JK = { class: "tm-stack tvoice-firmware" }, YK = {
 			if (!o.value) {
 				o.value = "stop", s.value = "";
 				try {
-					let e = await GK(n.actionEndpoint, "voice_airplay_input_stop");
+					let e = await HK(n.actionEndpoint, "voice_airplay_input_stop");
 					r("notify", String(e.message || "AirPlay input stopped."), "success"), r("refresh");
 				} catch (e) {
 					s.value = e instanceof Error ? e.message : "AirPlay input could not be stopped.", r("notify", s.value, "error");
@@ -24914,10 +24875,10 @@ var JK = { class: "tm-stack tvoice-firmware" }, YK = {
 		return Nn(() => n.payload, v, {
 			deep: !0,
 			immediate: !0
-		}), (e, t) => (K(), q("section", zq, [
-			s.value ? (K(), q("div", Bq, B(s.value), 1)) : Z("", !0),
-			J("section", Vq, [t[4] ||= Ea("<div class=\"tvoice-airplay-flow\" aria-hidden=\"true\"><span class=\"source\">AP</span><i></i><span class=\"receiver\">T</span><i></i><span class=\"speaker\">SAT</span></div><div class=\"tvoice-airplay-copy\"><span class=\"tv-eyebrow\">Built into Tater</span><h3>AirPlay into your satellites</h3><p>Send audio from an iPhone, iPad, or Mac to one Tater receiver, then play it across the satellites and speaker groups you choose.</p></div>", 2), J("span", { class: z(["tvoice-airplay-status", m.value]) }, [t[3] ||= J("i", null, null, -1), X(B(p.value), 1)], 2)]),
-			J("section", Hq, [
+		}), (e, t) => (K(), q("section", Iq, [
+			s.value ? (K(), q("div", Lq, B(s.value), 1)) : Z("", !0),
+			J("section", Rq, [t[4] ||= Ea("<div class=\"tvoice-airplay-flow\" aria-hidden=\"true\"><span class=\"source\">AP</span><i></i><span class=\"receiver\">T</span><i></i><span class=\"speaker\">SAT</span></div><div class=\"tvoice-airplay-copy\"><span class=\"tv-eyebrow\">Built into Tater</span><h3>AirPlay into your satellites</h3><p>Send audio from an iPhone, iPad, or Mac to one Tater receiver, then play it across the satellites and speaker groups you choose.</p></div>", 2), J("span", { class: z(["tvoice-airplay-status", m.value]) }, [t[3] ||= J("i", null, null, -1), X(B(p.value), 1)], 2)]),
+			J("section", zq, [
 				J("article", null, [
 					t[5] ||= J("span", null, "Receiver", -1),
 					J("strong", null, B(i.receiver_name || "Tater Audio"), 1),
@@ -24934,26 +24895,26 @@ var JK = { class: "tm-stack tvoice-firmware" }, YK = {
 					J("small", null, B(h.value ? "Audio is arriving now" : "No active stream"), 1)
 				])
 			]),
-			J("section", Uq, [
+			J("section", Bq, [
 				J("header", null, [J("div", null, [
 					t[9] ||= J("span", { class: "tv-eyebrow" }, "Receiver availability", -1),
 					t[10] ||= J("h3", null, "Make Tater discoverable", -1),
 					J("p", null, B(_.value), 1)
 				]), t[11] ||= J("span", { class: "tvoice-section-mark" }, "ON", -1)]),
-				J("label", Wq, [U(J("input", {
+				J("label", Vq, [U(J("input", {
 					"onUpdate:modelValue": t[0] ||= (e) => i.enabled = e,
 					class: "tv-checkbox",
 					type: "checkbox",
 					disabled: !!o.value,
 					onChange: y
-				}, null, 40, Gq), [[ms, i.enabled]]), t[12] ||= J("span", null, [J("strong", null, "Enable AirPlay Input"), J("small", null, "Advertise this Tater server as an AirPlay audio destination.")], -1)]),
-				g.value ? (K(), q("div", Kq, B(g.value), 1)) : Z("", !0)
+				}, null, 40, Hq), [[ms, i.enabled]]), t[12] ||= J("span", null, [J("strong", null, "Enable AirPlay Input"), J("small", null, "Advertise this Tater server as an AirPlay audio destination.")], -1)]),
+				g.value ? (K(), q("div", Uq, B(g.value), 1)) : Z("", !0)
 			]),
-			J("section", qq, [t[17] ||= J("header", null, [J("div", null, [
+			J("section", Wq, [t[17] ||= J("header", null, [J("div", null, [
 				J("span", { class: "tv-eyebrow" }, "How Apple devices see Tater"),
 				J("h3", null, "Receiver identity"),
 				J("p", null, "Give the receiver a recognizable room or household name. A PIN is optional.")
-			]), J("span", { class: "tvoice-section-mark" }, "ID")], -1), J("div", Jq, [J("label", null, [
+			]), J("span", { class: "tvoice-section-mark" }, "ID")], -1), J("div", Gq, [J("label", null, [
 				t[13] ||= J("span", null, "Receiver name", -1),
 				U(J("input", {
 					"onUpdate:modelValue": t[1] ||= (e) => i.receiver_name = e,
@@ -24962,7 +24923,7 @@ var JK = { class: "tm-stack tvoice-firmware" }, YK = {
 					placeholder: "Tater Audio",
 					disabled: !!o.value,
 					onInput: y
-				}, null, 40, Yq), [[$, i.receiver_name]]),
+				}, null, 40, Kq), [[$, i.receiver_name]]),
 				t[14] ||= J("small", null, "For example: Tater Audio or Whole Home Tater.", -1)
 			]), J("label", null, [
 				t[15] ||= J("span", null, [X("Pairing PIN "), J("em", null, "Optional")], -1),
@@ -24975,14 +24936,14 @@ var JK = { class: "tm-stack tvoice-firmware" }, YK = {
 					placeholder: "Four digits",
 					disabled: !!o.value,
 					onInput: y
-				}, null, 40, Xq), [[$, i.receiver_pin]]),
+				}, null, 40, qq), [[$, i.receiver_pin]]),
 				t[16] ||= J("small", null, "Leave blank for normal AirPlay pairing.", -1)
 			])])]),
-			J("section", Zq, [J("header", null, [t[18] ||= J("div", null, [
+			J("section", Jq, [J("header", null, [t[18] ||= J("div", null, [
 				J("span", { class: "tv-eyebrow" }, "Playback routing"),
 				J("h3", null, "Choose where AirPlay plays"),
 				J("p", null, "Select one or more destinations. Tater handles the live stream and synchronized routing.")
-			], -1), J("span", Qq, B(i.targets.length), 1)]), d.value.length ? (K(), q("div", $q, [(K(!0), q(G, null, W(d.value, (e) => (K(), q("button", {
+			], -1), J("span", Yq, B(i.targets.length), 1)]), d.value.length ? (K(), q("div", Xq, [(K(!0), q(G, null, W(d.value, (e) => (K(), q("button", {
 				key: String(e.value),
 				type: "button",
 				class: z({
@@ -24992,47 +24953,47 @@ var JK = { class: "tm-stack tvoice-firmware" }, YK = {
 				disabled: !!o.value,
 				onClick: (t) => b(e.value)
 			}, [
-				J("span", tJ, B(S(e)), 1),
-				J("span", nJ, [
+				J("span", Qq, B(S(e)), 1),
+				J("span", $q, [
 					J("small", null, B(x(e)), 1),
 					J("strong", null, B(e.label), 1),
 					J("em", null, B(e.description), 1)
 				]),
-				J("span", rJ, B(i.targets.includes(String(e.value)) ? "✓" : "+"), 1)
-			], 10, eJ))), 128))])) : (K(), q("div", iJ, "No compatible destinations are available yet. Pair a satellite or create a stereo pair first."))]),
-			J("footer", aJ, [J("div", null, [J("strong", null, B(a.value ? "AirPlay changes are ready to save" : "AirPlay Input is up to date"), 1), t[19] ||= J("small", null, "Settings apply immediately and remain available without Music Core.", -1)]), J("div", oJ, [h.value ? (K(), q("button", {
+				J("span", eJ, B(i.targets.includes(String(e.value)) ? "✓" : "+"), 1)
+			], 10, Zq))), 128))])) : (K(), q("div", tJ, "No compatible destinations are available yet. Pair a satellite or create a stereo pair first."))]),
+			J("footer", nJ, [J("div", null, [J("strong", null, B(a.value ? "AirPlay changes are ready to save" : "AirPlay Input is up to date"), 1), t[19] ||= J("small", null, "Settings apply immediately and remain available without Music Core.", -1)]), J("div", rJ, [h.value ? (K(), q("button", {
 				key: 0,
 				class: "tv-button danger",
 				type: "button",
 				disabled: !!o.value,
 				onClick: w
-			}, B(o.value === "stop" ? "Stopping…" : "Stop Current Input"), 9, sJ)) : Z("", !0), J("button", {
+			}, B(o.value === "stop" ? "Stopping…" : "Stop Current Input"), 9, iJ)) : Z("", !0), J("button", {
 				class: "tv-button primary",
 				type: "button",
 				disabled: !!o.value || !a.value,
 				onClick: C
-			}, B(o.value === "save" ? "Saving…" : "Save AirPlay Input"), 9, cJ)])])
+			}, B(o.value === "save" ? "Saving…" : "Save AirPlay Input"), 9, aJ)])])
 		]));
 	}
-}), uJ = { class: "tm-stack tvoice-platform" }, dJ = {
+}), sJ = { class: "tm-stack tvoice-platform" }, cJ = {
 	key: 0,
 	class: "tv-notice error"
-}, fJ = {
+}, lJ = {
 	key: 1,
 	class: "tv-notice"
-}, pJ = { class: "tm-form-card tvoice-subhero tvoice-platform-hero" }, mJ = { class: "tvoice-subhero-metrics" }, hJ = {
+}, uJ = { class: "tm-form-card tvoice-subhero tvoice-platform-hero" }, dJ = { class: "tvoice-subhero-metrics" }, fJ = {
 	key: 2,
 	class: "tm-stack tvoice-platform-group"
-}, gJ = { class: "tvoice-section-heading" }, _J = { class: "tvoice-card-identity" }, vJ = { class: "tvoice-group-count" }, yJ = {
+}, pJ = { class: "tvoice-section-heading" }, mJ = { class: "tvoice-card-identity" }, hJ = { class: "tvoice-group-count" }, gJ = {
 	key: 3,
 	class: "tm-stack tvoice-platform-group"
-}, bJ = { class: "tvoice-section-heading" }, xJ = { class: "tvoice-card-identity" }, SJ = { class: "tvoice-group-count" }, CJ = {
+}, _J = { class: "tvoice-section-heading" }, vJ = { class: "tvoice-card-identity" }, yJ = { class: "tvoice-group-count" }, bJ = {
 	key: 4,
 	class: "tv-notice"
-}, wJ = {
+}, xJ = {
 	key: 5,
 	class: "tset-save-bar tvoice-save-bar"
-}, TJ = { class: "tm-inline-actions" }, EJ = ["disabled"], DJ = ["disabled"], OJ = /* @__PURE__ */ fr({
+}, SJ = { class: "tm-inline-actions" }, CJ = ["disabled"], wJ = ["disabled"], TJ = /* @__PURE__ */ fr({
 	__name: "VoicePlatform",
 	props: {
 		payload: {},
@@ -25040,12 +25001,12 @@ var JK = { class: "tm-stack tvoice-firmware" }, YK = {
 	},
 	emits: ["refresh", "notify"],
 	setup(e, { emit: t }) {
-		let n = e, r = t, i = /* @__PURE__ */ Dt({}), a = /* @__PURE__ */ Dt({}), o = /* @__PURE__ */ H(!1), s = /* @__PURE__ */ H(""), c = /* @__PURE__ */ H(""), l = /* @__PURE__ */ H(""), u = Q(() => VK(n.payload, "global_satellite_settings")[0] || null), d = Q(() => VK(n.payload, "settings")[0] || null), f = Q(() => WK(u.value)), p = Q(() => WK(d.value)), m = Q(() => [...f.value, ...p.value].reduce((e, t) => e + (Array.isArray(t.fields) ? t.fields.length : 0), 0));
+		let n = e, r = t, i = /* @__PURE__ */ Dt({}), a = /* @__PURE__ */ Dt({}), o = /* @__PURE__ */ H(!1), s = /* @__PURE__ */ H(""), c = /* @__PURE__ */ H(""), l = /* @__PURE__ */ H(""), u = Q(() => RK(n.payload, "global_satellite_settings")[0] || null), d = Q(() => RK(n.payload, "settings")[0] || null), f = Q(() => VK(u.value)), p = Q(() => VK(d.value)), m = Q(() => [...f.value, ...p.value].reduce((e, t) => e + (Array.isArray(t.fields) ? t.fields.length : 0), 0));
 		function h(e, t) {
 			Object.keys(e).forEach((t) => delete e[t]), Object.assign(e, t);
 		}
 		function g(e = !1) {
-			o.value && !e || (h(i, UK(WK(u.value))), h(a, UK(WK(d.value))));
+			o.value && !e || (h(i, BK(VK(u.value))), h(a, BK(VK(d.value))));
 		}
 		function _(e, t, n) {
 			e[t] = n, o.value = !0, c.value = "", l.value = "";
@@ -25056,14 +25017,14 @@ var JK = { class: "tm-stack tvoice-firmware" }, YK = {
 				try {
 					let e = [];
 					if (u.value) {
-						let t = await GK(n.actionEndpoint, String(u.value.save_action || "voice_global_satellite_settings_save"), {
+						let t = await HK(n.actionEndpoint, String(u.value.save_action || "voice_global_satellite_settings_save"), {
 							id: u.value.id,
 							values: { ...i }
 						});
 						t.message && e.push(String(t.message));
 					}
 					if (d.value) {
-						let t = await GK(n.actionEndpoint, String(d.value.save_action || "voice_settings_save"), {
+						let t = await HK(n.actionEndpoint, String(d.value.save_action || "voice_settings_save"), {
 							id: d.value.id,
 							values: { ...a }
 						});
@@ -25081,7 +25042,7 @@ var JK = { class: "tm-stack tvoice-firmware" }, YK = {
 			if (!(!d.value || !window.confirm(String(d.value.reset_confirm || "Restore native voice settings to defaults?")))) {
 				s.value = "reset", c.value = "";
 				try {
-					let e = await GK(n.actionEndpoint, String(d.value.reset_action || "voice_settings_reset_defaults"));
+					let e = await HK(n.actionEndpoint, String(d.value.reset_action || "voice_settings_reset_defaults"));
 					o.value = !1, r("notify", String(e.message || "Voice settings restored to defaults."), "success"), r("refresh");
 				} catch (e) {
 					c.value = e instanceof Error ? e.message : "Voice defaults could not be restored.", r("notify", c.value, "error");
@@ -25093,19 +25054,19 @@ var JK = { class: "tm-stack tvoice-firmware" }, YK = {
 		return Nn(() => n.payload, () => g(!1), {
 			deep: !0,
 			immediate: !0
-		}), (e, t) => (K(), q("section", uJ, [
-			c.value ? (K(), q("div", dJ, B(c.value), 1)) : Z("", !0),
-			l.value ? (K(), q("div", fJ, B(l.value), 1)) : Z("", !0),
-			J("section", pJ, [t[4] ||= J("div", null, [
+		}), (e, t) => (K(), q("section", sJ, [
+			c.value ? (K(), q("div", cJ, B(c.value), 1)) : Z("", !0),
+			l.value ? (K(), q("div", lJ, B(l.value), 1)) : Z("", !0),
+			J("section", uJ, [t[4] ||= J("div", null, [
 				J("span", { class: "tv-eyebrow" }, "Shared satellite behavior"),
 				J("h3", null, "Tune the whole voice network"),
 				J("p", null, "Every control is grouped by purpose. Save once at the bottom to apply shared behavior and runtime tuning together.")
-			], -1), J("div", mJ, [J("span", null, [J("b", null, B(m.value), 1), t[2] ||= X("Controls", -1)]), J("span", null, [J("b", null, B(f.value.length + p.value.length), 1), t[3] ||= X("Groups", -1)])])]),
-			u.value ? (K(), q("section", hJ, [J("div", gJ, [J("div", _J, [t[6] ||= J("span", { class: "tvoice-card-mark" }, "ALL", -1), J("div", null, [
+			], -1), J("div", dJ, [J("span", null, [J("b", null, B(m.value), 1), t[2] ||= X("Controls", -1)]), J("span", null, [J("b", null, B(f.value.length + p.value.length), 1), t[3] ||= X("Groups", -1)])])]),
+			u.value ? (K(), q("section", fJ, [J("div", pJ, [J("div", mJ, [t[6] ||= J("span", { class: "tvoice-card-mark" }, "ALL", -1), J("div", null, [
 				t[5] ||= J("span", { class: "tv-eyebrow" }, "Every satellite", -1),
 				J("h3", null, B(u.value.title || "Shared satellite behavior"), 1),
 				J("p", null, B(u.value.subtitle), 1)
-			])]), J("span", vJ, B(f.value.length) + " groups", 1)]), Y(tP, {
+			])]), J("span", hJ, B(f.value.length) + " groups", 1)]), Y(QN, {
 				sections: f.value,
 				values: i,
 				disabled: !!s.value,
@@ -25115,11 +25076,11 @@ var JK = { class: "tm-stack tvoice-firmware" }, YK = {
 				"values",
 				"disabled"
 			])])) : Z("", !0),
-			d.value ? (K(), q("section", yJ, [J("div", bJ, [J("div", xJ, [t[8] ||= J("span", { class: "tvoice-card-mark" }, "SYS", -1), J("div", null, [
+			d.value ? (K(), q("section", gJ, [J("div", _J, [J("div", vJ, [t[8] ||= J("span", { class: "tvoice-card-mark" }, "SYS", -1), J("div", null, [
 				t[7] ||= J("span", { class: "tv-eyebrow" }, "Tater runtime", -1),
 				J("h3", null, B(d.value.title || "Voice pipeline"), 1),
 				J("p", null, B(d.value.subtitle), 1)
-			])]), J("span", SJ, B(p.value.length) + " groups", 1)]), Y(tP, {
+			])]), J("span", yJ, B(p.value.length) + " groups", 1)]), Y(QN, {
 				sections: p.value,
 				values: a,
 				disabled: !!s.value,
@@ -25129,41 +25090,41 @@ var JK = { class: "tm-stack tvoice-firmware" }, YK = {
 				"values",
 				"disabled"
 			])])) : Z("", !0),
-			!u.value && !d.value ? (K(), q("div", CJ, "Satellite runtime settings are unavailable.")) : Z("", !0),
-			u.value || d.value ? (K(), q("footer", wJ, [J("div", null, [J("strong", null, B(o.value ? "Unsaved satellite changes" : "Satellite settings are synchronized"), 1), t[9] ||= J("span", null, "Saves runtime tuning and immediately applies shared behavior to connected satellites.", -1)]), J("div", TJ, [d.value?.reset_action ? (K(), q("button", {
+			!u.value && !d.value ? (K(), q("div", bJ, "Satellite runtime settings are unavailable.")) : Z("", !0),
+			u.value || d.value ? (K(), q("footer", xJ, [J("div", null, [J("strong", null, B(o.value ? "Unsaved satellite changes" : "Satellite settings are synchronized"), 1), t[9] ||= J("span", null, "Saves runtime tuning and immediately applies shared behavior to connected satellites.", -1)]), J("div", SJ, [d.value?.reset_action ? (K(), q("button", {
 				key: 0,
 				class: "tv-button danger",
 				type: "button",
 				disabled: !!s.value,
 				onClick: y
-			}, "Restore defaults", 8, EJ)) : Z("", !0), J("button", {
+			}, "Restore defaults", 8, CJ)) : Z("", !0), J("button", {
 				class: "tv-button primary",
 				type: "button",
 				disabled: !!s.value,
 				onClick: v
-			}, B(s.value === "save" ? "Applying…" : "Save & Apply Satellite Settings"), 9, DJ)])])) : Z("", !0)
+			}, B(s.value === "save" ? "Applying…" : "Save & Apply Satellite Settings"), 9, wJ)])])) : Z("", !0)
 		]));
 	}
-}), kJ = { class: "tm-stack bluetooth-workspace" }, AJ = { class: "tm-form-card bluetooth-intro" }, jJ = { class: "bluetooth-state" }, MJ = {
+}), EJ = { class: "tm-stack bluetooth-workspace" }, DJ = { class: "tm-form-card bluetooth-intro" }, OJ = { class: "bluetooth-state" }, kJ = {
 	key: 0,
 	class: "tv-notice error",
 	role: "alert"
-}, NJ = { class: "tm-form-card" }, PJ = { class: "bluetooth-actions" }, FJ = ["value", "disabled"], IJ = ["disabled"], LJ = ["disabled"], RJ = {
+}, AJ = { class: "tm-form-card" }, jJ = { class: "bluetooth-actions" }, MJ = ["value", "disabled"], NJ = ["disabled"], PJ = ["disabled"], FJ = {
 	key: 0,
 	class: "tv-notice"
-}, zJ = { class: "bluetooth-proxies" }, BJ = {
+}, IJ = { class: "bluetooth-proxies" }, LJ = {
 	key: 1,
 	class: "bluetooth-grid"
-}, VJ = ["onUpdate:modelValue"], HJ = ["disabled", "onClick"], UJ = {
+}, RJ = ["onUpdate:modelValue"], zJ = ["disabled", "onClick"], BJ = {
 	key: 2,
 	class: "bluetooth-empty"
-}, WJ = { class: "tm-form-card" }, GJ = {
+}, VJ = { class: "tm-form-card" }, HJ = {
 	key: 0,
 	class: "bluetooth-grid"
-}, KJ = ["disabled", "onClick"], qJ = {
+}, UJ = ["disabled", "onClick"], WJ = {
 	key: 1,
 	class: "bluetooth-empty"
-}, JJ = /*#__PURE__*/ ((e, t) => {
+}, GJ = /*#__PURE__*/ ((e, t) => {
 	let n = e.__vccOpts || e;
 	for (let [e, r] of t) n[e] = r;
 	return n;
@@ -25199,25 +25160,25 @@ var JK = { class: "tm-stack tvoice-firmware" }, YK = {
 			}, 2e3);
 		}), Fr(() => {
 			u = !0, window.clearInterval(l);
-		}), (e, t) => (K(), q("section", kJ, [
-			J("section", AJ, [t[3] ||= J("div", null, [
+		}), (e, t) => (K(), q("section", EJ, [
+			J("section", DJ, [t[3] ||= J("div", null, [
 				J("span", { class: "tv-eyebrow" }, "Satellite Bluetooth proxy"),
 				J("h2", null, "Connect a device through your satellite"),
 				J("p", null, "Bluetooth sleeps when unused. Discovery stops automatically; devices such as Meshtastic stay connected while an app needs them.")
-			], -1), J("span", jJ, B(i.value.scanning ? "Discovering devices" : "Ready when needed"), 1)]),
-			o.value ? (K(), q("div", MJ, B(o.value), 1)) : Z("", !0),
-			J("section", NJ, [
+			], -1), J("span", OJ, B(i.value.scanning ? "Discovering devices" : "Ready when needed"), 1)]),
+			o.value ? (K(), q("div", kJ, B(o.value), 1)) : Z("", !0),
+			J("section", AJ, [
 				t[7] ||= J("div", { class: "bluetooth-heading" }, [J("div", null, [
 					J("span", { class: "tv-eyebrow" }, "Discovery"),
 					J("h3", null, "Find a nearby device"),
 					J("p", null, "Choose a satellite and scan for 15 seconds. Opening this page does not start Bluetooth.")
 				])], -1),
-				J("div", PJ, [
+				J("div", jJ, [
 					J("label", null, [t[5] ||= X("Satellite", -1), U(J("select", { "onUpdate:modelValue": t[0] ||= (e) => s.value = e }, [t[4] ||= J("option", { value: "" }, "All available satellites", -1), (K(!0), q(G, null, W(d.value, (e) => (K(), q("option", {
 						key: e.selector,
 						value: e.selector,
 						disabled: !e.on_demand
-					}, B(e.name) + B(e.on_demand ? "" : " · firmware update needed"), 9, FJ))), 128))], 512), [[_s, s.value]])]),
+					}, B(e.name) + B(e.on_demand ? "" : " · firmware update needed"), 9, MJ))), 128))], 512), [[_s, s.value]])]),
 					J("button", {
 						class: "tv-button primary",
 						disabled: a.value || !m.value,
@@ -25225,20 +25186,20 @@ var JK = { class: "tm-stack tvoice-firmware" }, YK = {
 							selector: s.value,
 							duration_s: 15
 						})
-					}, B(i.value.scanning ? "Scan again" : "Scan for devices"), 9, IJ),
+					}, B(i.value.scanning ? "Scan again" : "Scan for devices"), 9, NJ),
 					i.value.scanning ? (K(), q("button", {
 						key: 0,
 						class: "tv-button",
 						disabled: a.value,
 						onClick: t[2] ||= (e) => g("stop", { selector: s.value })
-					}, "Stop scan", 8, LJ)) : Z("", !0)
+					}, "Stop scan", 8, PJ)) : Z("", !0)
 				]),
-				m.value ? Z("", !0) : (K(), q("p", RJ, "Connect a satellite with updated Bluetooth proxy firmware to discover and pair devices.")),
-				J("div", zJ, [(K(!0), q(G, null, W(d.value, (e) => (K(), q("span", {
+				m.value ? Z("", !0) : (K(), q("p", FJ, "Connect a satellite with updated Bluetooth proxy firmware to discover and pair devices.")),
+				J("div", IJ, [(K(!0), q(G, null, W(d.value, (e) => (K(), q("span", {
 					key: e.selector,
 					class: "bluetooth-chip"
 				}, [J("b", null, B(e.name), 1), X(" · " + B(e.scanning ? `Scanning · ${e.remaining_s}s` : e.addrs?.length ? `${e.addrs.length} connected` : e.on_demand ? "Bluetooth idle" : "Update firmware"), 1)]))), 128))]),
-				f.value.length ? (K(), q("div", BJ, [(K(!0), q(G, null, W(f.value, (e) => (K(), q("article", {
+				f.value.length ? (K(), q("div", LJ, [(K(!0), q(G, null, W(f.value, (e) => (K(), q("article", {
 					key: e.address,
 					class: "bluetooth-device"
 				}, [
@@ -25254,7 +25215,7 @@ var JK = { class: "tm-stack tvoice-firmware" }, YK = {
 						maxlength: "6",
 						autocomplete: "off",
 						placeholder: "Device PIN"
-					}, null, 8, VJ), [[$, c.value[e.address]]])]),
+					}, null, 8, RJ), [[$, c.value[e.address]]])]),
 					J("button", {
 						class: "tv-button",
 						disabled: a.value || !/^\d{6}$/.test(c.value[e.address] || ""),
@@ -25263,14 +25224,14 @@ var JK = { class: "tm-stack tvoice-firmware" }, YK = {
 							address: e.address,
 							pin: c.value[e.address]
 						})
-					}, "Pair device", 8, HJ)
-				]))), 128))])) : (K(), q("p", UJ, B(i.value.scanning ? "Listening for nearby devices…" : "Start a scan with your device in pairing mode."), 1))
+					}, "Pair device", 8, zJ)
+				]))), 128))])) : (K(), q("p", BJ, B(i.value.scanning ? "Listening for nearby devices…" : "Start a scan with your device in pairing mode."), 1))
 			]),
-			J("section", WJ, [
+			J("section", VJ, [
 				t[8] ||= J("span", { class: "tv-eyebrow" }, "Saved on the satellite", -1),
 				t[9] ||= J("h3", null, "Paired devices", -1),
 				t[10] ||= J("p", null, "Pairing is remembered without keeping Bluetooth running. Apps reconnect when needed.", -1),
-				p.value.length ? (K(), q("div", GJ, [(K(!0), q(G, null, W(p.value, (e) => (K(), q("article", {
+				p.value.length ? (K(), q("div", HJ, [(K(!0), q(G, null, W(p.value, (e) => (K(), q("article", {
 					key: `${e.selector}:${e.address}`,
 					class: "bluetooth-device"
 				}, [J("div", null, [
@@ -25284,11 +25245,11 @@ var JK = { class: "tm-stack tvoice-firmware" }, YK = {
 						selector: e.selector,
 						address: e.address
 					})
-				}, "Unpair", 8, KJ)]))), 128))])) : (K(), q("p", qJ, "No devices paired here yet. Existing connections managed by Cores keep their saved settings."))
+				}, "Unpair", 8, UJ)]))), 128))])) : (K(), q("p", WJ, "No devices paired here yet. Existing connections managed by Cores keep their saved settings."))
 			])
 		]));
 	}
-}), [["__scopeId", "data-v-12d6e4c0"]]), YJ = [
+}), [["__scopeId", "data-v-12d6e4c0"]]), KJ = [
 	{
 		id: "room",
 		label: "Room & audio"
@@ -25306,7 +25267,7 @@ var JK = { class: "tm-stack tvoice-firmware" }, YK = {
 		label: "Device info"
 	}
 ];
-function XJ(e, t, n) {
+function qJ(e, t, n) {
 	let r = { [t]: n };
 	if (t === "eq_preset") {
 		let t = e.find((e) => e.key === "eq_preset")?.presets?.[String(n)];
@@ -25317,103 +25278,103 @@ function XJ(e, t, n) {
 	} else (t === "eq_bands" || t === "eq_loudness") && (r.eq_preset = "manual");
 	return r;
 }
-function ZJ(e) {
+function JJ(e) {
 	let t = String(e.key || "").toLowerCase(), n = String(e.label || "").toLowerCase();
 	return /^(ssh|logging|debug|diagnostic|maintenance)/.test(t) || /maintenance|diagnostic|logging/.test(n) ? "info" : /^(screen|display|weather|climate|thermostat)/.test(t) || /display|screen|appearance|photo|weather|climate/.test(n) ? "display" : /^(dnd|playback|equalizer|audio_output|output|volume)/.test(t) || /do not disturb|audio feedback|equalizer|audio output/.test(n) ? "room" : "voice";
 }
 //#endregion
 //#region src/settings/components/voice/VoiceSatellites.vue?vue&type=script&setup=true&lang.ts
-var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
+var YJ = { class: "tm-stack tvoice-satellites" }, XJ = {
 	key: 0,
 	class: "tv-notice error",
 	role: "alert"
-}, eY = { class: "tm-form-card tvoice-pairing-card" }, tY = ["disabled"], nY = {
+}, ZJ = { class: "tm-form-card tvoice-pairing-card" }, QJ = ["disabled"], $J = {
 	key: 1,
 	class: "tvoice-section-heading tvoice-device-list-heading"
-}, rY = { class: "tvoice-device-roster" }, iY = { class: "tvoice-device-head" }, aY = { class: "tvoice-device-identity" }, oY = ["src", "alt"], sY = {
+}, eY = { class: "tvoice-device-roster" }, tY = { class: "tvoice-device-head" }, nY = { class: "tvoice-device-identity" }, rY = ["src", "alt"], iY = {
 	key: 0,
 	class: "tvoice-badges"
-}, cY = {
+}, aY = {
 	key: 1,
 	class: "tm-unsaved-label"
-}, lY = { class: "tvoice-device-actions" }, uY = ["title", "aria-label"], dY = {
+}, oY = { class: "tvoice-device-actions" }, sY = ["title", "aria-label"], cY = {
 	key: 0,
 	class: "tvoice-connection-icon",
 	viewBox: "0 0 24 24",
 	fill: "none",
 	"aria-hidden": "true"
-}, fY = {
+}, lY = {
 	key: 1,
 	class: "tvoice-connection-icon",
 	viewBox: "0 0 24 24",
 	fill: "none",
 	"aria-hidden": "true"
-}, pY = ["aria-label", "onClick"], mY = {
+}, uY = ["aria-label", "onClick"], dY = {
 	key: 2,
 	class: "tv-notice"
-}, hY = {
+}, fY = {
 	key: 0,
 	class: "tvoice-device-workspace"
-}, gY = {
+}, pY = {
 	key: 0,
 	class: "tv-notice error",
 	role: "alert"
-}, _Y = {
+}, mY = {
 	key: 1,
 	class: "tvoice-settings-overview"
-}, vY = {
+}, hY = {
 	class: "tset-subsection-nav tvoice-workspace-tabs",
 	"aria-label": "Satellite settings sections"
-}, yY = ["aria-current", "onClick"], bY = {
+}, gY = ["aria-current", "onClick"], _Y = {
 	key: 2,
 	class: "tm-form-card tvoice-room-controls"
-}, xY = {
+}, vY = {
 	key: 0,
 	class: "tvoice-volume"
-}, SY = [
+}, yY = [
 	"min",
 	"max",
 	"step",
 	"disabled"
-], CY = {
+], bY = {
 	key: 2,
 	class: "tvoice-workspace-identify"
-}, wY = ["disabled"], TY = {
+}, xY = ["disabled"], SY = {
 	key: 4,
 	class: "tv-notice"
-}, EY = {
+}, CY = {
 	key: 5,
 	class: "tvoice-workspace-display"
-}, DY = {
+}, wY = {
 	key: 0,
 	class: "tvoice-settings-block tvoice-display-photos"
-}, OY = {
+}, TY = {
 	key: 0,
 	class: "tvoice-display-photo-grid"
-}, kY = ["src"], AY = ["disabled", "onClick"], jY = {
+}, EY = ["src"], DY = ["disabled", "onClick"], OY = {
 	key: 1,
 	class: "tvoice-display-photo-default"
-}, MY = ["disabled"], NY = { key: 1 }, PY = {
+}, kY = ["disabled"], AY = { key: 1 }, jY = {
 	key: 0,
 	class: "tv-notice warning"
-}, FY = {
+}, MY = {
 	key: 2,
 	class: "tv-notice"
-}, IY = {
+}, NY = {
 	key: 6,
 	class: "tvoice-workspace-info"
-}, LY = { class: "tm-form-card" }, RY = {
+}, PY = { class: "tm-form-card" }, FY = {
 	key: 0,
 	class: "tm-detail-list"
-}, zY = { class: "tvoice-info-sections" }, BY = {
+}, IY = { class: "tvoice-info-sections" }, LY = {
 	key: 0,
 	class: "tvoice-sensors"
-}, VY = { class: "tm-metrics" }, HY = { class: "tm-inline-actions tvoice-item-actions" }, UY = ["disabled"], WY = ["disabled"], GY = ["disabled"], KY = {
+}, RY = { class: "tm-metrics" }, zY = { class: "tm-inline-actions tvoice-item-actions" }, BY = ["disabled"], VY = ["disabled"], HY = ["disabled"], UY = {
 	class: "tv-modal tvoice-pairing-modal",
 	role: "dialog",
 	"aria-modal": "true",
 	"aria-labelledby": "tvoice-pairing-title"
-}, qY = { key: 0 }, JY = { key: 1 }, YY = { key: 2 }, XY = ["value"], ZY = ["href"], QY = ["disabled"], $Y = /* @__PURE__ */ fr({
+}, WY = { key: 0 }, GY = { key: 1 }, KY = { key: 2 }, qY = ["value"], JY = ["href"], YY = ["disabled"], XY = /* @__PURE__ */ fr({
 	__name: "VoiceSatellites",
 	props: {
 		payload: {},
@@ -25421,7 +25382,7 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 	},
 	emits: ["refresh", "notify"],
 	setup(e, { expose: t, emit: n }) {
-		let r = e, i = n, a = /* @__PURE__ */ Dt({}), o = /* @__PURE__ */ Dt({}), s = /* @__PURE__ */ Dt({}), c = /* @__PURE__ */ Dt({}), l = /* @__PURE__ */ Dt({}), u = /* @__PURE__ */ Dt({}), d = /* @__PURE__ */ Dt({}), f = /* @__PURE__ */ H(""), p = /* @__PURE__ */ H(""), m = /* @__PURE__ */ H(null), h = /* @__PURE__ */ H(!1), g = /* @__PURE__ */ H(0), _ = /* @__PURE__ */ H(""), v = /* @__PURE__ */ H("room"), y = null, b = Q(() => VK(r.payload, "satellite")), x = Q(() => b.value.filter((e) => !!e.connected).length), S = Q(() => b.value.find((e) => I(e) === _.value) || null), C = Q(() => S.value ? te(S.value) : null), w = Q(() => S.value ? ne(S.value) : []), T = Q(() => w.value.filter((e) => ZJ(e) === v.value)), E = Q(() => S.value ? fe(S.value) : !1), D = Q(() => {
+		let r = e, i = n, a = /* @__PURE__ */ Dt({}), o = /* @__PURE__ */ Dt({}), s = /* @__PURE__ */ Dt({}), c = /* @__PURE__ */ Dt({}), l = /* @__PURE__ */ Dt({}), u = /* @__PURE__ */ Dt({}), d = /* @__PURE__ */ Dt({}), f = /* @__PURE__ */ H(""), p = /* @__PURE__ */ H(""), m = /* @__PURE__ */ H(null), h = /* @__PURE__ */ H(!1), g = /* @__PURE__ */ H(0), _ = /* @__PURE__ */ H(""), v = /* @__PURE__ */ H("room"), y = null, b = Q(() => RK(r.payload, "satellite")), x = Q(() => b.value.filter((e) => !!e.connected).length), S = Q(() => b.value.find((e) => I(e) === _.value) || null), C = Q(() => S.value ? te(S.value) : null), w = Q(() => S.value ? ne(S.value) : []), T = Q(() => w.value.filter((e) => JJ(e) === v.value)), E = Q(() => S.value ? fe(S.value) : !1), D = Q(() => {
 			let e = S.value?.summary_rows;
 			return Array.isArray(e) ? e.slice(0, 4) : [];
 		}), O = Q(() => r.payload.ui && typeof r.payload.ui == "object" ? r.payload.ui : {}), k = Q(() => O.value.native_pairing && typeof O.value.native_pairing == "object" ? O.value.native_pairing : {}), A = Q(() => {
@@ -25504,9 +25465,9 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 			b.value.forEach((t) => {
 				let n = I(t);
 				if (!n) return;
-				e.add(n), l[n] || (a[n] = HK(Array.isArray(t.fields) ? t.fields : [])), u[n] || (o[n] = HK(Array.isArray(t.popup_fields) ? t.popup_fields : [])), l[`${n}:volume`] || (c[n] = Number(t.volume_control?.value ?? 80));
+				e.add(n), l[n] || (a[n] = zK(Array.isArray(t.fields) ? t.fields : [])), u[n] || (o[n] = zK(Array.isArray(t.popup_fields) ? t.popup_fields : [])), l[`${n}:volume`] || (c[n] = Number(t.volume_control?.value ?? 80));
 				let r = te(t);
-				r && !d[n] && (s[n] = HK(Array.isArray(r.fields) ? r.fields : []));
+				r && !d[n] && (s[n] = zK(Array.isArray(r.fields) ? r.fields : []));
 			}), [
 				a,
 				o,
@@ -25523,7 +25484,7 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 			if (!e || f.value) return null;
 			f.value = n, p.value = "";
 			try {
-				let n = await GK(r.actionEndpoint, e, t);
+				let n = await HK(r.actionEndpoint, e, t);
 				return i("notify", String(n.message || a), "success"), o && i("refresh"), n;
 			} catch (e) {
 				return p.value = e instanceof Error ? e.message : a, i("notify", p.value, "error"), null;
@@ -25560,7 +25521,7 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 		function pe(e, t) {
 			let n = S.value;
 			if (!n) return;
-			let r = XJ(Array.isArray(n.popup_fields) ? n.popup_fields : [], e, t);
+			let r = qJ(Array.isArray(n.popup_fields) ? n.popup_fields : [], e, t);
 			Object.entries(r).forEach(([e, t]) => oe(o, u, n, e, t));
 		}
 		function me(e, t) {
@@ -25667,7 +25628,7 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 		async function Ee() {
 			let e = String(m.value?.pairing_id || m.value?.id || "");
 			if (e) try {
-				let t = await GK(r.actionEndpoint, String(k.value.status_action || "voice_native_satellite_pairing_status"), {
+				let t = await HK(r.actionEndpoint, String(k.value.status_action || "voice_native_satellite_pairing_status"), {
 					pairing_id: e,
 					id: e
 				});
@@ -25691,9 +25652,9 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 		return Nn(() => r.payload, ae, {
 			deep: !0,
 			immediate: !0
-		}), Fr(Oe), t({ hasUnsavedChanges: () => b.value.some(fe) }), (t, n) => (K(), q("section", QJ, [
-			p.value && !S.value ? (K(), q("div", $J, B(p.value), 1)) : Z("", !0),
-			J("article", eY, [J("header", null, [n[10] ||= J("div", null, [
+		}), Fr(Oe), t({ hasUnsavedChanges: () => b.value.some(fe) }), (t, n) => (K(), q("section", YJ, [
+			p.value && !S.value ? (K(), q("div", XJ, B(p.value), 1)) : Z("", !0),
+			J("article", ZJ, [J("header", null, [n[10] ||= J("div", null, [
 				J("span", { class: "tv-eyebrow" }, "Tater Native"),
 				J("h3", null, "Add a satellite"),
 				J("p", null, "Pair official Tater hardware with a secure, short-lived setup code.")
@@ -25702,7 +25663,7 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 				type: "button",
 				disabled: !!f.value,
 				onClick: Te
-			}, B(f.value === "pairing" ? "Creating…" : M.value === "waiting" && N.value > 0 ? "View pairing code" : "Add Satellite"), 9, tY)]), n[11] ||= J("div", {
+			}, B(f.value === "pairing" ? "Creating…" : M.value === "waiting" && N.value > 0 ? "View pairing code" : "Add Satellite"), 9, QJ)]), n[11] ||= J("div", {
 				class: "tvoice-pairing-steps",
 				"aria-label": "Satellite pairing steps"
 			}, [
@@ -25710,23 +25671,23 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 				J("span", null, [J("b", null, "2"), X("Enter the code on the satellite")]),
 				J("span", null, [J("b", null, "3"), X("Tater connects it automatically")])
 			], -1)]),
-			b.value.length ? (K(), q("div", nY, [J("div", null, [n[12] ||= J("h3", null, "Satellite devices", -1), J("p", null, B(x.value) + " connected · " + B(b.value.length) + " known. Open Device settings for room, playback, and device controls.", 1)]), n[13] ||= J("span", { class: "tvoice-network-state" }, [J("i"), X("Live")], -1)])) : Z("", !0),
-			J("div", rY, [(K(!0), q(G, null, W(b.value, (e) => (K(), q("article", {
+			b.value.length ? (K(), q("div", $J, [J("div", null, [n[12] ||= J("h3", null, "Satellite devices", -1), J("p", null, B(x.value) + " connected · " + B(b.value.length) + " known. Open Device settings for room, playback, and device controls.", 1)]), n[13] ||= J("span", { class: "tvoice-network-state" }, [J("i"), X("Live")], -1)])) : Z("", !0),
+			J("div", eY, [(K(!0), q(G, null, W(b.value, (e) => (K(), q("article", {
 				key: I(e),
 				class: "tm-form-card tvoice-satellite-card"
-			}, [J("header", iY, [J("div", aY, [e.hero_image_src ? (K(), q("img", {
+			}, [J("header", tY, [J("div", nY, [e.hero_image_src ? (K(), q("img", {
 				key: 0,
 				src: String(e.hero_image_src),
 				alt: String(e.hero_image_alt || e.title)
-			}, null, 8, oY)) : Z("", !0), J("div", null, [
+			}, null, 8, rY)) : Z("", !0), J("div", null, [
 				J("h3", null, B(e.title || I(e)), 1),
 				J("p", null, B(e.subtitle), 1),
-				Array.isArray(e.hero_badges) ? (K(), q("div", sY, [(K(!0), q(G, null, W(e.hero_badges, (e) => (K(), q("span", {
+				Array.isArray(e.hero_badges) ? (K(), q("div", iY, [(K(!0), q(G, null, W(e.hero_badges, (e) => (K(), q("span", {
 					key: String(e.label),
 					class: z(`tone-${e.tone || "muted"}`)
 				}, B(e.label), 3))), 128))])) : Z("", !0),
-				fe(e) ? (K(), q("span", cY, "Unsaved changes")) : Z("", !0)
-			])]), J("div", lY, [J("span", {
+				fe(e) ? (K(), q("span", aY, "Unsaved changes")) : Z("", !0)
+			])]), J("div", oY, [J("span", {
 				class: z(["tv-live-pill tvoice-connection-pill", {
 					offline: !e.connected,
 					degraded: e.connected && e.connection_degraded
@@ -25735,7 +25696,7 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 				"aria-label": String(e.connection_note || (e.connected ? "Connected by Wi-Fi." : "Satellite is offline."))
 			}, [
 				n[16] ||= J("i", null, null, -1),
-				e.connected && e.connection_transport === "ethernet" ? (K(), q("svg", dY, [...n[14] ||= [J("path", { d: "M6 8V5a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v3M3 8h18v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8Zm5 4v3m4-3v3m4-3v3" }, null, -1)]])) : e.connected ? (K(), q("svg", fY, [...n[15] ||= [J("path", { d: "M4.5 10.5a11 11 0 0 1 15 0M7.5 13.5a6.7 6.7 0 0 1 9 0M10.5 16.5a2.4 2.4 0 0 1 3 0" }, null, -1), J("circle", {
+				e.connected && e.connection_transport === "ethernet" ? (K(), q("svg", cY, [...n[14] ||= [J("path", { d: "M6 8V5a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v3M3 8h18v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8Zm5 4v3m4-3v3m4-3v3" }, null, -1)]])) : e.connected ? (K(), q("svg", lY, [...n[15] ||= [J("path", { d: "M4.5 10.5a11 11 0 0 1 15 0M7.5 13.5a6.7 6.7 0 0 1 9 0M10.5 16.5a2.4 2.4 0 0 1 3 0" }, null, -1), J("circle", {
 					cx: "12",
 					cy: "19",
 					r: "1",
@@ -25743,14 +25704,14 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 					stroke: "none"
 				}, null, -1)]])) : Z("", !0),
 				X(" " + B(e.connected ? e.connection_degraded ? "Wi-Fi rescue" : "Connected" : "Offline"), 1)
-			], 10, uY), J("button", {
+			], 10, sY), J("button", {
 				class: "tv-button",
 				type: "button",
 				"aria-label": `Device settings for ${e.title || I(e)}`,
 				onClick: (t) => ue(e)
-			}, [n[17] ||= X("Device settings", -1), Y(Hc, { name: "chevron" })], 8, pY)])])]))), 128))]),
-			b.value.length ? Z("", !0) : (K(), q("div", mY, B(e.payload.empty_message || "No native satellites are connected yet."), 1)),
-			Y(UM, {
+			}, [n[17] ||= X("Device settings", -1), Y(Hc, { name: "chevron" })], 8, uY)])])]))), 128))]),
+			b.value.length ? Z("", !0) : (K(), q("div", dY, B(e.payload.empty_message || "No native satellites are connected yet."), 1)),
+			Y(BM, {
 				open: !!S.value,
 				title: String(S.value?.title || S.value?.settings_title || "Satellite settings"),
 				eyebrow: "Satellites · Device settings",
@@ -25770,19 +25731,19 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 					type: "button",
 					disabled: !!f.value || !E.value,
 					onClick: n[7] ||= (e) => S.value && he(S.value)
-				}, B(f.value ? "Saving…" : "Save device settings"), 9, GY)]),
-				default: En(() => [S.value ? (K(), q("div", hY, [
-					p.value ? (K(), q("div", gY, B(p.value), 1)) : Z("", !0),
-					D.value.length ? (K(), q("div", _Y, [J("dl", null, [(K(!0), q(G, null, W(D.value, (e) => (K(), q("div", { key: String(e.label) }, [J("dt", null, B(e.label), 1), J("dd", null, B(e.value || "—"), 1)]))), 128))])])) : Z("", !0),
-					J("nav", vY, [(K(!0), q(G, null, W(Ut(YJ), (e) => (K(), q("button", {
+				}, B(f.value ? "Saving…" : "Save device settings"), 9, HY)]),
+				default: En(() => [S.value ? (K(), q("div", fY, [
+					p.value ? (K(), q("div", pY, B(p.value), 1)) : Z("", !0),
+					D.value.length ? (K(), q("div", mY, [J("dl", null, [(K(!0), q(G, null, W(D.value, (e) => (K(), q("div", { key: String(e.label) }, [J("dt", null, B(e.label), 1), J("dd", null, B(e.value || "—"), 1)]))), 128))])])) : Z("", !0),
+					J("nav", hY, [(K(!0), q(G, null, W(Ut(KJ), (e) => (K(), q("button", {
 						key: e.id,
 						type: "button",
 						"aria-current": v.value === e.id ? "page" : void 0,
 						onClick: (t) => v.value = e.id
-					}, B(e.label), 9, yY))), 128))]),
-					v.value === "room" ? (K(), q("section", bY, [
+					}, B(e.label), 9, gY))), 128))]),
+					v.value === "room" ? (K(), q("section", _Y, [
 						n[22] ||= J("header", null, [J("h2", null, "Name, room and playback"), J("p", null, "Save the name and room on this satellite, and choose its playback level.")], -1),
-						S.value.volume_control && Object.keys(S.value.volume_control).length ? (K(), q("label", xY, [
+						S.value.volume_control && Object.keys(S.value.volume_control).length ? (K(), q("label", vY, [
 							J("span", null, [n[19] ||= J("strong", null, "Volume", -1), J("output", null, B(c[I(S.value)] ?? S.value.volume_control.value) + "%", 1)]),
 							U(J("input", {
 								"onUpdate:modelValue": n[0] ||= (e) => c[I(S.value)] = e,
@@ -25793,7 +25754,7 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 								disabled: !!f.value,
 								onInput: n[1] ||= (e) => l[`${I(S.value)}:volume`] = !0,
 								onChange: n[2] ||= (e) => ye(S.value)
-							}, null, 40, SY), [[
+							}, null, 40, yY), [[
 								$,
 								c[I(S.value)],
 								void 0,
@@ -25801,7 +25762,7 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 							]]),
 							n[20] ||= J("small", null, "Volume applies immediately.", -1)
 						])) : Z("", !0),
-						Array.isArray(S.value.fields) && S.value.fields.length ? (K(), va(tP, {
+						Array.isArray(S.value.fields) && S.value.fields.length ? (K(), va(QN, {
 							key: 1,
 							sections: R("Room settings", S.value.fields),
 							values: a[I(S.value)] || {},
@@ -25812,14 +25773,14 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 							"values",
 							"disabled"
 						])) : Z("", !0),
-						S.value.identify_action ? (K(), q("div", CY, [n[21] ||= J("div", null, [J("h3", null, "Identify this satellite"), J("p", null, "Locate the device in your room.")], -1), J("button", {
+						S.value.identify_action ? (K(), q("div", bY, [n[21] ||= J("div", null, [J("h3", null, "Identify this satellite"), J("p", null, "Locate the device in your room.")], -1), J("button", {
 							class: "tv-button",
 							type: "button",
 							disabled: !!f.value || !S.value.connected,
 							onClick: n[4] ||= (e) => be(S.value)
-						}, B(S.value.identify_label || "Identify"), 9, wY)])) : Z("", !0)
+						}, B(S.value.identify_label || "Identify"), 9, xY)])) : Z("", !0)
 					])) : Z("", !0),
-					T.value.length ? (K(), va(tP, {
+					T.value.length ? (K(), va(QN, {
 						key: 3,
 						class: "tvoice-workspace-fields",
 						sections: T.value,
@@ -25831,31 +25792,31 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 						"values",
 						"disabled"
 					])) : Z("", !0),
-					v.value === "voice" && !T.value.length ? (K(), q("p", TY, "This device has no additional voice or lighting controls.")) : Z("", !0),
-					v.value === "display" ? (K(), q("div", EY, [
-						S.value.display_photos_supported ? (K(), q("section", DY, [
+					v.value === "voice" && !T.value.length ? (K(), q("p", SY, "This device has no additional voice or lighting controls.")) : Z("", !0),
+					v.value === "display" ? (K(), q("div", CY, [
+						S.value.display_photos_supported ? (K(), q("section", wY, [
 							n[24] ||= J("header", null, [J("span", { class: "tvoice-section-mark" }, "PIC"), J("div", null, [J("h3", null, "Home screen photos"), J("p", null, "With no uploads, Tater rotates seven built-in landscapes using the Photo Rotation setting above. After you add a photo, this satellite rotates only your photos; a single photo stays fixed.")])], -1),
-							L(S.value).length ? (K(), q("div", OY, [(K(!0), q(G, null, W(L(S.value), (e) => (K(), q("article", { key: String(e.id) }, [J("img", {
+							L(S.value).length ? (K(), q("div", TY, [(K(!0), q(G, null, W(L(S.value), (e) => (K(), q("article", { key: String(e.id) }, [J("img", {
 								src: String(e.url),
 								alt: "Uploaded satellite background"
-							}, null, 8, kY), J("button", {
+							}, null, 8, EY), J("button", {
 								type: "button",
 								disabled: !!f.value,
 								"aria-label": "Remove display photo",
 								onClick: (t) => ve(S.value, e)
-							}, "Remove", 8, AY)]))), 128))])) : (K(), q("div", jY, [...n[23] ||= [J("strong", null, "Seven Tater scenery photos are active", -1), J("span", null, "Mountains, forest, ocean, desert, meadow, waterfall, and night sky follow this satellite's rotation schedule.", -1)]])),
+							}, "Remove", 8, DY)]))), 128))])) : (K(), q("div", OY, [...n[23] ||= [J("strong", null, "Seven Tater scenery photos are active", -1), J("span", null, "Mountains, forest, ocean, desert, meadow, waterfall, and night sky follow this satellite's rotation schedule.", -1)]])),
 							J("label", { class: z(["tv-button tvoice-display-photo-upload", { disabled: !!f.value || L(S.value).length >= Number(S.value.display_photo_limit || 12) }]) }, [J("input", {
 								type: "file",
 								multiple: "",
 								accept: "image/jpeg,image/png,image/webp",
 								disabled: !!f.value || L(S.value).length >= Number(S.value.display_photo_limit || 12),
 								onChange: _e
-							}, null, 40, MY), X(B(f.value === `${I(S.value)}:photo-upload` ? "Uploading…" : "Add photos"), 1)], 2),
+							}, null, 40, kY), X(B(f.value === `${I(S.value)}:photo-upload` ? "Uploading…" : "Add photos"), 1)], 2),
 							J("small", null, B(L(S.value).length) + " / " + B(S.value.display_photo_limit || 12) + " custom photos", 1)
 						])) : Z("", !0),
-						C.value ? (K(), q("section", NY, [
+						C.value ? (K(), q("section", AY, [
 							J("header", null, [n[26] ||= J("span", { class: "tvoice-section-mark" }, "DSP", -1), J("div", null, [n[25] ||= J("h3", null, "Weather & climate", -1), J("p", null, B(C.value.detail || "Choose this satellite's thermostat, weather readings, and room-temperature sensors."), 1)])]),
-							Y(tP, {
+							Y(QN, {
 								sections: R("Display settings", Array.isArray(C.value.fields) ? C.value.fields : []),
 								values: s[I(S.value)] || {},
 								disabled: !!f.value || !j.value,
@@ -25865,34 +25826,34 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 								"values",
 								"disabled"
 							]),
-							j.value ? Z("", !0) : (K(), q("div", PY, B(e.payload.display_sensors?.message || "No compatible display integrations or sensors are available yet."), 1))
+							j.value ? Z("", !0) : (K(), q("div", jY, B(e.payload.display_sensors?.message || "No compatible display integrations or sensors are available yet."), 1))
 						])) : Z("", !0),
-						!T.value.length && !S.value.display_photos_supported && !C.value ? (K(), q("p", FY, "Display controls are not available for this satellite.")) : Z("", !0)
+						!T.value.length && !S.value.display_photos_supported && !C.value ? (K(), q("p", MY, "Display controls are not available for this satellite.")) : Z("", !0)
 					])) : Z("", !0),
-					v.value === "info" ? (K(), q("div", IY, [
-						J("section", LY, [
+					v.value === "info" ? (K(), q("div", NY, [
+						J("section", PY, [
 							n[27] ||= J("header", null, [J("h2", null, "Device information"), J("p", null, "Live identity, connection, diagnostics, and firmware details.")], -1),
-							Array.isArray(S.value.summary_rows) ? (K(), q("dl", RY, [(K(!0), q(G, null, W(S.value.summary_rows, (e) => (K(), q(G, { key: String(e.label) }, [J("dt", null, B(e.label), 1), J("dd", null, B(e.value || "—"), 1)], 64))), 128))])) : Z("", !0),
+							Array.isArray(S.value.summary_rows) ? (K(), q("dl", FY, [(K(!0), q(G, null, W(S.value.summary_rows, (e) => (K(), q(G, { key: String(e.label) }, [J("dt", null, B(e.label), 1), J("dd", null, B(e.value || "—"), 1)], 64))), 128))])) : Z("", !0),
 							(K(!0), q(G, null, W(S.value.detail_sections || [], (e) => (K(), q("section", {
 								key: String(e.title),
 								class: "tvoice-device-overview"
 							}, [J("header", null, [J("span", null, B(e.title), 1)]), J("dl", null, [(K(!0), q(G, null, W(e.rows || [], (e) => (K(), q("div", { key: String(e.label) }, [J("dt", null, B(e.label), 1), J("dd", null, B(e.value || "—"), 1)]))), 128))])]))), 128)),
-							J("div", zY, [(K(!0), q(G, null, W(re(S.value), (e) => (K(), q("section", { key: String(e.title) }, [J("h3", null, B(e.title), 1), J("dl", null, [(K(!0), q(G, null, W(e.rows || [], (e) => (K(), q("div", { key: String(e.label) }, [J("dt", null, B(e.label), 1), J("dd", null, B(e.value || "—"), 1)]))), 128))])]))), 128))])
+							J("div", IY, [(K(!0), q(G, null, W(re(S.value), (e) => (K(), q("section", { key: String(e.title) }, [J("h3", null, B(e.title), 1), J("dl", null, [(K(!0), q(G, null, W(e.rows || [], (e) => (K(), q("div", { key: String(e.label) }, [J("dt", null, B(e.label), 1), J("dd", null, B(e.value || "—"), 1)]))), 128))])]))), 128))])
 						]),
-						Array.isArray(S.value.sensor_rows) && S.value.sensor_rows.length ? (K(), q("div", BY, [J("h3", null, B(S.value.sensor_title || "Live entities"), 1), J("div", VY, [(K(!0), q(G, null, W(S.value.sensor_rows, (e) => (K(), q("article", { key: String(e.key) }, [J("span", null, B(e.label), 1), J("strong", null, B(e.value || "—"), 1)]))), 128))])])) : Z("", !0),
-						J("div", HY, [ee(S.value) ? (K(), q("button", {
+						Array.isArray(S.value.sensor_rows) && S.value.sensor_rows.length ? (K(), q("div", LY, [J("h3", null, B(S.value.sensor_title || "Live entities"), 1), J("div", RY, [(K(!0), q(G, null, W(S.value.sensor_rows, (e) => (K(), q("article", { key: String(e.key) }, [J("span", null, B(e.label), 1), J("strong", null, B(e.value || "—"), 1)]))), 128))])])) : Z("", !0),
+						J("div", zY, [ee(S.value) ? (K(), q("button", {
 							key: 0,
 							class: "tv-button",
 							type: "button",
 							disabled: !!f.value,
 							onClick: n[5] ||= (e) => xe(S.value)
-						}, B(f.value === `${I(S.value)}:run` ? "Working…" : S.value.run_label || "Run"), 9, UY)) : Z("", !0), S.value.remove_action ? (K(), q("button", {
+						}, B(f.value === `${I(S.value)}:run` ? "Working…" : S.value.run_label || "Run"), 9, BY)) : Z("", !0), S.value.remove_action ? (K(), q("button", {
 							key: 1,
 							class: "tv-button danger",
 							type: "button",
 							disabled: !!f.value,
 							onClick: n[6] ||= (e) => Se(S.value)
-						}, B(S.value.remove_label || "Forget"), 9, WY)) : Z("", !0)])
+						}, B(S.value.remove_label || "Forget"), 9, VY)) : Z("", !0)])
 					])) : Z("", !0)
 				])) : Z("", !0)]),
 				_: 1
@@ -25906,7 +25867,7 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 				"backdrop-class": "tv-modal-backdrop tset-modal",
 				onClose: n[9] ||= (e) => h.value = !1
 			}, {
-				default: En(() => [J("section", KY, [
+				default: En(() => [J("section", UY, [
 					J("header", null, [n[29] ||= J("div", null, [
 						J("span", { class: "tv-eyebrow" }, "Secure satellite pairing"),
 						J("h2", { id: "tvoice-pairing-title" }, "Connect a Tater satellite"),
@@ -25919,12 +25880,12 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 					J("div", { class: z(["tvoice-pairing-code", `state-${M.value}`]) }, [
 						J("span", null, B(F.value), 1),
 						J("strong", null, B(m.value?.pairing_code || m.value?.display_code || m.value?.code || "—"), 1),
-						M.value === "waiting" ? (K(), q("small", qY, "Expires in " + B(ie(N.value)), 1)) : M.value === "paired" ? (K(), q("small", JY, "The satellite is paired and ready to appear in this list.")) : (K(), q("small", YY, "Create a fresh code to continue.")),
+						M.value === "waiting" ? (K(), q("small", WY, "Expires in " + B(ie(N.value)), 1)) : M.value === "paired" ? (K(), q("small", GY, "The satellite is paired and ready to appear in this list.")) : (K(), q("small", KY, "Create a fresh code to continue.")),
 						M.value === "waiting" ? (K(), q("progress", {
 							key: 3,
 							value: P.value,
 							max: "100"
-						}, null, 8, XY)) : Z("", !0)
+						}, null, 8, qY)) : Z("", !0)
 					], 2),
 					n[30] ||= J("ol", { class: "tvoice-pairing-guide" }, [
 						J("li", null, [J("b", null, "Open setup on the satellite."), J("span", null, "Connect the satellite to power and continue until it asks for a Tater pairing code.")]),
@@ -25937,28 +25898,28 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 						href: String(m.value.pairing_url || m.value.url),
 						target: "_blank",
 						rel: "noreferrer"
-					}, "Open setup page ↗", 8, ZY)) : Z("", !0),
+					}, "Open setup page ↗", 8, JY)) : Z("", !0),
 					J("footer", null, [J("span", null, B(M.value === "waiting" ? "Checking for your satellite…" : F.value), 1), J("button", {
 						class: "tv-button primary",
 						type: "button",
 						disabled: !!f.value,
 						onClick: we
-					}, B(f.value === "pairing" ? "Creating…" : "Create new code"), 9, QY)])
+					}, B(f.value === "pairing" ? "Creating…" : "Create new code"), 9, YY)])
 				])]),
 				_: 1
 			}, 8, ["open"])
 		]));
 	}
-}), eX = { class: "tm-stack tvoice-stats" }, tX = {
+}), ZY = { class: "tm-stack tvoice-stats" }, QY = {
 	key: 0,
 	class: "tv-notice error"
-}, nX = { class: "tm-form-card tvoice-subhero tvoice-stats-hero" }, rX = { class: "tvoice-subhero-metrics" }, iX = { class: "tm-card-grid tvoice-stat-sections" }, aX = { class: "tvoice-card-identity" }, oX = { class: "tvoice-card-mark" }, sX = { class: "tm-metrics tvoice-metric-grid" }, cX = { class: "tm-table-wrap" }, lX = { key: 0 }, uX = ["colspan"], dX = {
+}, $Y = { class: "tm-form-card tvoice-subhero tvoice-stats-hero" }, eX = { class: "tvoice-subhero-metrics" }, tX = { class: "tm-card-grid tvoice-stat-sections" }, nX = { class: "tvoice-card-identity" }, rX = { class: "tvoice-card-mark" }, iX = { class: "tm-metrics tvoice-metric-grid" }, aX = { class: "tm-table-wrap" }, oX = { key: 0 }, sX = ["colspan"], cX = {
 	key: 1,
 	class: "tv-notice"
-}, fX = {
+}, lX = {
 	key: 2,
 	class: "tset-save-bar tvoice-save-bar"
-}, pX = ["disabled"], mX = /* @__PURE__ */ fr({
+}, uX = ["disabled"], dX = /* @__PURE__ */ fr({
 	__name: "VoiceStats",
 	props: {
 		payload: {},
@@ -25971,7 +25932,7 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 			if (!(i.value || !c.value.reset_action) && window.confirm(String(c.value.reset_confirm || "Reset all stored voice statistics?"))) {
 				i.value = !0, a.value = "";
 				try {
-					let e = await GK(n.actionEndpoint, String(c.value.reset_action || "voice_statistics_reset"), { id: c.value.id });
+					let e = await HK(n.actionEndpoint, String(c.value.reset_action || "voice_statistics_reset"), { id: c.value.id });
 					r("notify", String(e.message || "Voice statistics reset."), "success"), r("refresh");
 				} catch (e) {
 					a.value = e instanceof Error ? e.message : "Voice statistics could not be reset.", r("notify", a.value, "error");
@@ -25980,43 +25941,43 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 				}
 			}
 		}
-		return (e, t) => (K(), q("section", eX, [
-			a.value ? (K(), q("div", tX, B(a.value), 1)) : Z("", !0),
-			J("section", nX, [t[2] ||= J("div", null, [
+		return (e, t) => (K(), q("section", ZY, [
+			a.value ? (K(), q("div", QY, B(a.value), 1)) : Z("", !0),
+			J("section", $Y, [t[2] ||= J("div", null, [
 				J("span", { class: "tv-eyebrow" }, "Live voice health"),
 				J("h3", null, "See how every conversation performs"),
 				J("p", null, "Quality, latency, backend fallbacks, and device outcomes update automatically while this tab is open.")
-			], -1), J("div", rX, [J("span", null, [J("b", null, B(l.value), 1), t[0] ||= X("Live signals", -1)]), J("span", null, [J("b", null, B(u.value), 1), t[1] ||= X("Device rows", -1)])])]),
-			J("div", iX, [(K(!0), q(G, null, W(o.value, (e, n) => (K(), q("article", {
+			], -1), J("div", eX, [J("span", null, [J("b", null, B(l.value), 1), t[0] ||= X("Live signals", -1)]), J("span", null, [J("b", null, B(u.value), 1), t[1] ||= X("Device rows", -1)])])]),
+			J("div", tX, [(K(!0), q(G, null, W(o.value, (e, n) => (K(), q("article", {
 				key: String(e.title),
 				class: "tm-form-card tvoice-stat-card"
-			}, [J("header", null, [J("div", aX, [J("span", oX, B(n + 1), 1), J("div", null, [t[3] ||= J("span", { class: "tv-eyebrow" }, "Live measurements", -1), J("h3", null, B(e.title), 1)])]), J("span", null, B((e.metrics || []).length) + " signals", 1)]), J("div", sX, [(K(!0), q(G, null, W(e.metrics || [], (e) => (K(), q("article", { key: String(e.label) }, [J("span", null, B(e.label), 1), J("strong", null, B(e.value), 1)]))), 128))])]))), 128))]),
+			}, [J("header", null, [J("div", nX, [J("span", rX, B(n + 1), 1), J("div", null, [t[3] ||= J("span", { class: "tv-eyebrow" }, "Live measurements", -1), J("h3", null, B(e.title), 1)])]), J("span", null, B((e.metrics || []).length) + " signals", 1)]), J("div", iX, [(K(!0), q(G, null, W(e.metrics || [], (e) => (K(), q("article", { key: String(e.label) }, [J("span", null, B(e.label), 1), J("strong", null, B(e.value), 1)]))), 128))])]))), 128))]),
 			(K(!0), q(G, null, W(s.value, (e) => (K(), q("article", {
 				key: String(e.title),
 				class: "tm-form-card tvoice-stats-table"
-			}, [J("header", null, [J("div", null, [t[4] ||= J("span", { class: "tv-eyebrow" }, "Per-satellite detail", -1), J("h3", null, B(e.title), 1)]), J("span", null, B((e.rows || []).length) + " rows", 1)]), J("div", cX, [J("table", null, [J("thead", null, [J("tr", null, [(K(!0), q(G, null, W(e.columns || [], (e) => (K(), q("th", { key: String(e.key) }, B(e.label || e.key), 1))), 128))])]), J("tbody", null, [(K(!0), q(G, null, W(e.rows || [], (t, n) => (K(), q("tr", { key: n }, [(K(!0), q(G, null, W(e.columns || [], (e) => (K(), q("td", { key: String(e.key) }, B(t[String(e.key)] ?? "—"), 1))), 128))]))), 128)), (e.rows || []).length ? Z("", !0) : (K(), q("tr", lX, [J("td", { colspan: Math.max(1, (e.columns || []).length) }, B(e.empty_message || "No measurements yet."), 9, uX)]))])])])]))), 128)),
-			!o.value.length && !s.value.length ? (K(), q("div", dX, "No voice statistics are available yet.")) : Z("", !0),
-			c.value.reset_action ? (K(), q("footer", fX, [J("div", null, [t[5] ||= J("strong", null, "Statistics update automatically", -1), J("span", null, B(c.value.description), 1)]), J("button", {
+			}, [J("header", null, [J("div", null, [t[4] ||= J("span", { class: "tv-eyebrow" }, "Per-satellite detail", -1), J("h3", null, B(e.title), 1)]), J("span", null, B((e.rows || []).length) + " rows", 1)]), J("div", aX, [J("table", null, [J("thead", null, [J("tr", null, [(K(!0), q(G, null, W(e.columns || [], (e) => (K(), q("th", { key: String(e.key) }, B(e.label || e.key), 1))), 128))])]), J("tbody", null, [(K(!0), q(G, null, W(e.rows || [], (t, n) => (K(), q("tr", { key: n }, [(K(!0), q(G, null, W(e.columns || [], (e) => (K(), q("td", { key: String(e.key) }, B(t[String(e.key)] ?? "—"), 1))), 128))]))), 128)), (e.rows || []).length ? Z("", !0) : (K(), q("tr", oX, [J("td", { colspan: Math.max(1, (e.columns || []).length) }, B(e.empty_message || "No measurements yet."), 9, sX)]))])])])]))), 128)),
+			!o.value.length && !s.value.length ? (K(), q("div", cX, "No voice statistics are available yet.")) : Z("", !0),
+			c.value.reset_action ? (K(), q("footer", lX, [J("div", null, [t[5] ||= J("strong", null, "Statistics update automatically", -1), J("span", null, B(c.value.description), 1)]), J("button", {
 				class: "tv-button danger",
 				type: "button",
 				disabled: i.value,
 				onClick: d
-			}, B(i.value ? "Resetting…" : c.value.reset_label || "Reset Voice Statistics"), 9, pX)])) : Z("", !0)
+			}, B(i.value ? "Resetting…" : c.value.reset_label || "Reset Voice Statistics"), 9, uX)])) : Z("", !0)
 		]));
 	}
-}), hX = { class: "tm-stack tvoice-stereo" }, gX = {
+}), fX = { class: "tm-stack tvoice-stereo" }, pX = {
 	key: 0,
 	class: "tv-notice error"
-}, _X = { class: "tm-form-card tvoice-subhero tvoice-stereo-hero" }, vX = { class: "tvoice-subhero-metrics" }, yX = { class: "tvoice-pair-head" }, bX = { class: "tvoice-card-identity" }, xX = { class: "tvoice-card-mark" }, SX = { class: "tv-eyebrow" }, CX = {
+}, mX = { class: "tm-form-card tvoice-subhero tvoice-stereo-hero" }, hX = { class: "tvoice-subhero-metrics" }, gX = { class: "tvoice-pair-head" }, _X = { class: "tvoice-card-identity" }, vX = { class: "tvoice-card-mark" }, yX = { class: "tv-eyebrow" }, bX = {
 	key: 0,
 	class: "tm-detail-list tvoice-pair-summary"
-}, wX = { class: "tm-inline-actions tvoice-item-actions" }, TX = ["disabled", "onClick"], EX = ["disabled", "onClick"], DX = {
+}, xX = { class: "tm-inline-actions tvoice-item-actions" }, SX = ["disabled", "onClick"], CX = ["disabled", "onClick"], wX = {
 	key: 1,
 	class: "tm-unsaved-label"
-}, OX = {
+}, TX = {
 	key: 1,
 	class: "tv-notice"
-}, kX = /* @__PURE__ */ fr({
+}, EX = /* @__PURE__ */ fr({
 	__name: "VoiceStereo",
 	props: {
 		payload: {},
@@ -26024,7 +25985,7 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 	},
 	emits: ["refresh", "notify"],
 	setup(e, { emit: t }) {
-		let n = e, r = t, i = /* @__PURE__ */ Dt({}), a = /* @__PURE__ */ Dt({}), o = /* @__PURE__ */ H(""), s = /* @__PURE__ */ H(""), c = Q(() => VK(n.payload).filter((e) => ["stereo_pair", "stereo_pair_create"].includes(String(e.group || "")))), l = Q(() => c.value.filter((e) => String(e.group || "") === "stereo_pair")), u = Q(() => l.value.filter((e) => !!e.connected).length);
+		let n = e, r = t, i = /* @__PURE__ */ Dt({}), a = /* @__PURE__ */ Dt({}), o = /* @__PURE__ */ H(""), s = /* @__PURE__ */ H(""), c = Q(() => RK(n.payload).filter((e) => ["stereo_pair", "stereo_pair_create"].includes(String(e.group || "")))), l = Q(() => c.value.filter((e) => String(e.group || "") === "stereo_pair")), u = Q(() => l.value.filter((e) => !!e.connected).length);
 		function d(e) {
 			return String(e.id || e.title || "pair");
 		}
@@ -26038,7 +25999,7 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 			let e = /* @__PURE__ */ new Set();
 			c.value.forEach((t) => {
 				let n = d(t);
-				e.add(n), a[n] || (i[n] = HK(Array.isArray(t.fields) ? t.fields : []));
+				e.add(n), a[n] || (i[n] = zK(Array.isArray(t.fields) ? t.fields : []));
 			}), Object.keys(i).forEach((t) => {
 				e.has(t) || (delete i[t], delete a[t]);
 			});
@@ -26052,7 +26013,7 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 			if (!o.value) {
 				o.value = t, s.value = "";
 				try {
-					let o = e.group === "stereo_pair_create" ? "" : String(e.id || ""), s = await GK(n.actionEndpoint, String(e.save_action || "voice_stereo_pair_save"), {
+					let o = e.group === "stereo_pair_create" ? "" : String(e.id || ""), s = await HK(n.actionEndpoint, String(e.save_action || "voice_stereo_pair_save"), {
 						id: o,
 						selector: o,
 						values: { ...i[t] || {} }
@@ -26070,7 +26031,7 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 			let t = d(e);
 			o.value = t;
 			try {
-				let t = await GK(n.actionEndpoint, String(e.remove_action), {
+				let t = await HK(n.actionEndpoint, String(e.remove_action), {
 					id: e.id,
 					selector: e.id
 				});
@@ -26084,24 +26045,24 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 		return Nn(() => n.payload, p, {
 			deep: !0,
 			immediate: !0
-		}), (e, t) => (K(), q("section", hX, [
-			s.value ? (K(), q("div", gX, B(s.value), 1)) : Z("", !0),
-			J("section", _X, [t[2] ||= J("div", null, [
+		}), (e, t) => (K(), q("section", fX, [
+			s.value ? (K(), q("div", pX, B(s.value), 1)) : Z("", !0),
+			J("section", mX, [t[2] ||= J("div", null, [
 				J("span", { class: "tv-eyebrow" }, "Room-filling playback"),
 				J("h3", null, "Build synchronized stereo rooms"),
 				J("p", null, "Pair two compatible satellites as left and right speakers while keeping each device available for normal voice turns.")
-			], -1), J("div", vX, [J("span", null, [J("b", null, B(l.value.length), 1), t[0] ||= X("Saved pairs", -1)]), J("span", null, [J("b", null, B(u.value), 1), t[1] ||= X("Ready now", -1)])])]),
+			], -1), J("div", hX, [J("span", null, [J("b", null, B(l.value.length), 1), t[0] ||= X("Saved pairs", -1)]), J("span", null, [J("b", null, B(u.value), 1), t[1] ||= X("Ready now", -1)])])]),
 			(K(!0), q(G, null, W(c.value, (e) => (K(), q("article", {
 				key: d(e),
 				class: z(["tm-form-card tvoice-pair-card", { "is-new": e.group === "stereo_pair_create" }])
 			}, [
-				J("header", yX, [J("div", bX, [J("span", xX, B(e.group === "stereo_pair_create" ? "+" : "2X"), 1), J("div", null, [
-					J("span", SX, B(e.group === "stereo_pair_create" ? "Create a room" : "Stereo destination"), 1),
+				J("header", gX, [J("div", _X, [J("span", vX, B(e.group === "stereo_pair_create" ? "+" : "2X"), 1), J("div", null, [
+					J("span", yX, B(e.group === "stereo_pair_create" ? "Create a room" : "Stereo destination"), 1),
 					J("h3", null, B(e.title || "Stereo Pair"), 1),
 					J("p", null, [X(B(e.subtitle), 1), e.detail ? (K(), q(G, { key: 0 }, [X(" · " + B(e.detail), 1)], 64)) : Z("", !0)])
 				])]), J("span", { class: z(["tv-live-pill", { warning: e.group !== "stereo_pair_create" && !e.connected }]) }, [t[3] ||= J("i", null, null, -1), X(B(e.group === "stereo_pair_create" ? "New pair" : e.connected ? "Ready" : "Unavailable"), 1)], 2)]),
-				Array.isArray(e.summary_rows) && e.summary_rows.length ? (K(), q("dl", CX, [(K(!0), q(G, null, W(e.summary_rows, (e) => (K(), q(G, { key: String(e.label) }, [J("dt", null, B(e.label), 1), J("dd", null, B(e.value || "—"), 1)], 64))), 128))])) : Z("", !0),
-				Y(tP, {
+				Array.isArray(e.summary_rows) && e.summary_rows.length ? (K(), q("dl", bX, [(K(!0), q(G, null, W(e.summary_rows, (e) => (K(), q(G, { key: String(e.label) }, [J("dt", null, B(e.label), 1), J("dd", null, B(e.value || "—"), 1)], 64))), 128))])) : Z("", !0),
+				Y(QN, {
 					sections: f(e),
 					values: i[d(e)] || {},
 					disabled: !!o.value,
@@ -26112,47 +26073,47 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 					"disabled",
 					"onChange"
 				]),
-				J("div", wX, [
+				J("div", xX, [
 					J("button", {
 						class: "tv-button primary",
 						type: "button",
 						disabled: !!o.value,
 						onClick: (t) => h(e)
-					}, B(o.value === d(e) ? "Saving…" : e.save_label || "Save Pair"), 9, TX),
+					}, B(o.value === d(e) ? "Saving…" : e.save_label || "Save Pair"), 9, SX),
 					e.remove_action ? (K(), q("button", {
 						key: 0,
 						class: "tv-button danger",
 						type: "button",
 						disabled: !!o.value,
 						onClick: (t) => g(e)
-					}, B(e.remove_label || "Delete Pair"), 9, EX)) : Z("", !0),
-					a[d(e)] ? (K(), q("span", DX, "Unsaved changes")) : Z("", !0)
+					}, B(e.remove_label || "Delete Pair"), 9, CX)) : Z("", !0),
+					a[d(e)] ? (K(), q("span", wX, "Unsaved changes")) : Z("", !0)
 				])
 			], 2))), 128)),
-			c.value.length ? Z("", !0) : (K(), q("div", OX, "No stereo-pair configuration is available."))
+			c.value.length ? Z("", !0) : (K(), q("div", TX, "No stereo-pair configuration is available."))
 		]));
 	}
-}), AX = { class: "tset-resource tvoice-resource" }, jX = {
+}), DX = { class: "tset-resource tvoice-resource" }, OX = {
 	key: 0,
 	class: "tv-panel tvoice-hero"
-}, MX = {
+}, kX = {
 	key: 1,
 	class: "tv-tabs tvoice-tabs",
 	"aria-label": "Satellite settings sections"
-}, NX = ["onClick"], PX = {
+}, AX = ["onClick"], jX = {
 	key: 2,
 	class: "tset-context"
-}, FX = {
+}, MX = {
 	key: 3,
 	class: "tv-notice error",
 	"aria-live": "polite"
-}, IX = {
+}, NX = {
 	key: 4,
 	class: "tv-notice"
-}, LX = {
+}, PX = {
 	key: 12,
 	class: "tset-runtime-details"
-}, RX = { class: "tm-metrics tvoice-metrics" }, zX = /* @__PURE__ */ fr({
+}, FX = { class: "tm-metrics tvoice-metrics" }, IX = /* @__PURE__ */ fr({
 	__name: "VoiceSettings",
 	props: {
 		runtimeEndpoint: {},
@@ -26236,8 +26197,8 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 			}, 1e4);
 		}), Fr(() => {
 			m !== null && window.clearInterval(m), h += 1;
-		}), (t, n) => (K(), q("section", AX, [
-			e.embedded ? Z("", !0) : (K(), q("section", jX, [n[7] ||= J("div", { class: "tvoice-hero-copy" }, [
+		}), (t, n) => (K(), q("section", DX, [
+			e.embedded ? Z("", !0) : (K(), q("section", OX, [n[7] ||= J("div", { class: "tvoice-hero-copy" }, [
 				J("span", { class: "tv-eyebrow" }, "Tater satellite control center"),
 				J("h2", null, "Your voice hardware, in one friendly workspace"),
 				J("p", null, "Pair satellites, keep firmware current, build stereo rooms, and tune Tater’s live voice pipeline without leaving Settings.")
@@ -26246,16 +26207,16 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 				J("i"),
 				J("i")
 			], -1), J("div", null, [J("strong", null, B(d.value ? "Refreshing devices" : `${g.value.label} ready`), 1), J("small", null, B(f.value ? "Runtime needs attention" : "Live satellite state"), 1)])], 2)])),
-			e.embedded ? Z("", !0) : (K(), q("nav", MX, [(K(), q(G, null, W(a, (e) => J("button", {
+			e.embedded ? Z("", !0) : (K(), q("nav", kX, [(K(), q(G, null, W(a, (e) => J("button", {
 				key: e.id,
 				type: "button",
 				class: z({ active: c.value === e.id }),
 				onClick: (t) => b(e.id)
-			}, B(e.label), 11, NX)), 64))])),
-			e.embedded ? Z("", !0) : (K(), q("div", PX, [J("span", null, B(g.value.label), 1), J("p", null, B(g.value.description), 1)])),
-			f.value ? (K(), q("div", FX, B(f.value), 1)) : Z("", !0),
-			u.value ? (K(), q("div", IX, "Loading " + B(g.value.label) + "…", 1)) : Z("", !0),
-			c.value === "satellites" && !u.value ? (K(), va($Y, {
+			}, B(e.label), 11, AX)), 64))])),
+			e.embedded ? Z("", !0) : (K(), q("div", jX, [J("span", null, B(g.value.label), 1), J("p", null, B(g.value.description), 1)])),
+			f.value ? (K(), q("div", MX, B(f.value), 1)) : Z("", !0),
+			u.value ? (K(), q("div", NX, "Loading " + B(g.value.label) + "…", 1)) : Z("", !0),
+			c.value === "satellites" && !u.value ? (K(), va(XY, {
 				key: 5,
 				ref_key: "satellitePanel",
 				ref: p,
@@ -26263,70 +26224,70 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 				"action-endpoint": e.actionEndpoint,
 				onRefresh: n[0] ||= (e) => y(!0),
 				onNotify: x
-			}, null, 8, ["payload", "action-endpoint"])) : c.value === "bluetooth" && !u.value ? (K(), va(JJ, {
+			}, null, 8, ["payload", "action-endpoint"])) : c.value === "bluetooth" && !u.value ? (K(), va(GJ, {
 				key: 6,
 				endpoint: e.bluetoothEndpoint,
 				onNotify: x
-			}, null, 8, ["endpoint"])) : c.value === "firmware" && !u.value ? (K(), va(Rq, {
+			}, null, 8, ["endpoint"])) : c.value === "firmware" && !u.value ? (K(), va(Fq, {
 				key: 7,
 				payload: l.value,
 				"action-endpoint": e.actionEndpoint,
 				onRefresh: n[1] ||= (e) => y(!0),
 				onNotify: x
-			}, null, 8, ["payload", "action-endpoint"])) : c.value === "stereo" && !u.value ? (K(), va(kX, {
+			}, null, 8, ["payload", "action-endpoint"])) : c.value === "stereo" && !u.value ? (K(), va(EX, {
 				key: 8,
 				payload: l.value,
 				"action-endpoint": e.actionEndpoint,
 				onRefresh: n[2] ||= (e) => y(!0),
 				onNotify: x
-			}, null, 8, ["payload", "action-endpoint"])) : c.value === "airplay" && !u.value ? (K(), va(lJ, {
+			}, null, 8, ["payload", "action-endpoint"])) : c.value === "airplay" && !u.value ? (K(), va(oJ, {
 				key: 9,
 				payload: l.value,
 				"action-endpoint": e.actionEndpoint,
 				onRefresh: n[3] ||= (e) => y(!0),
 				onNotify: x
-			}, null, 8, ["payload", "action-endpoint"])) : c.value === "stats" && !u.value ? (K(), va(mX, {
+			}, null, 8, ["payload", "action-endpoint"])) : c.value === "stats" && !u.value ? (K(), va(dX, {
 				key: 10,
 				payload: l.value,
 				"action-endpoint": e.actionEndpoint,
 				onRefresh: n[4] ||= (e) => y(!0),
 				onNotify: x
-			}, null, 8, ["payload", "action-endpoint"])) : c.value === "platform" && !u.value ? (K(), va(OJ, {
+			}, null, 8, ["payload", "action-endpoint"])) : c.value === "platform" && !u.value ? (K(), va(TJ, {
 				key: 11,
 				payload: l.value,
 				"action-endpoint": e.actionEndpoint,
 				onRefresh: n[5] ||= (e) => y(!0),
 				onNotify: x
 			}, null, 8, ["payload", "action-endpoint"])) : Z("", !0),
-			_.value.length && c.value !== "stats" ? (K(), q("details", LX, [n[8] ||= J("summary", null, "Satellite runtime details", -1), J("div", RX, [(K(!0), q(G, null, W(_.value, (e) => (K(), q("article", { key: String(e.label) }, [J("span", null, B(e.label), 1), J("strong", null, B(e.value), 1)]))), 128))])])) : Z("", !0)
+			_.value.length && c.value !== "stats" ? (K(), q("details", PX, [n[8] ||= J("summary", null, "Satellite runtime details", -1), J("div", FX, [(K(!0), q(G, null, W(_.value, (e) => (K(), q("article", { key: String(e.label) }, [J("span", null, B(e.label), 1), J("strong", null, B(e.value), 1)]))), 128))])])) : Z("", !0)
 		]));
 	}
-}), BX = { class: "tater-vue-surface tset-settings" }, VX = { class: "tset-sidebar" }, HX = { class: "tset-sidebar-label" }, UX = {
+}), LX = { class: "tater-vue-surface tset-settings" }, RX = { class: "tset-sidebar" }, zX = { class: "tset-sidebar-label" }, BX = {
 	class: "tset-category-nav",
 	"aria-label": "Settings categories"
-}, WX = ["aria-current", "onClick"], GX = { class: "tset-service-summary" }, KX = {
+}, VX = ["aria-current", "onClick"], HX = { class: "tset-service-summary" }, UX = {
 	class: "tset-main",
 	"aria-label": "Settings content"
-}, qX = ["inert"], JX = { class: "tset-search" }, YX = {
+}, WX = ["inert"], GX = { class: "tset-search" }, KX = {
 	key: 0,
 	class: "tset-search-results",
 	"aria-label": "Settings search results"
-}, XX = { class: "tset-page-heading" }, ZX = { role: "status" }, QX = {
+}, qX = { class: "tset-page-heading" }, JX = { role: "status" }, YX = {
 	key: 0,
 	class: "tset-result-list"
-}, $X = ["onClick"], eZ = {
+}, XX = ["onClick"], ZX = {
 	key: 1,
 	class: "tv-empty"
-}, tZ = { class: "tset-page-content" }, nZ = { class: "tset-page-heading" }, rZ = ["aria-label"], iZ = [
+}, QX = { class: "tset-page-content" }, $X = { class: "tset-page-heading" }, eZ = ["aria-label"], tZ = [
 	"aria-current",
 	"data-settings-vue-tab",
 	"onClick"
-], aZ = ["aria-label"], oZ = ["aria-current", "onClick"], sZ = {
+], nZ = ["aria-label"], rZ = ["aria-current", "onClick"], iZ = {
 	class: "tv-modal tset-unsaved-dialog",
 	role: "dialog",
 	"aria-modal": "true",
 	"aria-labelledby": "tset-unsaved-title"
-}, cZ = /* @__PURE__ */ fr({
+}, aZ = /* @__PURE__ */ fr({
 	__name: "SettingsApp",
 	props: {
 		state: {},
@@ -26404,32 +26365,32 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 		function F(e, t = "success") {
 			n.options.onToast?.(e, t);
 		}
-		return t({ select: (e, t = "") => C(e, !1, t) }), (t, n) => (K(), q("div", BX, [
-			J("aside", VX, [
+		return t({ select: (e, t = "") => C(e, !1, t) }), (t, n) => (K(), q("div", LX, [
+			J("aside", RX, [
 				e.options.onExitSettings ? (K(), q("button", {
 					key: 0,
 					class: "tset-back",
 					type: "button",
 					onClick: n[0] ||= (t) => e.options.onExitSettings()
 				}, [Y(Cc, { name: "back" }), X("Back to " + B(e.state.general.tater_first_name || "Tater"), 1)])) : Z("", !0),
-				J("div", HX, "Your " + B(e.state.general.tater_first_name || "Tater"), 1),
-				J("nav", UX, [(K(!0), q(G, null, W(Ut(oD), (e) => (K(), q("button", {
+				J("div", zX, "Your " + B(e.state.general.tater_first_name || "Tater"), 1),
+				J("nav", BX, [(K(!0), q(G, null, W(Ut(oD), (e) => (K(), q("button", {
 					key: e.id,
 					type: "button",
 					"aria-current": o.value.id === e.id ? "page" : void 0,
 					onClick: (t) => w(e.id)
-				}, [Y(Cc, { name: e.icon }, null, 8, ["name"]), J("span", null, B(e.label), 1)], 8, WX))), 128))]),
-				J("div", GX, [J("button", {
+				}, [Y(Cc, { name: e.icon }, null, 8, ["name"]), J("span", null, B(e.label), 1)], 8, VX))), 128))]),
+				J("div", HX, [J("button", {
 					type: "button",
 					class: z({ warning: !p.value.redisConnected }),
 					onClick: n[1] ||= (e) => b(Ut(cD)("redis"))
 				}, [Y(Cc, { name: "check" }), X(B(p.value.redisConnected ? "Services connected" : "Redis needs attention"), 1)], 2), n[10] ||= J("span", null, "Diagnostics live in System", -1)])
 			]),
-			J("section", KX, [U(J("div", {
+			J("section", UX, [U(J("div", {
 				inert: !!Ut(y),
 				class: "tset-workspace-origin"
 			}, [
-				J("label", JX, [
+				J("label", GX, [
 					Y(Cc, { name: "search" }),
 					U(J("input", {
 						"onUpdate:modelValue": n[2] ||= (e) => d.value = e,
@@ -26445,13 +26406,13 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 						onClick: n[3] ||= (e) => d.value = ""
 					}, "×")) : Z("", !0)
 				]),
-				d.value.trim() ? (K(), q("section", YX, [J("header", XX, [n[11] ||= J("h1", null, "Search settings", -1), J("p", ZX, B(f.value.length) + " " + B(f.value.length === 1 ? "result" : "results") + " for “" + B(d.value.trim()) + "”", 1)]), f.value.length ? (K(), q("div", QX, [(K(!0), q(G, null, W(f.value, (e) => (K(), q("button", {
+				d.value.trim() ? (K(), q("section", KX, [J("header", qX, [n[11] ||= J("h1", null, "Search settings", -1), J("p", JX, B(f.value.length) + " " + B(f.value.length === 1 ? "result" : "results") + " for “" + B(d.value.trim()) + "”", 1)]), f.value.length ? (K(), q("div", YX, [(K(!0), q(G, null, W(f.value, (e) => (K(), q("button", {
 					key: e.id,
 					type: "button",
 					onClick: (t) => b(e)
-				}, [J("span", null, [J("strong", null, B(e.label), 1), J("small", null, B(Ut(oD).find((t) => t.id === e.category)?.label) + " · " + B(e.description), 1)]), Y(Cc, { name: "chevron" })], 8, $X))), 128))])) : (K(), q("p", eZ, "Try a setting name such as “wake word,” “password,” “Hydra,” or “Redis.”"))])) : Z("", !0),
-				U(J("div", tZ, [
-					J("header", nZ, [J("h1", null, B(o.value.label), 1), J("p", null, B(o.value.description), 1)]),
+				}, [J("span", null, [J("strong", null, B(e.label), 1), J("small", null, B(Ut(oD).find((t) => t.id === e.category)?.label) + " · " + B(e.description), 1)]), Y(Cc, { name: "chevron" })], 8, XX))), 128))])) : (K(), q("p", ZX, "Try a setting name such as “wake word,” “password,” “Hydra,” or “Redis.”"))])) : Z("", !0),
+				U(J("div", QX, [
+					J("header", $X, [J("h1", null, B(o.value.label), 1), J("p", null, B(o.value.description), 1)]),
 					c.value.length > 1 ? (K(), q("nav", {
 						key: 0,
 						class: "tset-section-nav",
@@ -26462,7 +26423,7 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 						"aria-current": i.value.section === e.section ? "page" : void 0,
 						"data-settings-vue-tab": e.panel,
 						onClick: (t) => b(e)
-					}, B(e.sectionLabel), 9, iZ))), 128))], 8, rZ)) : Z("", !0),
+					}, B(e.sectionLabel), 9, tZ))), 128))], 8, eZ)) : Z("", !0),
 					l.value.length > 1 ? (K(), q("nav", {
 						key: 1,
 						class: "tset-subsection-nav",
@@ -26472,7 +26433,7 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 						type: "button",
 						"aria-current": i.value.id === e.id ? "page" : void 0,
 						onClick: (t) => b(e)
-					}, B(e.label), 9, oZ))), 128))], 8, aZ)) : Z("", !0),
+					}, B(e.label), 9, rZ))), 128))], 8, nZ)) : Z("", !0),
 					(K(), q("div", {
 						key: h.value,
 						class: "tset-active-panel"
@@ -26508,7 +26469,7 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 						"metrics-endpoint",
 						"data-endpoint",
 						"clear-data-endpoint"
-					])) : a.value === "models" ? (K(), va(oH, {
+					])) : a.value === "models" ? (K(), va(rH, {
 						key: 2,
 						ref_key: "activePanel",
 						ref: m,
@@ -26523,7 +26484,7 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 						"settings",
 						"endpoints",
 						"initial-tab"
-					])) : a.value === "people" ? (K(), va(_W, {
+					])) : a.value === "people" ? (K(), va(mW, {
 						key: 3,
 						payload: e.state.people,
 						endpoint: e.options.endpoints.people,
@@ -26540,7 +26501,7 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 						"action-endpoint",
 						"initial-tab",
 						"initial-sort"
-					])) : a.value === "spudhub" ? (K(), va(lK, {
+					])) : a.value === "spudhub" ? (K(), va(oK, {
 						key: 4,
 						ref_key: "activePanel",
 						ref: m,
@@ -26568,7 +26529,7 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 						"models-api-url",
 						"pair-api-url",
 						"initial-tab"
-					])) : a.value === "esphome" ? (K(), va(zX, {
+					])) : a.value === "esphome" ? (K(), va(IX, {
 						key: 5,
 						ref_key: "activePanel",
 						ref: m,
@@ -26584,7 +26545,7 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 						"action-endpoint",
 						"bluetooth-endpoint",
 						"initial-tab"
-					])) : a.value === "redis" ? (K(), va(tG, {
+					])) : a.value === "redis" ? (K(), va(QW, {
 						key: 6,
 						ref_key: "activePanel",
 						ref: m,
@@ -26632,7 +26593,7 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 						"clear-chat-endpoint",
 						"chat-api-url",
 						"models-api-url"
-					])) : a.value === "system" ? (K(), va(BK, {
+					])) : a.value === "system" ? (K(), va(LK, {
 						key: 9,
 						endpoint: e.options.endpoints.systemTasks,
 						"core-run-endpoint": e.options.endpoints.coreTaskRun,
@@ -26645,7 +26606,7 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 						onNotify: F
 					}, null, 8, ["endpoint", "initial-auto-scroll"])) : Z("", !0)]))
 				], 512), [[Po, !d.value.trim()]])
-			], 8, qX), [[Po, !Ut(y)]]), U(J("div", {
+			], 8, WX), [[Po, !Ut(y)]]), U(J("div", {
 				ref_key: "workspaceTarget",
 				ref: v,
 				class: "tset-workspace-host"
@@ -26655,7 +26616,7 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 				"backdrop-class": "tv-modal-backdrop tset-modal",
 				onClose: n[9] ||= (e) => g.value = null
 			}, {
-				default: En(() => [J("section", sZ, [J("header", null, [n[12] ||= J("h2", { id: "tset-unsaved-title" }, "Unsaved settings", -1), J("p", null, "Save your changes before moving to " + B(g.value?.page.label) + ". You can also discard them and continue.", 1)]), J("footer", null, [J("button", {
+				default: En(() => [J("section", iZ, [J("header", null, [n[12] ||= J("h2", { id: "tset-unsaved-title" }, "Unsaved settings", -1), J("p", null, "Save your changes before moving to " + B(g.value?.page.label) + ". You can also discard them and continue.", 1)]), J("footer", null, [J("button", {
 					class: "tv-button",
 					type: "button",
 					onClick: n[8] ||= (e) => g.value = null
@@ -26668,90 +26629,90 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 			}, 8, ["open"])
 		]));
 	}
-}), lZ = ["title", "aria-expanded"], uZ = {
+}), oZ = ["title", "aria-expanded"], sZ = {
 	key: 0,
 	class: "workspace-runtime-label"
-}, dZ = { class: "tr-pill-brand" }, fZ = { class: "tr-pill-copy" }, pZ = {
+}, cZ = { class: "tr-pill-brand" }, lZ = { class: "tr-pill-copy" }, uZ = {
 	key: 1,
 	class: "tr-pill-resources"
-}, mZ = { class: "tr-resource-track" }, hZ = { class: "tr-pill-end" }, gZ = ["aria-labelledby", "aria-describedby"], _Z = { class: "trc-header" }, vZ = { class: "trc-title" }, yZ = ["id"], bZ = ["id"], xZ = { class: "trc-header-actions" }, SZ = [
+}, dZ = { class: "tr-resource-track" }, fZ = { class: "tr-pill-end" }, pZ = ["aria-labelledby", "aria-describedby"], mZ = { class: "trc-header" }, hZ = { class: "trc-title" }, gZ = ["id"], _Z = ["id"], vZ = { class: "trc-header-actions" }, yZ = [
 	"id",
 	"data-runtime-tab",
 	"aria-selected",
 	"aria-controls",
 	"tabindex",
 	"onClick"
-], CZ = {
+], bZ = {
 	key: 0,
 	class: "trc-count"
-}, wZ = ["id", "aria-labelledby"], TZ = {
+}, xZ = ["id", "aria-labelledby"], SZ = {
 	key: 0,
 	class: "trc-notice error",
 	role: "alert"
-}, EZ = {
+}, CZ = {
 	key: 1,
 	class: "trc-empty",
 	role: "status"
-}, DZ = {
+}, wZ = {
 	key: 2,
 	class: "trc-overview"
-}, OZ = { class: "trc-ready-icon" }, kZ = { class: "trc-resources" }, AZ = { class: "trc-meter-heading" }, jZ = {
+}, TZ = { class: "trc-ready-icon" }, EZ = { class: "trc-resources" }, DZ = { class: "trc-meter-heading" }, OZ = {
 	class: "trc-track",
 	"aria-hidden": "true"
-}, MZ = {
+}, kZ = {
 	key: 0,
 	class: "trc-meter-details"
-}, NZ = { key: 1 }, PZ = { class: "trc-section-heading" }, FZ = { class: "trc-activity-summary" }, IZ = { class: "trc-section-heading" }, LZ = { class: "trc-count" }, RZ = {
+}, AZ = { key: 1 }, jZ = { class: "trc-section-heading" }, MZ = { class: "trc-activity-summary" }, NZ = { class: "trc-section-heading" }, PZ = { class: "trc-count" }, FZ = {
 	key: 0,
 	class: "trc-preview-models"
-}, zZ = { class: "trc-tag" }, BZ = {
+}, IZ = { class: "trc-tag" }, LZ = {
 	key: 1,
 	class: "trc-help"
-}, VZ = { class: "trc-section-heading" }, HZ = { class: "trc-help" }, UZ = {
+}, RZ = { class: "trc-section-heading" }, zZ = { class: "trc-help" }, BZ = {
 	key: 3,
 	class: "trc-activity-view"
-}, WZ = { class: "trc-view-heading" }, GZ = { class: "trc-work-group" }, KZ = { class: "trc-work-icon" }, qZ = {
+}, VZ = { class: "trc-view-heading" }, HZ = { class: "trc-work-group" }, UZ = { class: "trc-work-icon" }, WZ = {
 	key: 0,
 	class: "trc-work-list"
-}, JZ = { class: "trc-call-heading" }, YZ = { class: "trc-tag" }, XZ = { key: 0 }, ZZ = { key: 0 }, QZ = { key: 0 }, $Z = { key: 1 }, eQ = { class: "trc-work-details" }, tQ = { class: "trc-work-group" }, nQ = { class: "trc-work-icon" }, rQ = {
+}, GZ = { class: "trc-call-heading" }, KZ = { class: "trc-tag" }, qZ = { key: 0 }, JZ = { key: 0 }, YZ = { key: 0 }, XZ = { key: 1 }, ZZ = { class: "trc-work-details" }, QZ = { class: "trc-work-group" }, $Z = { class: "trc-work-icon" }, eQ = {
 	key: 0,
 	class: "trc-work-list"
-}, iQ = { class: "trc-call-heading" }, aQ = { class: "trc-tag" }, oQ = { class: "trc-work-details" }, sQ = { class: "trc-work-group" }, cQ = { class: "trc-work-icon" }, lQ = {
+}, tQ = { class: "trc-call-heading" }, nQ = { class: "trc-tag" }, rQ = { class: "trc-work-details" }, iQ = { class: "trc-work-group" }, aQ = { class: "trc-work-icon" }, oQ = {
 	key: 0,
 	class: "trc-work-list"
-}, uQ = { class: "trc-call-heading" }, dQ = { class: "trc-tag" }, fQ = { class: "trc-work-details" }, pQ = {
+}, sQ = { class: "trc-call-heading" }, cQ = { class: "trc-tag" }, lQ = { class: "trc-work-details" }, uQ = {
 	key: 4,
 	class: "trc-models-view"
-}, mQ = { class: "trc-view-heading" }, hQ = { class: "trc-count" }, gQ = { key: 0 }, _Q = { key: 0 }, vQ = { class: "trc-hardware-details" }, yQ = { key: 0 }, bQ = {
+}, dQ = { class: "trc-view-heading" }, fQ = { class: "trc-count" }, pQ = { key: 0 }, mQ = { key: 0 }, hQ = { class: "trc-hardware-details" }, gQ = { key: 0 }, _Q = {
 	class: "trc-track",
 	"aria-hidden": "true"
-}, xQ = {
+}, vQ = {
 	key: 0,
 	class: "trc-model-list"
-}, SQ = { class: "trc-model-copy" }, CQ = {
+}, yQ = { class: "trc-model-copy" }, bQ = {
 	key: 0,
 	class: "trc-warning"
-}, wQ = { class: "trc-model-technical" }, TQ = { class: "trc-model-action" }, EQ = [
+}, xQ = { class: "trc-model-technical" }, SQ = { class: "trc-model-action" }, CQ = [
 	"disabled",
 	"aria-label",
 	"onClick"
-], DQ = {
+], wQ = {
 	key: 1,
 	class: "trc-tag"
-}, OQ = {
+}, TQ = {
 	key: 1,
 	class: "trc-empty"
-}, kQ = {
+}, EQ = {
 	key: 5,
 	class: "trc-context-view"
-}, AQ = { class: "trc-view-heading" }, jQ = {
+}, DQ = { class: "trc-view-heading" }, OQ = {
 	key: 0,
 	class: "trc-warning",
 	role: "alert"
-}, MQ = { key: 1 }, NQ = { key: 2 }, PQ = { class: "trc-budget" }, FQ = { class: "trc-context-rows" }, IQ = {
+}, kQ = { key: 1 }, AQ = { key: 2 }, jQ = { class: "trc-budget" }, MQ = { class: "trc-context-rows" }, NQ = {
 	class: "trc-track",
 	"aria-hidden": "true"
-}, LQ = { class: "trc-context-details" }, RQ = { key: 0 }, zQ = { class: "trc-footer" }, BQ = { key: 0 }, VQ = /* @__PURE__ */ fr({
+}, PQ = { class: "trc-context-details" }, FQ = { key: 0 }, IQ = { class: "trc-footer" }, LQ = { key: 0 }, RQ = /* @__PURE__ */ fr({
 	__name: "RuntimeStatus",
 	props: {
 		state: {},
@@ -27126,18 +27087,18 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 			"aria-controls": _,
 			onClick: ot
 		}, [
-			e.compact ? (K(), q("span", uZ, [
+			e.compact ? (K(), q("span", sZ, [
 				n[3] ||= J("i", null, null, -1),
 				X(B(e.state.tone === "offline" ? "Backend offline" : e.state.tone === "degraded" ? "Needs attention" : M.value ? `${M.value} active operations` : e.state.health ? "System connected" : e.state.text || "Checking system…"), 1),
 				n[4] ||= J("span", { "aria-hidden": "true" }, "›", -1)
 			])) : Z("", !0),
-			J("span", dZ, [J("span", fZ, [J("strong", null, B(x.value), 1), J("small", null, B(j.value), 1)])]),
-			e.state.health ? (K(), q("span", pZ, [(K(!0), q(G, null, W(P.value, (e) => (K(), q("span", {
+			J("span", cZ, [J("span", lZ, [J("strong", null, B(x.value), 1), J("small", null, B(j.value), 1)])]),
+			e.state.health ? (K(), q("span", uZ, [(K(!0), q(G, null, W(P.value, (e) => (K(), q("span", {
 				key: e.label,
 				class: z(["tr-resource", { unavailable: e.unavailable }])
-			}, [J("span", null, [J("b", null, B(e.label), 1), J("em", null, B(e.value), 1)]), J("span", mZ, [J("i", { style: ne({ width: `${e.percent}%` }) }, null, 4)])], 2))), 128))])) : Z("", !0),
-			J("span", hZ, [J("span", null, [J("b", null, B(k.value), 1), n[5] ||= J("small", null, "models", -1)]), n[6] ||= J("i", null, "›", -1)])
-		], 10, lZ), Y(_f, {
+			}, [J("span", null, [J("b", null, B(e.label), 1), J("em", null, B(e.value), 1)]), J("span", dZ, [J("i", { style: ne({ width: `${e.percent}%` }) }, null, 4)])], 2))), 128))])) : Z("", !0),
+			J("span", fZ, [J("span", null, [J("b", null, B(k.value), 1), n[5] ||= J("small", null, "models", -1)]), n[6] ||= J("i", null, "›", -1)])
+		], 10, oZ), Y(_f, {
 			open: r.value,
 			"backdrop-class": "tv-modal-backdrop tr-backdrop",
 			onClose: st
@@ -27152,7 +27113,7 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 				"aria-labelledby": `${_}-title`,
 				"aria-describedby": `${_}-description`
 			}, [
-				J("header", _Z, [J("div", null, [J("div", vZ, [Y(Hc, { name: "activity" }), J("h2", { id: `${_}-title` }, "System monitor", 8, yZ)]), J("p", { id: `${_}-description` }, "A clear view of what " + B(me.value) + " is doing.", 9, bZ)]), J("div", xZ, [J("span", { class: z(["trc-live", `stream-${d.value}`]) }, [n[7] ||= J("i", null, null, -1), X(B(N.value), 1)], 2), J("button", {
+				J("header", mZ, [J("div", null, [J("div", hZ, [Y(Hc, { name: "activity" }), J("h2", { id: `${_}-title` }, "System monitor", 8, gZ)]), J("p", { id: `${_}-description` }, "A clear view of what " + B(me.value) + " is doing.", 9, _Z)]), J("div", vZ, [J("span", { class: z(["trc-live", `stream-${d.value}`]) }, [n[7] ||= J("i", null, null, -1), X(B(N.value), 1)], 2), J("button", {
 					ref_key: "closeButton",
 					ref: p,
 					class: "trc-icon-button",
@@ -27180,16 +27141,16 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 				}, [
 					Y(Hc, { name: e.icon }, null, 8, ["name"]),
 					J("span", null, B(e.label), 1),
-					e.meta ? (K(), q("small", CZ, B(e.meta), 1)) : Z("", !0)
-				], 40, SZ))), 128))], 512),
+					e.meta ? (K(), q("small", bZ, B(e.meta), 1)) : Z("", !0)
+				], 40, yZ))), 128))], 512),
 				J("div", {
 					id: `${_}-panel`,
 					class: "trc-content",
 					role: "tabpanel",
 					"aria-labelledby": `${_}-${f.value}`
-				}, [a.value ? (K(), q("p", TZ, B(a.value), 1)) : Z("", !0), !Object.keys(l.value).length && i.value ? (K(), q("div", EZ, "Loading runtime state…")) : f.value === "overview" ? (K(), q("section", DZ, [
+				}, [a.value ? (K(), q("p", SZ, B(a.value), 1)) : Z("", !0), !Object.keys(l.value).length && i.value ? (K(), q("div", CZ, "Loading runtime state…")) : f.value === "overview" ? (K(), q("section", wZ, [
 					J("article", { class: z(["trc-ready", he.value]) }, [
-						J("span", OZ, [Y(Hc, { name: he.value === "normal" ? pe.value || V(I.value.queued_total) ? "activity" : "check" : "alert" }, null, 8, ["name"])]),
+						J("span", TZ, [Y(Hc, { name: he.value === "normal" ? pe.value || V(I.value.queued_total) ? "activity" : "check" : "alert" }, null, 8, ["name"])]),
 						J("div", null, [J("h3", null, B(ge.value), 1), J("p", null, B(_e.value), 1)]),
 						J("button", {
 							class: "trc-button trc-ready-action",
@@ -27197,48 +27158,48 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 							onClick: n[0] ||= (e) => Ze("activity", !0)
 						}, "View details")
 					], 2),
-					J("div", kZ, [(K(!0), q(G, null, W(Je.value, (e) => (K(), q("article", {
+					J("div", EZ, [(K(!0), q(G, null, W(Je.value, (e) => (K(), q("article", {
 						key: e.label,
 						class: z(["trc-meter", { unavailable: e.unavailable }])
 					}, [
-						J("div", AZ, [J("strong", null, B(Ye(e.label)), 1), J("span", null, B(e.value), 1)]),
-						J("span", jZ, [J("i", { style: ne({ width: `${e.percent}%` }) }, null, 4)]),
-						e.detail ? (K(), q("details", MZ, [J("summary", null, B(Xe(e.label)), 1), J("p", null, B(e.detail), 1)])) : (K(), q("small", NZ, B(Xe(e.label)), 1))
+						J("div", DZ, [J("strong", null, B(Ye(e.label)), 1), J("span", null, B(e.value), 1)]),
+						J("span", OZ, [J("i", { style: ne({ width: `${e.percent}%` }) }, null, 4)]),
+						e.detail ? (K(), q("details", kZ, [J("summary", null, B(Xe(e.label)), 1), J("p", null, B(e.detail), 1)])) : (K(), q("small", AZ, B(Xe(e.label)), 1))
 					], 2))), 128))]),
-					J("section", null, [J("header", PZ, [n[9] ||= J("h3", null, "Current activity", -1), J("button", {
+					J("section", null, [J("header", jZ, [n[9] ||= J("h3", null, "Current activity", -1), J("button", {
 						class: "trc-link",
 						type: "button",
 						onClick: n[1] ||= (e) => Ze("activity", !0)
-					}, [n[8] ||= X("View activity ", -1), Y(Hc, { name: "chevron" })])]), J("div", FZ, [Y(Hc, { name: pe.value || V(I.value.queued_total) ? "activity" : "coffee" }, null, 8, ["name"]), J("div", null, [J("strong", null, B(be.value), 1), J("p", null, B(xe.value), 1)])])]),
-					J("section", null, [J("header", IZ, [J("h3", null, [n[10] ||= X("Loaded models ", -1), J("small", LZ, B(k.value), 1)]), J("button", {
+					}, [n[8] ||= X("View activity ", -1), Y(Hc, { name: "chevron" })])]), J("div", MZ, [Y(Hc, { name: pe.value || V(I.value.queued_total) ? "activity" : "coffee" }, null, 8, ["name"]), J("div", null, [J("strong", null, B(be.value), 1), J("p", null, B(xe.value), 1)])])]),
+					J("section", null, [J("header", NZ, [J("h3", null, [n[10] ||= X("Loaded models ", -1), J("small", PZ, B(k.value), 1)]), J("button", {
 						class: "trc-link",
 						type: "button",
 						onClick: n[2] ||= (e) => Ze("models", !0)
-					}, [n[11] ||= X("View all ", -1), Y(Hc, { name: "chevron" })])]), ye.value.length ? (K(), q("div", RZ, [(K(!0), q(G, null, W(ye.value, (e) => (K(), q("article", { key: e.cache_key || `${e.provider}:${e.model}` }, [
+					}, [n[11] ||= X("View all ", -1), Y(Hc, { name: "chevron" })])]), ye.value.length ? (K(), q("div", FZ, [(K(!0), q(G, null, W(ye.value, (e) => (K(), q("article", { key: e.cache_key || `${e.provider}:${e.model}` }, [
 						Y(Hc, { name: He(e) }, null, 8, ["name"]),
 						J("div", null, [J("strong", null, B(Ve(e)), 1), J("small", null, B(Be(e)[0] || e.kind_label || e.category || "Model"), 1)]),
-						J("span", zZ, B(e.remote ? "Spud Hub" : V(e.estimated_bytes) ? Fe(e.estimated_bytes) : "Loaded"), 1)
-					]))), 128))])) : (K(), q("p", BZ, B(k.value ? "Model details are not available yet." : "No runtime models are loaded right now."), 1))]),
-					J("section", null, [J("header", VZ, [n[12] ||= J("h3", null, "Connected services", -1), J("span", { class: z(["trc-connection-state", he.value]) }, [Y(Hc, { name: he.value === "normal" ? "check" : "alert" }, null, 8, ["name"]), X(B(he.value === "normal" ? "All connected" : he.value === "offline" ? "Backend offline" : "Needs attention"), 1)], 2)]), J("p", HZ, B(V(S.value.verbas_enabled)) + " Verba enabled · " + B(V(S.value.cores_running)) + " cores running · " + B(V(S.value.portals_running)) + " portals running", 1)])
-				])) : f.value === "activity" ? (K(), q("section", UZ, [
-					J("header", WZ, [n[13] ||= J("h3", null, "Current activity", -1), J("p", null, "What " + B(me.value) + " is working on right now.", 1)]),
-					J("section", GZ, [
+						J("span", IZ, B(e.remote ? "Spud Hub" : V(e.estimated_bytes) ? Fe(e.estimated_bytes) : "Loaded"), 1)
+					]))), 128))])) : (K(), q("p", LZ, B(k.value ? "Model details are not available yet." : "No runtime models are loaded right now."), 1))]),
+					J("section", null, [J("header", RZ, [n[12] ||= J("h3", null, "Connected services", -1), J("span", { class: z(["trc-connection-state", he.value]) }, [Y(Hc, { name: he.value === "normal" ? "check" : "alert" }, null, 8, ["name"]), X(B(he.value === "normal" ? "All connected" : he.value === "offline" ? "Backend offline" : "Needs attention"), 1)], 2)]), J("p", zZ, B(V(S.value.verbas_enabled)) + " Verba enabled · " + B(V(S.value.cores_running)) + " cores running · " + B(V(S.value.portals_running)) + " portals running", 1)])
+				])) : f.value === "activity" ? (K(), q("section", BZ, [
+					J("header", VZ, [n[13] ||= J("h3", null, "Current activity", -1), J("p", null, "What " + B(me.value) + " is working on right now.", 1)]),
+					J("section", HZ, [
 						J("header", null, [
-							J("span", KZ, [Y(Hc, { name: "activity" })]),
+							J("span", UZ, [Y(Hc, { name: "activity" })]),
 							J("div", null, [n[14] ||= J("h4", null, "Hydra tasks", -1), J("p", null, B(ce.value.length ? Me(ce.value.length, "active task") : "No active tasks"), 1)]),
 							J("span", { class: z(["trc-tag", { good: !ce.value.length }]) }, B(ce.value.length ? "Working" : "Ready"), 3)
 						]),
-						ce.value.length ? (K(), q("div", qZ, [(K(!0), q(G, null, W(ce.value, (e) => (K(), q("article", { key: e.id }, [
-							J("div", JZ, [J("strong", null, B(e.task_name || "Hydra task"), 1), J("span", YZ, "Running " + B(Le(e.age_seconds)), 1)]),
-							J("p", null, [X(B(e.platform_label || e.platform || "Unknown"), 1), e.source ? (K(), q("span", XZ, " · " + B(e.source), 1)) : Z("", !0)]),
-							e.current_tool ? (K(), q("p", ZZ, "Current Verba/tool: " + B(e.current_tool), 1)) : Z("", !0),
+						ce.value.length ? (K(), q("div", WZ, [(K(!0), q(G, null, W(ce.value, (e) => (K(), q("article", { key: e.id }, [
+							J("div", GZ, [J("strong", null, B(e.task_name || "Hydra task"), 1), J("span", KZ, "Running " + B(Le(e.age_seconds)), 1)]),
+							J("p", null, [X(B(e.platform_label || e.platform || "Unknown"), 1), e.source ? (K(), q("span", qZ, " · " + B(e.source), 1)) : Z("", !0)]),
+							e.current_tool ? (K(), q("p", JZ, "Current Verba/tool: " + B(e.current_tool), 1)) : Z("", !0),
 							J("details", null, [
 								n[15] ||= J("summary", null, "Task details", -1),
-								e.id ? (K(), q("p", QZ, "Turn " + B(e.id), 1)) : Z("", !0),
-								e.scope ? (K(), q("p", $Z, "Scope: " + B(e.scope), 1)) : Z("", !0)
+								e.id ? (K(), q("p", YZ, "Turn " + B(e.id), 1)) : Z("", !0),
+								e.scope ? (K(), q("p", XZ, "Scope: " + B(e.scope), 1)) : Z("", !0)
 							])
 						]))), 128))])) : Z("", !0),
-						J("details", eQ, [n[19] ||= J("summary", null, "Runtime details", -1), J("p", null, [
+						J("details", ZZ, [n[19] ||= J("summary", null, "Runtime details", -1), J("p", null, [
 							J("b", null, B(V(F.value.total)), 1),
 							n[16] ||= X(" total · ", -1),
 							J("b", null, B(V(F.value.webui_jobs)), 1),
@@ -27247,14 +27208,14 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 							n[18] ||= X(" surface turns", -1)
 						])])
 					]),
-					J("section", tQ, [
+					J("section", QZ, [
 						J("header", null, [
-							J("span", nQ, [Y(Hc, { name: "brain" })]),
+							J("span", $Z, [Y(Hc, { name: "brain" })]),
 							J("div", null, [n[20] ||= J("h4", null, "Language model calls", -1), J("p", null, B(V(I.value.running_total ?? I.value.active_total)) + " running · " + B(V(I.value.queued_total)) + " queued", 1)]),
 							J("span", { class: z(["trc-tag", { good: !V(I.value.running_total ?? I.value.active_total) && !V(I.value.queued_total) }]) }, B(V(I.value.running_total ?? I.value.active_total) ? "Working" : V(I.value.queued_total) ? "Queued" : "Ready"), 3)
 						]),
-						le.value.length ? (K(), q("div", rQ, [(K(!0), q(G, null, W(le.value, (e, t) => (K(), q("article", { key: e.id || t }, [J("div", iQ, [J("strong", null, B(e.source_label || e.label || "Unknown source"), 1), J("span", aQ, B(e.state_label || (Ae(e.state) === "queued" ? "Queued" : "Running")) + " " + B(Le(e.state_age_seconds ?? e.age_seconds)), 1)]), J("details", null, [n[21] ||= J("summary", null, "Call details", -1), J("p", null, B(Ke(e, "llm")), 1)])]))), 128))])) : Z("", !0),
-						J("details", oQ, [n[25] ||= J("summary", null, "Runtime details", -1), J("p", null, [
+						le.value.length ? (K(), q("div", eQ, [(K(!0), q(G, null, W(le.value, (e, t) => (K(), q("article", { key: e.id || t }, [J("div", tQ, [J("strong", null, B(e.source_label || e.label || "Unknown source"), 1), J("span", nQ, B(e.state_label || (Ae(e.state) === "queued" ? "Queued" : "Running")) + " " + B(Le(e.state_age_seconds ?? e.age_seconds)), 1)]), J("details", null, [n[21] ||= J("summary", null, "Call details", -1), J("p", null, B(Ke(e, "llm")), 1)])]))), 128))])) : Z("", !0),
+						J("details", rQ, [n[25] ||= J("summary", null, "Runtime details", -1), J("p", null, [
 							J("b", null, B(V(I.value.running_total ?? I.value.active_total)), 1),
 							n[22] ||= X(" running · ", -1),
 							J("b", null, B(V(I.value.queued_total)), 1),
@@ -27263,14 +27224,14 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 							n[24] ||= X(" completed", -1)
 						])])
 					]),
-					J("section", sQ, [
+					J("section", iQ, [
 						J("header", null, [
-							J("span", cQ, [Y(Hc, { name: "eye" })]),
+							J("span", aQ, [Y(Hc, { name: "eye" })]),
 							J("div", null, [n[26] ||= J("h4", null, "Vision calls", -1), J("p", null, B(V(L.value.active_total) ? Me(L.value.active_total, "active call") : "No active vision calls"), 1)]),
 							J("span", { class: z(["trc-tag", { good: !V(L.value.active_total) }]) }, B(V(L.value.active_total) ? "Working" : "Ready"), 3)
 						]),
-						ue.value.length ? (K(), q("div", lQ, [(K(!0), q(G, null, W(ue.value, (e, t) => (K(), q("article", { key: e.id || t }, [J("div", uQ, [J("strong", null, B(e.source_label || e.label || "Unknown source"), 1), J("span", dQ, "Running " + B(Le(e.age_seconds)), 1)]), J("details", null, [n[27] ||= J("summary", null, "Call details", -1), J("p", null, B(Ke(e, "vision")), 1)])]))), 128))])) : Z("", !0),
-						J("details", fQ, [n[31] ||= J("summary", null, "Runtime details", -1), J("p", null, [
+						ue.value.length ? (K(), q("div", oQ, [(K(!0), q(G, null, W(ue.value, (e, t) => (K(), q("article", { key: e.id || t }, [J("div", sQ, [J("strong", null, B(e.source_label || e.label || "Unknown source"), 1), J("span", cQ, "Running " + B(Le(e.age_seconds)), 1)]), J("details", null, [n[27] ||= J("summary", null, "Call details", -1), J("p", null, B(Ke(e, "vision")), 1)])]))), 128))])) : Z("", !0),
+						J("details", lQ, [n[31] ||= J("summary", null, "Runtime details", -1), J("p", null, [
 							J("b", null, B(V(L.value.active_total)), 1),
 							n[28] ||= X(" active · ", -1),
 							J("b", null, B(V(L.value.totals?.completed)), 1),
@@ -27279,43 +27240,43 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 							n[30] ||= X(" failed", -1)
 						])])
 					])
-				])) : f.value === "models" ? (K(), q("section", pQ, [
-					J("header", mQ, [J("h3", null, [n[32] ||= X("Loaded models ", -1), J("small", hQ, B(k.value), 1)]), Object.keys(ee.value).length ? (K(), q("p", gQ, [X(B(Me(ee.value.local_llm_loaded_count, "language model")) + " · " + B(Me(ee.value.managed_loaded_count, "managed service")), 1), V(fe.value.estimated_total_bytes) ? (K(), q("span", _Q, " · Estimated memory " + B(Fe(fe.value.estimated_total_bytes)), 1)) : Z("", !0)])) : Z("", !0)]),
-					J("details", vQ, [
+				])) : f.value === "models" ? (K(), q("section", uQ, [
+					J("header", dQ, [J("h3", null, [n[32] ||= X("Loaded models ", -1), J("small", fQ, B(k.value), 1)]), Object.keys(ee.value).length ? (K(), q("p", pQ, [X(B(Me(ee.value.local_llm_loaded_count, "language model")) + " · " + B(Me(ee.value.managed_loaded_count, "managed service")), 1), V(fe.value.estimated_total_bytes) ? (K(), q("span", mQ, " · Estimated memory " + B(Fe(fe.value.estimated_total_bytes)), 1)) : Z("", !0)])) : Z("", !0)]),
+					J("details", hQ, [
 						n[34] ||= J("summary", null, "Compute & memory details", -1),
 						J("p", null, B(Se.value), 1),
-						se.value.length ? (K(), q("section", yQ, [n[33] ||= J("h4", null, "GPU devices", -1), (K(!0), q(G, null, W(se.value, (e, t) => (K(), q("article", { key: e.index ?? t }, [
+						se.value.length ? (K(), q("section", gQ, [n[33] ||= J("h4", null, "GPU devices", -1), (K(!0), q(G, null, W(se.value, (e, t) => (K(), q("article", { key: e.index ?? t }, [
 							J("strong", null, B(e.name || `GPU ${e.index ?? ""}`), 1),
 							J("p", null, B(Ge(e)), 1),
-							J("span", bQ, [J("i", { style: ne({ width: `${Ne(e.utilization_percent) ?? 0}%` }) }, null, 4)])
+							J("span", _Q, [J("i", { style: ne({ width: `${Ne(e.utilization_percent) ?? 0}%` }) }, null, 4)])
 						]))), 128))])) : Z("", !0)
 					]),
-					oe.value.length ? (K(), q("div", xQ, [(K(!0), q(G, null, W(oe.value, (e) => (K(), q("article", {
+					oe.value.length ? (K(), q("div", vQ, [(K(!0), q(G, null, W(oe.value, (e) => (K(), q("article", {
 						key: e.cache_key || `${e.provider}:${e.model}`,
 						class: "trc-model-entry"
 					}, [
 						Y(Hc, { name: He(e) }, null, 8, ["name"]),
-						J("div", SQ, [
+						J("div", yQ, [
 							J("strong", null, B(Ve(e)), 1),
 							J("p", null, B(e.kind_label || e.category || "Model") + " · " + B(Ue(e)), 1),
-							e.warning ? (K(), q("p", CQ, B(e.warning), 1)) : Z("", !0),
-							J("details", null, [n[35] ||= J("summary", null, "Model details", -1), J("div", wQ, [
+							e.warning ? (K(), q("p", bQ, B(e.warning), 1)) : Z("", !0),
+							J("details", null, [n[35] ||= J("summary", null, "Model details", -1), J("div", xQ, [
 								J("code", null, B(e.model || "model"), 1),
 								J("p", null, B(ze(e)), 1),
 								(K(!0), q(G, null, W(Be(e), (e, t) => (K(), q("p", { key: t }, B(e), 1))), 128))
 							])])
 						]),
-						J("div", TQ, [e.unloadable && !e.managed ? (K(), q("button", {
+						J("div", SQ, [e.unloadable && !e.managed ? (K(), q("button", {
 							key: 0,
 							class: "trc-button",
 							type: "button",
 							disabled: !!v.value,
 							"aria-label": `Unload ${Ve(e)}`,
 							onClick: (t) => ct(e)
-						}, B(v.value === Ae(e.cache_key || e.model) ? "Unloading…" : "Unload"), 9, EQ)) : (K(), q("span", DQ, B(e.remote ? "Spud Hub" : e.managed ? "Managed" : "Loaded"), 1))])
-					]))), 128))])) : (K(), q("p", OQ, B(k.value ? "Model details are not available yet." : "No runtime models are loaded right now."), 1))
-				])) : (K(), q("section", kQ, [J("header", AQ, [n[36] ||= J("h3", null, "Chat context", -1), R.value.error ? (K(), q("p", jQ, B(R.value.error), 1)) : V(R.value.prompt_tokens) || V(R.value.minimum_context_window) ? (K(), q("p", MQ, "How much room your current chat needs.")) : (K(), q("p", NQ, "No estimate available yet. Send a chat message so Hydra can sample the active chat prompt stack."))]), !R.value.error && (V(R.value.prompt_tokens) || V(R.value.minimum_context_window)) ? (K(), q(G, { key: 0 }, [
-					J("div", PQ, [J("div", null, [
+						}, B(v.value === Ae(e.cache_key || e.model) ? "Unloading…" : "Unload"), 9, CQ)) : (K(), q("span", wQ, B(e.remote ? "Spud Hub" : e.managed ? "Managed" : "Loaded"), 1))])
+					]))), 128))])) : (K(), q("p", TQ, B(k.value ? "Model details are not available yet." : "No runtime models are loaded right now."), 1))
+				])) : (K(), q("section", EQ, [J("header", DQ, [n[36] ||= J("h3", null, "Chat context", -1), R.value.error ? (K(), q("p", OQ, B(R.value.error), 1)) : V(R.value.prompt_tokens) || V(R.value.minimum_context_window) ? (K(), q("p", kQ, "How much room your current chat needs.")) : (K(), q("p", AQ, "No estimate available yet. Send a chat message so Hydra can sample the active chat prompt stack."))]), !R.value.error && (V(R.value.prompt_tokens) || V(R.value.minimum_context_window)) ? (K(), q(G, { key: 0 }, [
+					J("div", jQ, [J("div", null, [
 						n[37] ||= J("span", null, "Current prompt", -1),
 						J("strong", null, B(je(R.value.prompt_tokens)), 1),
 						n[38] ||= J("small", null, "tokens in use", -1)
@@ -27325,38 +27286,38 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 						n[40] ||= J("small", null, "tokens for this workload", -1)
 					])]),
 					n[46] ||= J("header", { class: "trc-section-heading" }, [J("h4", null, "Prompt breakdown"), J("span", null, "Estimated")], -1),
-					J("div", FQ, [(K(!0), q(G, null, W(Ce.value.filter((e) => e.label !== "Capability reserve"), (e) => (K(), q("article", { key: e.label }, [J("div", null, [J("span", null, B(e.label), 1), J("b", null, B(je(e.tokens)) + " tokens", 1)]), J("span", IQ, [J("i", { style: ne({ width: `${We(e.tokens)}%` }) }, null, 4)])]))), 128))]),
-					J("details", LQ, [
+					J("div", MQ, [(K(!0), q(G, null, W(Ce.value.filter((e) => e.label !== "Capability reserve"), (e) => (K(), q("article", { key: e.label }, [J("div", null, [J("span", null, B(e.label), 1), J("b", null, B(je(e.tokens)) + " tokens", 1)]), J("span", NQ, [J("i", { style: ne({ width: `${We(e.tokens)}%` }) }, null, 4)])]))), 128))]),
+					J("details", PQ, [
 						n[45] ||= J("summary", null, "Budget & technical details", -1),
 						J("dl", null, [
 							J("div", null, [n[41] ||= J("dt", null, "Reply budget", -1), J("dd", null, B(je(R.value.completion_budget_tokens)) + " tokens", 1)]),
 							J("div", null, [n[42] ||= J("dt", null, "Minimum window", -1), J("dd", null, B(je(R.value.minimum_context_window)) + " tokens", 1)]),
-							Ce.value.some((e) => e.label === "Capability reserve") ? (K(), q("div", RQ, [n[43] ||= J("dt", null, "Capability reserve", -1), J("dd", null, B(je(Ce.value.find((e) => e.label === "Capability reserve")?.tokens)) + " tokens", 1)])) : Z("", !0),
+							Ce.value.some((e) => e.label === "Capability reserve") ? (K(), q("div", FQ, [n[43] ||= J("dt", null, "Capability reserve", -1), J("dd", null, B(je(Ce.value.find((e) => e.label === "Capability reserve")?.tokens)) + " tokens", 1)])) : Z("", !0),
 							J("div", null, [n[44] ||= J("dt", null, "Burst reserve", -1), J("dd", null, B(je(R.value.burst_context_reserve_tokens)) + " tokens", 1)])
 						]),
 						J("p", null, B(we.value), 1),
 						J("p", null, B(V(R.value.enabled_verbas)) + " Verba · " + B(V(R.value.connected_portals)) + " portals · " + B(V(R.value.running_cores)) + " cores", 1),
 						(K(!0), q(G, null, W(Te.value, (e) => (K(), q("p", { key: e }, B(e), 1))), 128))
 					])
-				], 64)) : Z("", !0)]))], 8, wZ),
-				J("footer", zQ, [J("span", null, [
+				], 64)) : Z("", !0)]))], 8, xZ),
+				J("footer", IQ, [J("span", null, [
 					Y(Hc, { name: "activity" }),
 					X(B(d.value === "live" ? "Live telemetry" : N.value), 1),
-					c.value || s.value ? (K(), q("span", BQ, " · Updated " + B(c.value || s.value), 1)) : Z("", !0)
+					c.value || s.value ? (K(), q("span", LQ, " · Updated " + B(c.value || s.value), 1)) : Z("", !0)
 				]), J("span", null, B(x.value), 1)])
-			], 8, gZ)]),
+			], 8, pZ)]),
 			_: 1
 		}, 8, ["open"])], 64));
 	}
-}), HQ = {
+}), zQ = {
 	class: "card webui-auth-card",
 	role: "dialog",
 	"aria-modal": "true",
 	"aria-label": "WebUI Login"
-}, UQ = { class: "webui-auth-avatar-wrap" }, WQ = ["src"], GQ = {
+}, BQ = { class: "webui-auth-avatar-wrap" }, VQ = ["src"], HQ = {
 	key: 1,
 	class: "webui-auth-avatar-fallback"
-}, KQ = { class: "card-title" }, qQ = { class: "small" }, JQ = ["autocomplete", "disabled"], YQ = { key: 0 }, XQ = ["disabled"], ZQ = ["disabled"], QQ = /* @__PURE__ */ fr({
+}, UQ = { class: "card-title" }, WQ = { class: "small" }, GQ = ["autocomplete", "disabled"], KQ = { key: 0 }, qQ = ["disabled"], JQ = ["disabled"], YQ = /* @__PURE__ */ fr({
 	__name: "AuthGate",
 	props: {
 		state: {},
@@ -27404,15 +27365,15 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 			"aria-hidden": "false",
 			"backdrop-class": "webui-auth-overlay active"
 		}, {
-			default: En(() => [J("div", HQ, [
-				J("div", UQ, [e.state.userAvatar ? (K(), q("img", {
+			default: En(() => [J("div", zQ, [
+				J("div", BQ, [e.state.userAvatar ? (K(), q("img", {
 					key: 0,
 					class: "webui-auth-avatar-img",
 					src: e.state.userAvatar,
 					alt: "User avatar"
-				}, null, 8, WQ)) : (K(), q("div", GQ, B(u.value), 1))]),
-				J("h3", KQ, B(c.value ? "Create WebUI Password" : "WebUI Login"), 1),
-				J("div", qQ, B(c.value ? `${l.value}, set a password to protect this WebUI.` : `${l.value}, enter your password to unlock TaterOS.`), 1),
+				}, null, 8, VQ)) : (K(), q("div", HQ, B(u.value), 1))]),
+				J("h3", UQ, B(c.value ? "Create WebUI Password" : "WebUI Login"), 1),
+				J("div", WQ, B(c.value ? `${l.value}, set a password to protect this WebUI.` : `${l.value}, enter your password to unlock TaterOS.`), 1),
 				J("form", {
 					class: "form-grid webui-auth-form",
 					onSubmit: Es(d, ["prevent"])
@@ -27423,92 +27384,92 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 						autocomplete: c.value ? "new-password" : "current-password",
 						disabled: o.value,
 						autofocus: ""
-					}, null, 8, JQ), [[$, i.value]])]),
-					c.value ? (K(), q("label", YQ, [n[3] ||= X("Repeat Password", -1), U(J("input", {
+					}, null, 8, GQ), [[$, i.value]])]),
+					c.value ? (K(), q("label", KQ, [n[3] ||= X("Repeat Password", -1), U(J("input", {
 						"onUpdate:modelValue": n[1] ||= (e) => a.value = e,
 						type: "password",
 						autocomplete: "new-password",
 						disabled: o.value
-					}, null, 8, XQ), [[$, a.value]])])) : Z("", !0),
+					}, null, 8, qQ), [[$, a.value]])])) : Z("", !0),
 					J("button", {
 						type: "submit",
 						class: "action-btn",
 						disabled: o.value
-					}, B(o.value ? "Checking…" : c.value ? "Save Password" : "Login"), 9, ZQ)
+					}, B(o.value ? "Checking…" : c.value ? "Save Password" : "Login"), 9, JQ)
 				], 32),
 				J("div", { class: z(["small", { error: !!s.value }]) }, B(s.value || e.state.message || (c.value ? "Create a password and repeat it to save." : "Enter your password to continue.")), 3)
 			])]),
 			_: 1
 		}, 8, ["open"]));
 	}
-}), $Q = { class: "tater-vue-surface tvb-verbas" }, e$ = { class: "tv-page-heading" }, t$ = { class: "tv-heading-actions" }, n$ = { class: "tv-metrics workspace-library-summary" }, r$ = {
+}), XQ = { class: "tater-vue-surface tvb-verbas" }, ZQ = { class: "tv-page-heading" }, QQ = { class: "tv-heading-actions" }, $Q = { class: "tv-metrics workspace-library-summary" }, e$ = {
 	key: 1,
 	class: "tv-notice error"
-}, i$ = {
+}, t$ = {
 	class: "tv-tabs tvb-tabs",
 	"aria-label": "Verba sections"
-}, a$ = ["onClick"], o$ = { key: 0 }, s$ = {
+}, n$ = ["onClick"], r$ = { key: 0 }, i$ = {
 	key: 3,
 	class: "tvb-card-grid"
-}, c$ = { class: "workspace-item-icon" }, l$ = { class: "tv-eyebrow" }, u$ = { class: "workspace-item-details" }, d$ = { class: "workspace-item-id" }, f$ = { class: "tvb-version" }, p$ = {
+}, a$ = { class: "workspace-item-icon" }, o$ = { class: "tv-eyebrow" }, s$ = { class: "workspace-item-details" }, c$ = { class: "workspace-item-id" }, l$ = { class: "tvb-version" }, u$ = {
 	key: 0,
 	class: "ti-tags"
-}, m$ = ["onClick"], h$ = { key: 1 }, g$ = ["onClick"], _$ = {
+}, d$ = ["onClick"], f$ = { key: 1 }, p$ = ["onClick"], m$ = {
 	key: 0,
 	class: "tv-empty"
-}, v$ = {
+}, h$ = {
 	key: 4,
 	class: "tvb-card-grid"
-}, y$ = { class: "workspace-item-icon" }, b$ = { class: "tv-eyebrow" }, x$ = { class: "tv-state" }, S$ = { class: "workspace-item-details" }, C$ = {
+}, g$ = { class: "workspace-item-icon" }, _$ = { class: "tv-eyebrow" }, v$ = { class: "tv-state" }, y$ = { class: "workspace-item-details" }, b$ = {
 	key: 0,
 	class: "ti-tags"
-}, w$ = ["onClick"], T$ = {
+}, x$ = ["onClick"], S$ = {
 	key: 0,
 	class: "tv-empty"
-}, E$ = {
+}, C$ = {
 	key: 5,
 	class: "tvb-manage-list tv-manage-workspace"
-}, D$ = { class: "tv-panel tvb-manage-toolbar tv-manage-hero" }, O$ = { class: "tv-manage-overview" }, k$ = ["disabled"], A$ = { class: "tv-manage-identity" }, j$ = { class: "tv-manage-monogram" }, M$ = { class: "tv-eyebrow" }, N$ = { class: "tv-manage-version" }, P$ = { class: "tv-manage-actions" }, F$ = ["disabled", "onClick"], I$ = ["onClick"], L$ = {
+}, w$ = { class: "tv-panel tvb-manage-toolbar tv-manage-hero" }, T$ = { class: "tv-manage-overview" }, E$ = ["disabled"], D$ = { class: "tv-manage-identity" }, O$ = { class: "tv-manage-monogram" }, k$ = { class: "tv-eyebrow" }, A$ = { class: "tv-manage-version" }, j$ = { class: "tv-manage-actions" }, M$ = ["disabled", "onClick"], N$ = ["onClick"], P$ = {
 	key: 2,
 	class: "ti-purge"
-}, R$ = ["onUpdate:modelValue"], z$ = ["onClick"], B$ = {
+}, F$ = ["onUpdate:modelValue"], I$ = ["onClick"], L$ = {
 	key: 4,
 	class: "tv-state good"
-}, V$ = {
+}, R$ = {
 	key: 0,
 	class: "tv-empty"
-}, H$ = {
+}, z$ = {
 	key: 6,
 	class: "tv-panel tvb-repos tv-repository-manager"
-}, U$ = {
+}, B$ = {
 	class: "tv-repository-tabs",
 	"aria-label": "Verba repository sources"
-}, W$ = {
+}, V$ = {
 	key: 0,
 	class: "tv-trusted-repositories"
-}, G$ = {
+}, H$ = {
 	key: 0,
 	class: "tv-repository-warning"
-}, K$ = { class: "tv-trusted-repo-grid" }, q$ = {
+}, U$ = { class: "tv-trusted-repo-grid" }, W$ = {
 	class: "tv-trusted-repo-card builtin selected",
 	"aria-label": "Built-in Tater Shop repository"
-}, J$ = { class: "tv-repo-card-top" }, Y$ = [
+}, G$ = { class: "tv-repo-card-top" }, K$ = [
 	"aria-pressed",
 	"onClick",
 	"onKeydown"
-], X$ = { class: "tv-repo-check" }, Z$ = { class: "tv-repo-card-top" }, Q$ = { class: "tv-repo-monogram" }, $$ = ["href"], e1 = { key: 1 }, t1 = {
+], q$ = { class: "tv-repo-check" }, J$ = { class: "tv-repo-card-top" }, Y$ = { class: "tv-repo-monogram" }, X$ = ["href"], Z$ = { key: 1 }, Q$ = {
 	key: 0,
 	class: "ti-tags"
-}, n1 = ["href"], r1 = {
+}, $$ = ["href"], e1 = {
 	key: 1,
 	class: "tv-empty compact"
-}, i1 = {
+}, t1 = {
 	key: 1,
 	class: "tv-custom-repositories"
-}, a1 = ["onClick"], o1 = {
+}, n1 = ["onClick"], r1 = {
 	key: 0,
 	class: "tv-empty compact"
-}, s1 = { class: "tvb-repo-form" }, c1 = { class: "tv-eyebrow" }, l1 = { class: "tvb-field-grid" }, u1 = /* @__PURE__ */ fr({
+}, i1 = { class: "tvb-repo-form" }, a1 = { class: "tv-eyebrow" }, o1 = { class: "tvb-field-grid" }, s1 = /* @__PURE__ */ fr({
 	__name: "VerbasApp",
 	props: {
 		state: {},
@@ -27737,17 +27698,17 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 		function pe(e) {
 			e.key === "Escape" && (m.value = null);
 		}
-		return Nn(() => n.state.payload, ee, { deep: !1 }), ee(), window.addEventListener("keydown", pe), Fr(() => window.removeEventListener("keydown", pe)), t({ select: a }), (e, t) => (K(), q("div", $Q, [
-			J("header", e$, [t[13] ||= J("div", null, [
+		return Nn(() => n.state.payload, ee, { deep: !1 }), ee(), window.addEventListener("keydown", pe), Fr(() => window.removeEventListener("keydown", pe)), t({ select: a }), (e, t) => (K(), q("div", XQ, [
+			J("header", ZQ, [t[13] ||= J("div", null, [
 				J("span", { class: "tv-eyebrow" }, "Tater tools"),
 				J("h1", null, "Verba"),
 				J("p", null, "Enable Tater’s tools, manage their settings, and keep every Verba current.")
-			], -1), J("div", t$, [J("span", { class: z(["tv-live-pill", { busy: !!o.value }]) }, [t[12] ||= J("i", null, null, -1), X(B(o.value || "Ready"), 1)], 2), J("button", {
+			], -1), J("div", QQ, [J("span", { class: z(["tv-live-pill", { busy: !!o.value }]) }, [t[12] ||= J("i", null, null, -1), X(B(o.value || "Ready"), 1)], 2), J("button", {
 				class: "tv-button",
 				type: "button",
 				onClick: t[0] ||= (e) => ie()
 			}, "Refresh")])]),
-			J("div", n$, [
+			J("div", $Q, [
 				J("div", null, [t[14] ||= J("span", null, "Installed", -1), J("strong", null, B(y.value.length || v.value.length), 1)]),
 				J("div", null, [t[15] ||= J("span", null, "Enabled", -1), J("strong", null, B(C.value), 1)]),
 				J("div", null, [t[16] ||= J("span", null, "Store", -1), J("strong", null, B(b.value.length), 1)]),
@@ -27757,13 +27718,13 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 				key: 0,
 				class: z(["tv-notice", { error: !!c.value }])
 			}, B(c.value || s.value), 3)) : Z("", !0),
-			_.value.errors?.length ? (K(), q("div", r$, B(_.value.errors.join(" • ")), 1)) : Z("", !0),
-			J("nav", i$, [(K(), q(G, null, W(r, (e) => J("button", {
+			_.value.errors?.length ? (K(), q("div", e$, B(_.value.errors.join(" • ")), 1)) : Z("", !0),
+			J("nav", t$, [(K(), q(G, null, W(r, (e) => J("button", {
 				key: e.id,
 				type: "button",
 				class: z({ active: i.value === e.id }),
 				onClick: (t) => a(e.id)
-			}, [X(B(e.label), 1), e.id === "manage" && S.value.length ? (K(), q("span", o$, B(S.value.length), 1)) : Z("", !0)], 10, a$)), 64))]),
+			}, [X(B(e.label), 1), e.id === "manage" && S.value.length ? (K(), q("span", r$, B(S.value.length), 1)) : Z("", !0)], 10, n$)), 64))]),
 			i.value === "repos" ? Z("", !0) : (K(), va(Pp, {
 				key: 2,
 				modelValue: D.value,
@@ -27771,54 +27732,54 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 				label: "Search Verba",
 				count: i.value === "installed" ? O.value.length : i.value === "store" ? k.value.length : A.value.length
 			}, null, 8, ["modelValue", "count"])),
-			i.value === "installed" ? (K(), q("section", s$, [(K(!0), q(G, null, W(O.value, (e) => (K(), q("article", {
+			i.value === "installed" ? (K(), q("section", i$, [(K(!0), q(G, null, W(O.value, (e) => (K(), q("article", {
 				key: e.id,
 				class: "tv-panel tvb-verba-card"
 			}, [
-				J("span", c$, [Y(Hc, { name: "verbas" })]),
-				J("header", null, [J("div", null, [J("span", l$, B(e.id), 1), J("h2", null, B(F(e)), 1)]), J("span", { class: z(["tv-state", { good: e.runtime?.enabled }]) }, B(e.runtime?.enabled ? "Enabled" : "Disabled"), 3)]),
+				J("span", a$, [Y(Hc, { name: "verbas" })]),
+				J("header", null, [J("div", null, [J("span", o$, B(e.id), 1), J("h2", null, B(F(e)), 1)]), J("span", { class: z(["tv-state", { good: e.runtime?.enabled }]) }, B(e.runtime?.enabled ? "Enabled" : "Disabled"), 3)]),
 				J("p", null, B(I(e)), 1),
-				J("details", u$, [
+				J("details", s$, [
 					t[18] ||= J("summary", null, "Version & details", -1),
-					J("code", d$, B(e.id), 1),
-					J("div", f$, [
+					J("code", c$, B(e.id), 1),
+					J("div", l$, [
 						J("span", null, "Installed " + B(e.shop?.installed_ver || "0.0.0"), 1),
 						J("span", null, "Store " + B(e.shop?.store_ver || "-"), 1),
 						J("span", null, B(e.shop?.source_label || "local"), 1)
 					]),
-					L(e).length ? (K(), q("div", p$, [(K(!0), q(G, null, W(L(e).slice(0, 12), (e) => (K(), q("span", { key: e }, B(e), 1))), 128))])) : Z("", !0)
+					L(e).length ? (K(), q("div", u$, [(K(!0), q(G, null, W(L(e).slice(0, 12), (e) => (K(), q("span", { key: e }, B(e), 1))), 128))])) : Z("", !0)
 				]),
 				J("footer", null, [e.runtime?.settings?.length ? (K(), q("button", {
 					key: 0,
 					class: "tv-button",
 					type: "button",
 					onClick: (t) => le(e.runtime)
-				}, "Settings", 8, m$)) : (K(), q("span", h$, B(e.runtime ? "No configurable settings" : "Runtime unavailable"), 1)), e.runtime ? (K(), q("button", {
+				}, "Settings", 8, d$)) : (K(), q("span", f$, B(e.runtime ? "No configurable settings" : "Runtime unavailable"), 1)), e.runtime ? (K(), q("button", {
 					key: 2,
 					class: z(["tv-button", { primary: !e.runtime.enabled }]),
 					type: "button",
 					onClick: (t) => ae(e.id, !e.runtime.enabled)
-				}, B(e.runtime.enabled ? "Disable" : "Enable"), 11, g$)) : Z("", !0)])
-			]))), 128)), O.value.length ? Z("", !0) : (K(), q("div", _$, B(D.value ? "No matching Verba." : "No installed Verba found."), 1))])) : i.value === "store" ? (K(), q("section", v$, [(K(!0), q(G, null, W(k.value, (e) => (K(), q("article", {
+				}, B(e.runtime.enabled ? "Disable" : "Enable"), 11, p$)) : Z("", !0)])
+			]))), 128)), O.value.length ? Z("", !0) : (K(), q("div", m$, B(D.value ? "No matching Verba." : "No installed Verba found."), 1))])) : i.value === "store" ? (K(), q("section", h$, [(K(!0), q(G, null, W(k.value, (e) => (K(), q("article", {
 				key: e.id,
 				class: "tv-panel tvb-verba-card"
 			}, [
-				J("span", y$, [Y(Hc, { name: "verbas" })]),
-				J("header", null, [J("div", null, [J("span", b$, B(e.id), 1), J("h2", null, B(e.name || e.id), 1)]), J("span", x$, "v" + B(e.version || "-"), 1)]),
+				J("span", g$, [Y(Hc, { name: "verbas" })]),
+				J("header", null, [J("div", null, [J("span", _$, B(e.id), 1), J("h2", null, B(e.name || e.id), 1)]), J("span", v$, "v" + B(e.version || "-"), 1)]),
 				J("p", null, B(e.description || "No description provided."), 1),
-				J("details", S$, [t[19] ||= J("summary", null, "Package details", -1), J("code", null, B(e.id), 1)]),
-				e.platforms?.length ? (K(), q("div", C$, [(K(!0), q(G, null, W(e.platforms.slice(0, 12), (e) => (K(), q("span", { key: e }, B(j(e).replaceAll("_", " ")), 1))), 128))])) : Z("", !0),
+				J("details", y$, [t[19] ||= J("summary", null, "Package details", -1), J("code", null, B(e.id), 1)]),
+				e.platforms?.length ? (K(), q("div", b$, [(K(!0), q(G, null, W(e.platforms.slice(0, 12), (e) => (K(), q("span", { key: e }, B(j(e).replaceAll("_", " ")), 1))), 128))])) : Z("", !0),
 				J("footer", null, [J("span", null, B(e.source_label || "Tater Shop"), 1), J("button", {
 					class: "tv-button primary",
 					type: "button",
 					onClick: (t) => oe("install", e.id)
-				}, "Install", 8, w$)])
-			]))), 128)), k.value.length ? Z("", !0) : (K(), q("div", T$, "No additional Verba are available from the configured repositories."))])) : i.value === "manage" ? (K(), q("section", E$, [
-				J("div", D$, [t[22] ||= J("div", { class: "tv-manage-hero-copy" }, [
+				}, "Install", 8, x$)])
+			]))), 128)), k.value.length ? Z("", !0) : (K(), q("div", S$, "No additional Verba are available from the configured repositories."))])) : i.value === "manage" ? (K(), q("section", C$, [
+				J("div", w$, [t[22] ||= J("div", { class: "tv-manage-hero-copy" }, [
 					J("span", { class: "tv-eyebrow" }, "Manage library"),
 					J("h2", null, "Verba control center"),
 					J("p", null, "Keep Tater’s tools current, choose what is enabled, and remove tools you no longer use.")
-				], -1), J("div", O$, [
+				], -1), J("div", T$, [
 					J("div", null, [t[20] ||= J("span", null, "Installed", -1), J("strong", null, B(y.value.length), 1)]),
 					J("div", { class: z({ attention: S.value.length }) }, [t[21] ||= J("span", null, "Updates ready", -1), J("strong", null, B(S.value.length), 1)], 2),
 					J("button", {
@@ -27826,24 +27787,24 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 						type: "button",
 						disabled: !S.value.length,
 						onClick: t[2] ||= (e) => oe("update-all")
-					}, "Update all", 8, k$)
+					}, "Update all", 8, E$)
 				])]),
 				(K(!0), q(G, null, W(A.value, (e) => (K(), q("article", {
 					key: e.id,
 					class: z(["tv-panel tvb-manage-row tv-manage-card", { "has-update": e.update_available }])
 				}, [
-					J("div", A$, [J("span", j$, B(j(e.name || e.id).charAt(0).toUpperCase()), 1), J("div", null, [
-						J("span", M$, B(e.id), 1),
+					J("div", D$, [J("span", O$, B(j(e.name || e.id).charAt(0).toUpperCase()), 1), J("div", null, [
+						J("span", k$, B(e.id), 1),
 						J("h3", null, B(e.name || e.id), 1),
 						J("small", null, B(e.source_label || "Local Verba"), 1)
 					])]),
-					J("div", N$, [
+					J("div", A$, [
 						J("div", null, [t[23] ||= J("span", null, "Installed", -1), J("strong", null, B(e.installed_ver || "0.0.0"), 1)]),
 						t[25] ||= J("i", null, "→", -1),
 						J("div", null, [t[24] ||= J("span", null, "Latest", -1), J("strong", null, B(e.store_ver || "-"), 1)]),
 						J("span", { class: z(["tv-state", e.update_available ? "pending" : "good"]) }, B(e.update_available ? "Update ready" : "Current"), 3)
 					]),
-					J("div", P$, [
+					J("div", j$, [
 						T.value.has(N(e.id)) ? (K(), q("span", {
 							key: 0,
 							class: z(["tv-manage-runtime", { online: T.value.get(N(e.id))?.enabled }])
@@ -27853,33 +27814,33 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 							type: "button",
 							disabled: !e.update_available,
 							onClick: (t) => oe("update", e.id)
-						}, B(e.update_available ? "Update" : "Current"), 11, F$),
+						}, B(e.update_available ? "Update" : "Current"), 11, M$),
 						T.value.has(N(e.id)) ? (K(), q("button", {
 							key: 1,
 							class: "tv-button",
 							type: "button",
 							onClick: (t) => ae(e.id, !T.value.get(N(e.id))?.enabled)
-						}, B(T.value.get(N(e.id))?.enabled ? "Disable" : "Enable"), 9, I$)) : Z("", !0),
-						e.required ? Z("", !0) : (K(), q("label", L$, [U(J("input", {
+						}, B(T.value.get(N(e.id))?.enabled ? "Disable" : "Enable"), 9, N$)) : Z("", !0),
+						e.required ? Z("", !0) : (K(), q("label", P$, [U(J("input", {
 							"onUpdate:modelValue": (t) => l.value[e.id] = t,
 							type: "checkbox"
-						}, null, 8, R$), [[ms, l.value[e.id]]]), t[27] ||= X(" Delete data", -1)])),
-						e.required ? (K(), q("span", B$, "Required")) : (K(), q("button", {
+						}, null, 8, F$), [[ms, l.value[e.id]]]), t[27] ||= X(" Delete data", -1)])),
+						e.required ? (K(), q("span", L$, "Required")) : (K(), q("button", {
 							key: 3,
 							class: "tv-button danger",
 							type: "button",
 							onClick: (t) => oe("remove", e.id)
-						}, "Remove", 8, z$))
+						}, "Remove", 8, I$))
 					])
 				], 2))), 128)),
-				y.value.length ? Z("", !0) : (K(), q("div", V$, B(D.value ? "No matching Verba." : "No installed Verba found."), 1))
-			])) : (K(), q("section", H$, [
+				y.value.length ? Z("", !0) : (K(), q("div", R$, B(D.value ? "No matching Verba." : "No installed Verba found."), 1))
+			])) : (K(), q("section", z$, [
 				t[40] ||= J("header", { class: "tv-repository-heading" }, [J("div", null, [
 					J("span", { class: "tv-eyebrow" }, "Repository library"),
 					J("h2", null, "Verba repositories"),
 					J("p", null, "Choose a Tater-trusted source or add your own manifest.")
 				])], -1),
-				J("nav", U$, [J("button", {
+				J("nav", B$, [J("button", {
 					type: "button",
 					class: z({ active: p.value === "trusted" }),
 					onClick: t[3] ||= (e) => p.value = "trusted"
@@ -27888,12 +27849,12 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 					class: z({ active: p.value === "custom" }),
 					onClick: t[4] ||= (e) => p.value = "custom"
 				}, "Custom repositories", 2)]),
-				p.value === "trusted" ? (K(), q("div", W$, [
+				p.value === "trusted" ? (K(), q("div", V$, [
 					t[36] ||= J("p", { class: "tv-repository-intro" }, "Curated sources are reviewed by Tater. Select a card to add or remove its Verba from your Store automatically.", -1),
-					_.value.repos?.trusted_error ? (K(), q("div", G$, "The trusted directory is temporarily unavailable. Your enabled repositories are unchanged.")) : Z("", !0),
-					J("div", K$, [J("article", q$, [
+					_.value.repos?.trusted_error ? (K(), q("div", H$, "The trusted directory is temporarily unavailable. Your enabled repositories are unchanged.")) : Z("", !0),
+					J("div", U$, [J("article", W$, [
 						t[31] ||= J("span", { class: "tv-repo-check" }, "✓", -1),
-						J("div", J$, [t[30] ||= J("span", { class: "tv-repo-monogram" }, "T", -1), J("div", null, [
+						J("div", G$, [t[30] ||= J("span", { class: "tv-repo-monogram" }, "T", -1), J("div", null, [
 							t[28] ||= J("span", { class: "tv-eyebrow" }, "Always available", -1),
 							J("h3", null, B(_.value.repos?.default?.name || "Tater Shop"), 1),
 							t[29] ||= J("p", null, [X("by "), J("strong", null, "Tater Assistant")], -1)
@@ -27909,8 +27870,8 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 						onClick: (t) => re(e),
 						onKeydown: [Os(Es((t) => re(e), ["prevent"]), ["enter"]), Os(Es((t) => re(e), ["prevent"]), ["space"])]
 					}, [
-						J("span", X$, B(e.enabled ? "✓" : "+"), 1),
-						J("div", Z$, [J("span", Q$, B(j(e.repository || e.name).charAt(0).toUpperCase()), 1), J("div", null, [
+						J("span", q$, B(e.enabled ? "✓" : "+"), 1),
+						J("div", J$, [J("span", Y$, B(j(e.repository || e.name).charAt(0).toUpperCase()), 1), J("div", null, [
 							t[35] ||= J("span", { class: "tv-eyebrow" }, "Trusted Verba source", -1),
 							J("h3", null, B(e.repository || e.name), 1),
 							J("p", null, [t[34] ||= X("by ", -1), e.author_url ? (K(), q("a", {
@@ -27919,20 +27880,20 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 								target: "_blank",
 								rel: "noreferrer",
 								onClick: t[5] ||= Es(() => {}, ["stop"])
-							}, B(e.author || "Community author"), 9, $$)) : (K(), q("strong", e1, B(e.author || "Community author"), 1))])
+							}, B(e.author || "Community author"), 9, X$)) : (K(), q("strong", Z$, B(e.author || "Community author"), 1))])
 						])]),
 						J("p", null, B(e.description || "Additional Verba for the Tater Store."), 1),
-						e.tags?.length ? (K(), q("div", t1, [(K(!0), q(G, null, W(e.tags, (e) => (K(), q("span", { key: e }, B(e), 1))), 128))])) : Z("", !0),
+						e.tags?.length ? (K(), q("div", Q$, [(K(!0), q(G, null, W(e.tags, (e) => (K(), q("span", { key: e }, B(e), 1))), 128))])) : Z("", !0),
 						J("footer", null, [e.homepage ? (K(), q("a", {
 							key: 0,
 							href: e.homepage,
 							target: "_blank",
 							rel: "noreferrer",
 							onClick: t[6] ||= Es(() => {}, ["stop"])
-						}, "View repository ↗", 8, n1)) : Z("", !0), J("span", { class: z(e.enabled ? "tv-repo-enabled" : "tv-repo-available") }, B(e.enabled ? "Added to Store" : "Select to add"), 3)])
-					], 42, Y$))), 128))]),
-					w.value.length ? Z("", !0) : (K(), q("div", r1, "No additional trusted Verba repositories are listed yet."))
-				])) : (K(), q("div", i1, [
+						}, "View repository ↗", 8, $$)) : Z("", !0), J("span", { class: z(e.enabled ? "tv-repo-enabled" : "tv-repo-available") }, B(e.enabled ? "Added to Store" : "Select to add"), 3)])
+					], 42, K$))), 128))]),
+					w.value.length ? Z("", !0) : (K(), q("div", e1, "No additional trusted Verba repositories are listed yet."))
+				])) : (K(), q("div", t1, [
 					t[39] ||= J("p", { class: "tv-repository-intro" }, "Custom manifests are managed by you and are not reviewed by Tater.", -1),
 					(K(!0), q(G, null, W(f.value, (e, t) => (K(), q("article", {
 						key: `${e.url}-${t}`,
@@ -27941,9 +27902,9 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 						class: "tv-button",
 						type: "button",
 						onClick: (e) => f.value.splice(t, 1)
-					}, "Remove", 8, a1)]))), 128)),
-					f.value.length ? Z("", !0) : (K(), q("div", o1, "No custom repositories configured.")),
-					J("div", s1, [
+					}, "Remove", 8, n1)]))), 128)),
+					f.value.length ? Z("", !0) : (K(), q("div", r1, "No custom repositories configured.")),
+					J("div", i1, [
 						J("label", null, [t[37] ||= J("span", null, "Name (optional)", -1), U(J("input", {
 							"onUpdate:modelValue": t[7] ||= (e) => u.value = e,
 							type: "text",
@@ -27976,12 +27937,12 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 					class: "tv-modal tvb-settings-modal",
 					onSubmit: Es(ue, ["prevent"])
 				}, [
-					J("header", null, [J("div", null, [J("span", c1, B(m.value?.id), 1), J("h2", null, B(m.value?.name || m.value?.id) + " settings", 1)]), J("button", {
+					J("header", null, [J("div", null, [J("span", a1, B(m.value?.id), 1), J("h2", null, B(m.value?.name || m.value?.id) + " settings", 1)]), J("button", {
 						class: "tv-button",
 						type: "button",
 						onClick: t[9] ||= (e) => m.value = null
 					}, "Close")]),
-					J("div", l1, [(K(!0), q(G, null, W(m.value?.settings || [], (e, n) => (K(), va(lm, {
+					J("div", o1, [(K(!0), q(G, null, W(m.value?.settings || [], (e, n) => (K(), va(lm, {
 						key: e.key || n,
 						modelValue: h.value[e.key],
 						"onUpdate:modelValue": (t) => h.value[e.key] = t,
@@ -28004,38 +27965,38 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 			}, 8, ["open"])
 		]));
 	}
-}), d1 = { class: "topbar workspace-topbar" }, f1 = { class: "workspace-brand" }, p1 = { id: "brand-name" }, m1 = { class: "workspace-current-view" }, h1 = {
+}), c1 = { class: "topbar workspace-topbar" }, l1 = { class: "workspace-brand" }, u1 = { id: "brand-name" }, d1 = { class: "workspace-current-view" }, f1 = {
 	id: "runtime-summary",
 	class: "runtime-summary runtime-summary-vue-host"
-}, g1 = {
+}, p1 = {
 	id: "app-sidebar",
 	class: "sidebar"
-}, _1 = { class: "sidebar-controls" }, v1 = ["disabled", "aria-label"], y1 = {
+}, m1 = { class: "sidebar-controls" }, h1 = ["disabled", "aria-label"], g1 = {
 	class: "nav-stack",
 	"aria-label": "Primary"
-}, b1 = [
+}, _1 = [
 	"aria-current",
 	"data-view",
 	"onClick"
-], x1 = { id: "terminal-task-sidebar" }, S1 = ["aria-label"], C1 = { class: "main-pane" }, w1 = {
+], v1 = { id: "terminal-task-sidebar" }, y1 = ["aria-label"], b1 = { class: "main-pane" }, x1 = {
 	key: 0,
 	class: "workspace-page-heading"
-}, T1 = { id: "view-title" }, E1 = { id: "view-subtitle" }, D1 = ["data-view"], O1 = {
+}, S1 = { id: "view-title" }, C1 = { id: "view-subtitle" }, w1 = ["data-view"], T1 = {
 	key: 0,
 	class: "tv-notice error"
-}, k1 = {
+}, E1 = {
 	key: 1,
 	class: "tv-empty"
-}, A1 = {
+}, D1 = {
 	key: 2,
 	class: "tater-shell-refresh-indicator",
 	role: "status"
-}, j1 = ["disabled"], M1 = {
+}, O1 = ["disabled"], k1 = {
 	id: "toast-root",
 	class: "toast-root",
 	"aria-live": "polite",
 	"aria-atomic": "false"
-}, N1 = /* @__PURE__ */ fr({
+}, A1 = /* @__PURE__ */ fr({
 	__name: "AppShell",
 	props: { options: {} },
 	setup(e, { expose: t }) {
@@ -28092,12 +28053,12 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 		}, o = It({
 			dashboard: kx,
 			chat: ul,
-			verbas: u1,
+			verbas: s1,
 			portals: Ew,
 			cores: Mb,
 			integrations: mC,
 			spudex: aD,
-			settings: cZ
+			settings: aZ
 		}), s = n.options.initialBranding || {}, c = /* @__PURE__ */ H(re(n.options.initialView)), l = /* @__PURE__ */ H(c.value === "settings" ? "dashboard" : c.value), u = /* @__PURE__ */ Ot({}), d = /* @__PURE__ */ H(""), f = /* @__PURE__ */ H(""), p = /* @__PURE__ */ H(null), m = /* @__PURE__ */ H(null), h = /* @__PURE__ */ Dt({
 			firstName: String(s.firstName || "Tater"),
 			fullName: String(s.fullName || "Tater Totterson"),
@@ -28348,11 +28309,11 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 				id: "app-shell",
 				class: z(["app-shell tater-vue-shell", ee.value])
 			}, [
-				J("header", d1, [J("div", f1, [
-					J("h1", p1, B(h.firstName), 1),
+				J("header", c1, [J("div", l1, [
+					J("h1", u1, B(h.firstName), 1),
 					n[4] ||= J("span", { "aria-hidden": "true" }, "/", -1),
-					J("span", m1, B(P.value.label), 1)
-				]), J("div", h1, [Y(VQ, {
+					J("span", d1, B(P.value.label), 1)
+				]), J("div", f1, [Y(RQ, {
 					ref_key: "runtimeComponent",
 					ref: m,
 					state: g,
@@ -28364,8 +28325,8 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 					"options",
 					"assistant-name"
 				])])]),
-				J("aside", g1, [
-					J("div", _1, [n[5] ||= J("span", {
+				J("aside", p1, [
+					J("div", m1, [n[5] ||= J("span", {
 						id: "brand-subtitle",
 						class: "workspace-nav-label"
 					}, "Workspace", -1), J("button", {
@@ -28375,16 +28336,16 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 						disabled: !!y.value,
 						"aria-label": v.value ? "Show menu" : "Hide menu",
 						onClick: n[0] ||= (e) => Ee(!v.value)
-					}, [Y(Hc, { name: v.value ? "plus" : "close" }, null, 8, ["name"])], 8, v1)]),
-					J("nav", y1, [(K(), q(G, null, W(r, (e) => J("button", {
+					}, [Y(Hc, { name: v.value ? "plus" : "close" }, null, 8, ["name"])], 8, h1)]),
+					J("nav", g1, [(K(), q(G, null, W(r, (e) => J("button", {
 						key: e.id,
 						class: z(["nav-btn", { active: c.value === e.id }]),
 						"aria-current": c.value === e.id ? "page" : void 0,
 						"data-view": e.id,
 						type: "button",
 						onClick: (t) => ce(e.id)
-					}, [Y(Hc, { name: a[e.id] }, null, 8, ["name"]), J("span", null, B(e.label), 1)], 10, b1)), 64))]),
-					U(J("div", x1, null, 512), [[Po, c.value === "spudex"]]),
+					}, [Y(Hc, { name: a[e.id] }, null, 8, ["name"]), J("span", null, B(e.label), 1)], 10, _1)), 64))]),
+					U(J("div", v1, null, 512), [[Po, c.value === "spudex"]]),
 					J("button", {
 						type: "button",
 						class: z(["workspace-services", g.tone]),
@@ -28396,18 +28357,18 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 						class: "sidebar-build-version",
 						"aria-label": `Current ${h.firstName || "Tater"} version`,
 						"aria-live": "polite"
-					}, B(te.value), 9, S1)) : Z("", !0)
+					}, B(te.value), 9, y1)) : Z("", !0)
 				]),
-				J("main", C1, [c.value === "chat" ? (K(), q("header", w1, [J("h2", T1, B(P.value.label), 1), J("p", E1, B(ne.value), 1)])) : Z("", !0), J("section", {
+				J("main", b1, [c.value === "chat" ? (K(), q("header", x1, [J("h2", S1, B(P.value.label), 1), J("p", C1, B(ne.value), 1)])) : Z("", !0), J("section", {
 					id: "view-root",
 					class: "view-root tater-shell-view-root",
 					"data-view": c.value
 				}, [
-					f.value && !F.value ? (K(), q("div", O1, [X("Failed to load " + B(P.value.label) + ": " + B(f.value) + " ", 1), J("button", {
+					f.value && !F.value ? (K(), q("div", T1, [X("Failed to load " + B(P.value.label) + ": " + B(f.value) + " ", 1), J("button", {
 						class: "inline-btn",
 						type: "button",
 						onClick: n[1] ||= (e) => se(c.value, !0)
-					}, "Try again")])) : F.value ? Z("", !0) : (K(), q("div", k1, "Loading " + B(P.value.label) + "…", 1)),
+					}, "Try again")])) : F.value ? Z("", !0) : (K(), q("div", E1, "Loading " + B(P.value.label) + "…", 1)),
 					(K(), va(xr, { max: r.length }, [F.value ? (K(), va(Ur(I.value), {
 						ref_key: "activeComponent",
 						ref: p,
@@ -28415,8 +28376,8 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 						state: L.value,
 						options: R.value
 					}, null, 8, ["state", "options"])) : Z("", !0)], 1032, ["max"])),
-					d.value && F.value ? (K(), q("div", A1, "Refreshing " + B(P.value.label) + "…", 1)) : Z("", !0)
-				], 8, D1)])
+					d.value && F.value ? (K(), q("div", D1, "Refreshing " + B(P.value.label) + "…", 1)) : Z("", !0)
+				], 8, w1)])
 			], 2),
 			J("button", {
 				id: "sidebar-expand-btn",
@@ -28426,8 +28387,8 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 				title: "Show menu",
 				disabled: !!y.value,
 				onClick: n[2] ||= (e) => Ee(!1)
-			}, B(y.value ? "⋯" : "☰"), 9, j1),
-			J("div", M1, [(K(!0), q(G, null, W(w.value, (e) => (K(), va(_k, {
+			}, B(y.value ? "⋯" : "☰"), 9, O1),
+			J("div", k1, [(K(!0), q(G, null, W(w.value, (e) => (K(), va(_k, {
 				key: e.id,
 				open: !e.closing,
 				message: e.message,
@@ -28441,7 +28402,7 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 				"onClose",
 				"onDismissed"
 			]))), 128))]),
-			_.required ? Z("", !0) : (K(), va($L, {
+			_.required ? Z("", !0) : (K(), va(XL, {
 				key: 0,
 				open: T.value,
 				snapshot: E.value,
@@ -28454,7 +28415,7 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 				"snapshot",
 				"poll-error"
 			])),
-			Y(QQ, {
+			Y(YQ, {
 				state: _,
 				authenticate: e.options.authenticate,
 				onAuthenticated: ve
@@ -28464,8 +28425,8 @@ var QJ = { class: "tm-stack tvoice-satellites" }, $J = {
 });
 //#endregion
 //#region src/entry.ts
-function P1(e, t) {
-	let n = Ms(N1, { options: t }), r = n.mount(e);
+function j1(e, t) {
+	let n = Ms(A1, { options: t }), r = n.mount(e);
 	return {
 		navigate: (e, t) => r.navigate(e, t),
 		refresh: () => r.refresh(),
@@ -28488,7 +28449,7 @@ function P1(e, t) {
 		}
 	};
 }
-function F1(e, t) {
+function M1(e, t) {
 	let n = /* @__PURE__ */ Dt({
 		profile: t.initialProfile || {},
 		messages: t.initialMessages || [],
@@ -28509,7 +28470,7 @@ function F1(e, t) {
 		}
 	};
 }
-function I1(e, t) {
+function N1(e, t) {
 	let n = /* @__PURE__ */ Dt({ payload: t.initialPayload }), r = Ms(kx, {
 		state: n,
 		options: t
@@ -28523,7 +28484,7 @@ function I1(e, t) {
 		}
 	};
 }
-function L1(e, t) {
+function P1(e, t) {
 	let n = /* @__PURE__ */ Dt({ settings: t.initialSettings }), r = Ms(mC, {
 		state: n,
 		options: t
@@ -28537,8 +28498,8 @@ function L1(e, t) {
 		}
 	};
 }
-function R1(e, t) {
-	let n = /* @__PURE__ */ Dt({ payload: t.initialPayload }), r = Ms(u1, {
+function F1(e, t) {
+	let n = /* @__PURE__ */ Dt({ payload: t.initialPayload }), r = Ms(s1, {
 		state: n,
 		options: t
 	});
@@ -28551,7 +28512,7 @@ function R1(e, t) {
 		}
 	};
 }
-function z1(e, t) {
+function I1(e, t) {
 	let n = /* @__PURE__ */ Dt({ payload: t.initialPayload }), r = Ms(Ew, {
 		state: n,
 		options: t
@@ -28565,7 +28526,7 @@ function z1(e, t) {
 		}
 	};
 }
-function B1(e, t) {
+function L1(e, t) {
 	let n = /* @__PURE__ */ Dt({ payload: t.initialPayload }), r = Ms(Mb, {
 		state: n,
 		options: t
@@ -28585,7 +28546,7 @@ function B1(e, t) {
 		}
 	};
 }
-function V1(e, t) {
+function R1(e, t) {
 	let n = /* @__PURE__ */ Dt({ payload: t.initialPayload }), r = Ms(aD, {
 		state: n,
 		options: t
@@ -28602,7 +28563,7 @@ function V1(e, t) {
 		}
 	};
 }
-function H1(e, t) {
+function z1(e, t) {
 	let n = /* @__PURE__ */ Dt({
 		summary: t.initialSummary || {},
 		general: t.initialGeneral || {},
@@ -28612,7 +28573,7 @@ function H1(e, t) {
 		spudLink: t.initialSpudLink || {},
 		models: t.initialModels || {},
 		advanced: t.initialAdvanced || {}
-	}), r = Ms(cZ, {
+	}), r = Ms(aZ, {
 		state: n,
 		options: t
 	}), i = r.mount(e);
@@ -28628,12 +28589,12 @@ function H1(e, t) {
 		}
 	};
 }
-function U1(e, t) {
+function B1(e, t) {
 	let n = /* @__PURE__ */ Dt({
 		health: t.initialState?.health || null,
 		text: t.initialState?.text || "Checking system…",
 		tone: t.initialState?.tone || "normal"
-	}), r = Ms(VQ, {
+	}), r = Ms(RQ, {
 		state: n,
 		options: t
 	}), i = r.mount(e);
@@ -28652,7 +28613,7 @@ function U1(e, t) {
 		}
 	};
 }
-function W1(e, t) {
+function V1(e, t) {
 	let n = /* @__PURE__ */ Dt({ payload: t.initialPayload }), r = Ms(kp, {
 		state: n,
 		options: t
@@ -28667,4 +28628,4 @@ function W1(e, t) {
 	};
 }
 //#endregion
-export { P1 as mountAppShell, F1 as mountChat, B1 as mountCores, I1 as mountDashboard, L1 as mountIntegrations, W1 as mountMusicCore, z1 as mountPortals, U1 as mountRuntimeStatus, H1 as mountSettings, V1 as mountSpudex, R1 as mountVerbas };
+export { j1 as mountAppShell, M1 as mountChat, L1 as mountCores, N1 as mountDashboard, P1 as mountIntegrations, V1 as mountMusicCore, I1 as mountPortals, B1 as mountRuntimeStatus, z1 as mountSettings, R1 as mountSpudex, F1 as mountVerbas };

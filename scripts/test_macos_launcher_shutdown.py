@@ -83,12 +83,12 @@ class MacOSLauncherShutdownTests(unittest.TestCase):
         self.assertLess(status_guard, record)
 
     def test_face_id_dependencies_are_part_of_the_managed_runtime(self) -> None:
-        self.assertIn("deepface==0.0.100", self.requirements)
-        self.assertIn("tensorflow-metal==1.2.0", self.requirements)
+        self.assertNotIn("deepface==", self.requirements)
+        self.assertIn("opencv-python>=4.12.0.88,<5", self.requirements)
         self.assertNotIn("requirements-face.txt", self.setup_source)
         self.assertNotIn("filtered_face_id_requirements", self.setup_source)
         self.assertNotIn("install_face_id_runtime", self.setup_source)
-        self.assertIn('face_id_required = ["cv2", "deepface", "retinaface", "tensorflow", "tf_keras", "torch", "transformers", "huggingface_hub", "omegaconf", "fvcore"]', self.setup_source)
+        self.assertIn('face_id_required = ["cv2", "numpy"]', self.setup_source)
         self.assertIn("cleanup_legacy_runtime", self.setup_source)
         self.assertIn("aioesphomeapi", self.setup_source)
         self.assertIn("nanowakeword", self.setup_source)
@@ -100,8 +100,8 @@ class MacOSLauncherShutdownTests(unittest.TestCase):
         start = self.source.index("private func pinnedRuntimeDependenciesReady")
         end = self.source.index("private func sourceRequirementsFingerprint", start)
         implementation = self.source[start:end]
-        self.assertIn('"deepface", "tensorflow", "tf-keras", "opencv-python", "retina-face"', implementation)
-        self.assertIn('faceIDPackages.append("tensorflow-metal")', implementation)
+        self.assertIn('let faceIDPackages = ["opencv-python", "numpy"]', implementation)
+        self.assertNotIn('faceIDPackages.append("tensorflow-metal")', implementation)
         self.assertIn("using: python", implementation)
         self.assertNotIn("faceIDPython", implementation)
 
