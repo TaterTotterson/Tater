@@ -39,60 +39,19 @@ Little Spud connects to your Tater Spud Hub for chat, TTS, STT, and notification
 
 ## Tater Voice Satellites
 
-Bring Tater into every room with a dedicated voice satellite. Wake-word
-detection, microphone capture and speaker playback run on the satellite;
-Tater handles speech recognition, conversation, tools and spoken replies.
-Pair and manage your devices from Tater's Voice settings, with wake words,
-volume, device preferences and firmware updates where supported.
+Bring Tater into every room with a dedicated voice satellite. Choose the
+firmware for your hardware, then pair and manage it in **Voice & devices →
+Satellites**.
 
-In **Voice & devices → Satellites → Room & audio**, edit **Satellite name** and
-**Room / Area**, then save. Updated Native, Echo, and ThirdReality firmware saves
-both values on the satellite and applies them live, without resetting or pairing
-again. The satellite must be connected; older firmware shows an update message.
+| Your hardware | Firmware or runtime |
+| --- | --- |
+| Voice PE, Satellite1, ReSpeaker XVF3800 or ESP32-S3-BOX-3 | [Tater Native Firmware](https://github.com/TaterTotterson/Tater-Native-Firmware) |
+| Supported, unlocked Amazon Echo, Dot, Show or Spot | [Tater Echo Firmware](https://github.com/TaterTotterson/Tater-Echo-Firmware) |
+| Linux computer or Raspberry Pi with a microphone and speaker | [Tater Linux Satellite](https://github.com/TaterTotterson/Tater-Linux-Satellite) |
+| ThirdReality Voice & Music Assistant (S420) | [Tater ThirdReality Voice Firmware](https://github.com/TaterTotterson/Tater-ThirdReality-Voice-Firmware) |
 
-In **Model Settings → Wake Word → STT wake verification**, the **Verification
-audio window** chooses 500–2000 ms of buffered audio to check (default 1000 ms).
-Try 2000 ms if short clips return empty text. **Wait for wake check** separately
-sets the maximum response wait from 500–2000 ms (default 500 ms). Apply changes
-to update connected satellites; saved values also apply when they reconnect.
-These controls use the existing satellite protocol and require no firmware
-installation. Empty STT results, provider errors, and timeouts allow listening.
-
-**Send audio to trainer** uses the trainer URL for direct satellite uploads.
-The separate **Auto-training link** is optional and lets the trainer publish
-new wake models back to Tater. Linking is not required to send audio.
-
-In **Voice & devices → Satellites → Bluetooth**, choose **Scan for devices**
-for a 15-second discovery window. Opening the page does not scan. Updated
-firmware keeps Bluetooth off when unused, while active connections such as
-Meshtastic keep it enabled until disconnected. Automatic room presence tracking
-has been removed. See the [Bluetooth guide](docs/native_bluetooth_api.md) for
-firmware requirements, pairing, and API details.
-
-Choose the firmware or runtime for your hardware:
-
-- **[Tater Native Firmware](https://github.com/TaterTotterson/Tater-Native-Firmware)**
-  — ESP32-S3 satellites: Voice PE, Satellite1, ReSpeaker XVF3800 and
-  ESP32-S3-BOX-3.
-- **[Tater Echo Firmware](https://github.com/TaterTotterson/Tater-Echo-Firmware)**
-  — Supported, unlocked Amazon Echo, Dot, Show and Spot models. Check the
-  repository for exact generations and installation requirements.
-- **[Tater Linux Satellite](https://github.com/TaterTotterson/Tater-Linux-Satellite)**
-  — Turn a Linux computer, Raspberry Pi or custom device with a microphone and
-  speaker into a Tater satellite.
-- **[Tater ThirdReality Voice Firmware](https://github.com/TaterTotterson/Tater-ThirdReality-Voice-Firmware)**
-  — Native Tater voice and music on the ThirdReality Voice & Music Assistant
-  (S420).
-
-Depending on the device, satellites also support local timers, announcements,
-continued conversation, synchronized music, Sat Chat audio/video calls, and
-on-screen weather, notifications and media controls.
-
-Prefer Home Assistant Assist? The
-**[Tater Home Assistant Satellites bridge](https://github.com/TaterTotterson/Tater-Home-Assistant-Satellites)**
-connects compatible satellites directly to Home Assistant without requiring
-the Tater app. It also offers an optional **Mini-Tater** mode—a streamlined
-Tater assistant built into the bridge.
+**Using Home Assistant?** The [Home Assistant bridge](https://github.com/TaterTotterson/Tater-Home-Assistant-Satellites)
+supports HA Assist and optional **Mini-Tater** without needing the main Tater app.
 
 ---
 
