@@ -1,5 +1,5 @@
 name: Publish Docker Images
-run-name: Release Tater ${{ github.ref_name }}
+run-name: Release Tater ${{ inputs.image_tag || github.ref_name }}
 
 on:
   push:
@@ -38,8 +38,19 @@ env:
   IMAGE_NAME: tatertotterson/tater
 
 jobs:
+  dependency-contract:
+    name: Check Docker dependency contract
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Check Face ID dependencies match the current pipeline
+        run: python3 scripts/test_docker_face_id_dependencies.py
+
   cpu:
     name: CPU image
+    needs: dependency-contract
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.target == 'both' || inputs.target == 'cpu' }}
     runs-on: ubuntu-latest
     steps:
@@ -87,6 +98,7 @@ jobs:
 
   nvidia:
     name: NVIDIA image
+    needs: dependency-contract
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.target == 'both' || inputs.target == 'nvidia' }}
     runs-on: ubuntu-latest
     steps:

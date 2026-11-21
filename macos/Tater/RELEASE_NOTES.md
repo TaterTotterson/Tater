@@ -21,6 +21,10 @@ reference matching based on confirmed photos.
   clustering stays stricter, and burst matching does not relax the SFace cutoff.
   Add regression coverage for migration, matching, image alignment, model
   integrity, and a non-writing planner for reviewing old assignments.
+- **Container packaging correction.** CPU and NVIDIA builds now check for the
+  YuNet + SFace OpenCV APIs instead of the retired Face ID dependencies. Remove
+  the unused TensorFlow CUDA installation and validate the dependency contract
+  before starting container builds. Rebuilt images retain the 3.0.7 version.
 
 Spud Hubs and Spudlets using Face ID must run the same pipeline revision. Actual
 recognition accuracy still depends on camera images, lighting, and pose; this
