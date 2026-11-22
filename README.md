@@ -11,10 +11,10 @@
 
 **Tater** is a local-first AI platform that can run local models through **llama.cpp**, or connect to remote OpenAI-compatible and llama.cpp APIs. It supports voice satellites like **VoicePE**, **Sat1**, **S3Box**, and **ReSpeaker XVF3800**, plus portals for **Discord**, **Home Assistant**, **HomeKit**, **IRC**, **macOS**, **Matrix**, **Meshtastic**, **Telegram**, and **XBMC4Xbox**.
 
-**New in 3.0.5:** Bluetooth discovery now starts only when requested and stops
-automatically. Active device connections keep the radio enabled while needed.
-The new Bluetooth workspace replaces room presence tracking. Requires matching
-satellite firmware; see the [Bluetooth guide](docs/native_bluetooth_api.md).
+**New in 3.0.8:** Satellite diagnostics refresh live network and wake status,
+including USB Ethernet on SAT1 and Voice PE with Tater Native Firmware **0.7.0**.
+The tested powered adapter also works with supported Echo satellites; see
+[Ethernet and PoE adapters](#ethernet-and-poe-adapters).
 [Read the release notes](macos/Tater/RELEASE_NOTES.md).
 
 ---
@@ -49,6 +49,37 @@ Satellites**.
 | Supported, unlocked Amazon Echo, Dot, Show or Spot | [Tater Echo Firmware](https://github.com/TaterTotterson/Tater-Echo-Firmware) |
 | Linux computer or Raspberry Pi with a microphone and speaker | [Tater Linux Satellite](https://github.com/TaterTotterson/Tater-Linux-Satellite) |
 | ThirdReality Voice & Music Assistant (S420) | [Tater ThirdReality Voice Firmware](https://github.com/TaterTotterson/Tater-ThirdReality-Voice-Firmware) |
+
+### Ethernet and PoE adapters
+
+Both Tater Echo Firmware and Tater Native Firmware support USB Ethernet on
+compatible hardware. The tested powered adapter is the
+[UCTRONICS B0B9ZLVGJ4 (U6113)](https://www.amazon.com/dp/B0B9ZLVGJ4).
+It carries Ethernet data over USB and can supply 5 V device power from a
+compatible PoE switch/injector. A power-only PoE splitter does not provide
+USB Ethernet data.
+
+| Satellite | Connection and support |
+| --- | --- |
+| SAT1 and Voice PE | Use Native Firmware **0.7.0+** and a **data-capable Micro-USB female → USB-C male converter**. Connect to the ESP32 USB port (not SAT1's XMOS port), then cold boot through the powered adapter. Both boards passed voice, downloaded speech, and cold-start checks in both USB-C orientations. |
+| ReSpeaker XVF3800 and ESP32-S3-BOX-3 | Wi-Fi-only in Native Firmware 0.7.0; USB Ethernet hardware testing is still needed. |
+| Supported Echo satellites | The same adapter was tested on Biscuit, Checkers, Cronos, Crown, Athena, and Rook. Biscuit can receive power through it; the other listed models retain their normal power supplies. Follow the [Echo adapter and per-device instructions](https://github.com/TaterTotterson/Tater-Echo-Firmware#usb-ethernet-adapters). |
+
+Native firmware currently accepts only RTL8152 adapters exposing USB
+**`0bda:8152` with CDC-ECM configuration 2**. Similar powered adapters may work
+but are untested; other chipsets are not enabled. Echo uses its own Linux
+drivers and per-device requirements, so compatibility on Echo does not establish
+compatibility on ESP32. A USB-C plug, higher wattage, or a chipset name alone
+is not enough to establish compatibility.
+
+On SAT1 and Voice PE, Ethernet takes priority after DHCP while saved Wi-Fi
+remains available as fallback. Tater **3.0.8+** shows **Connected by USB Ethernet**
+in satellite diagnostics on its normal refresh. The same USB port preserves
+serial when booted directly on a computer; reboot through the adapter for
+Ethernet. The tested adapter supplies 5 V, so allow for the board's speaker
+power requirements; it does not enable SAT1's higher-voltage amplifier modes.
+See the [Native Ethernet setup and recovery guide](https://github.com/TaterTotterson/Tater-Native-Firmware/blob/main/docs/usb-ethernet.md)
+for details and remaining hardware test limits.
 
 **Using Home Assistant?** The [Home Assistant bridge](https://github.com/TaterTotterson/Tater-Home-Assistant-Satellites)
 supports HA Assist and optional **Mini-Tater** without needing the main Tater app.

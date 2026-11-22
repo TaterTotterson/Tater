@@ -19057,7 +19057,7 @@ def get_voice_runtime_payload(panel: str = "") -> Dict[str, Any]:
     if panel_token == "satellites":
         cached_payload, cache_meta = _voice_satellite_snapshot_load()
         if isinstance(cached_payload, dict):
-            runtime_payload = cached_payload
+            runtime_payload = esphome_home_module.refresh_satellite_runtime_payload(cached_payload)
             if bool(cache_meta.get("stale")) or float(
                 cache_meta.get("age_seconds") or 0.0
             ) >= VOICE_SATELLITE_SNAPSHOT_INTERVAL_SECONDS:

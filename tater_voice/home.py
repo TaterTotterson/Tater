@@ -1031,10 +1031,13 @@ def _native_wake_model_rows(
         last_error = esphome_runtime.text(_native_first_value(runtime.get("last_error"), wake_engine.get("last_error")))
         if downloading:
             status_label = "Downloading"
-        elif last_error:
-            status_label = f"Error: {last_error}"
         elif enabled_value is not None and not esphome_runtime.as_bool(enabled_value, True):
             status_label = "Disabled"
+        elif esphome_runtime.as_bool(ready_value, False):
+            # ESP firmware also uses last_error for successful cache/load notes.
+            status_label = "Ready"
+        elif last_error:
+            status_label = f"Error: {last_error}"
         elif ready_value is None:
             status_label = "Unavailable"
         else:
@@ -1176,6 +1179,7 @@ def _native_client_to_runtime_row(selector: str, row: Dict[str, Any]) -> Dict[st
     reset = status.get("reset") if isinstance(status.get("reset"), dict) else {}
     transport = status.get("transport") if isinstance(status.get("transport"), dict) else {}
     usb_ethernet = status.get("usb_ethernet") if isinstance(status.get("usb_ethernet"), dict) else {}
+    network = status.get("network") if isinstance(status.get("network"), dict) else {}
     audio_transport = voice.get("audio_transport") if isinstance(voice.get("audio_transport"), dict) else {}
     xmos_firmware = status.get("xmos_firmware") if isinstance(status.get("xmos_firmware"), dict) else {}
     state = esphome_runtime.text(status.get("state")) or esphome_runtime.text(voice.get("state")) or "idle"
@@ -1186,21 +1190,32 @@ def _native_client_to_runtime_row(selector: str, row: Dict[str, Any]) -> Dict[st
     name = esphome_runtime.text(row.get("device_name")) or esphome_runtime.text(row.get("device_id")) or selector
     usb_ethernet_state = esphome_runtime.lower(usb_ethernet.get("state"))
     connection_transport = esphome_runtime.lower(usb_ethernet.get("transport"))
-    if connection_transport not in {"ethernet", "wifi"}:
+    active_interface = esphome_runtime.lower(network.get("active_interface"))
+    reported_transport = {
+        "usb_ethernet": "ethernet", "ethernet": "ethernet", "wifi": "wifi", "none": "unknown"
+    }.get(active_interface)
+    legacy_ethernet = reported_transport is None
+    if reported_transport is not None:
+        connection_transport = reported_transport
+    elif connection_transport not in {"ethernet", "wifi"}:
         connection_transport = "ethernet" if bool(usb_ethernet.get("active")) else "wifi"
-    connection_degraded = bool(row.get("connected")) and usb_ethernet_state in {"recovering", "rescue"}
+    connection_degraded = bool(row.get("connected")) and legacy_ethernet and usb_ethernet_state in {"recovering", "rescue"}
     if not bool(row.get("connected")):
         connection_note = "Satellite is offline."
-    elif usb_ethernet_state == "rescue":
+    elif legacy_ethernet and usb_ethernet_state == "rescue":
         reason = esphome_runtime.text(usb_ethernet.get("reason")).replace("-", " ") or "wired connection unhealthy"
         connection_note = f"Connected by Wi-Fi rescue; Ethernet {reason}."
-    elif usb_ethernet_state == "recovering":
+    elif legacy_ethernet and usb_ethernet_state == "recovering":
         connection_note = "Connected by Ethernet; repairing the wired connection."
+    elif active_interface == "usb_ethernet":
+        connection_note = "Connected by USB Ethernet."
     elif connection_transport == "ethernet":
         interface = esphome_runtime.text(usb_ethernet.get("interface"))
         connection_note = f"Connected by Ethernet{f' on {interface}' if interface else ''}."
-    else:
+    elif connection_transport == "wifi":
         connection_note = "Connected by Wi-Fi."
+    else:
+        connection_note = "Connected; network status unavailable."
 
     wake_mode = _native_wake_mode(wake_engine, live_settings)
     wake_mode_label = _native_wake_mode_label(wake_mode)
@@ -1211,7 +1226,10 @@ def _native_client_to_runtime_row(selector: str, row: Dict[str, Any]) -> Dict[st
     )
     configured_wake_mode = _native_wake_mode({}, live_settings)
     configured_wake_mode_label = _native_wake_mode_label(configured_wake_mode)
-    wake_ready = "Ready" if esphome_runtime.as_bool(wake_engine.get("ready"), False) else "Not Ready"
+    wake_ready = (
+        "Unavailable" if wake_engine.get("ready") is None
+        else "Ready" if esphome_runtime.as_bool(wake_engine.get("ready"), False) else "Not Ready"
+    )
     wake_engine_status = "Disabled" if wake_mode == "disabled" else f"{_native_detector_label(wake_mode)} · {wake_ready}"
     if configured_wake_mode in {"oww", "mww_oww"}:
         configured_tuning = f"OWW {_native_number_label(live_settings.get('oww_threshold'))} / patience {_native_number_label(live_settings.get('oww_patience'))}"
@@ -1646,6 +1664,45 @@ def _is_native_satellite_row(row: Dict[str, Any]) -> bool:
         or bool(meta.get("native_selected"))
         or bool(meta.get("native_protocol"))
     )
+
+
+def refresh_satellite_runtime_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Overlay cheap live native status without repeating settings/discovery I/O."""
+    from . import ui_helpers
+
+    ui = payload.get("ui") if isinstance(payload.get("ui"), dict) else {}
+    forms = ui.get("item_forms") if isinstance(ui.get("item_forms"), list) else []
+    if not forms:
+        return payload
+    clients = native_satellite.status_snapshot_sync(include_live_settings=False).get("clients", {})
+    refreshed = []
+    for form in forms:
+        if not isinstance(form, dict) or form.get("group") != "satellite":
+            refreshed.append(form)
+            continue
+        selector = esphome_runtime.text(form.get("id"))
+        client = clients.get(selector)
+        if not selector.startswith("native:") or not isinstance(client, dict):
+            refreshed.append(form)
+            continue
+        # Keep the cached form's configured values; only runtime information is
+        # refreshed. Vue separately preserves any unsaved edits in its drafts.
+        fields = form.get("popup_fields") if isinstance(form.get("popup_fields"), list) else []
+        settings = {
+            field["key"]: field["value"] for field in fields
+            if isinstance(field, dict) and field.get("type") != "section"
+            and field.get("key") and "value" in field
+        }
+        runtime = _native_client_to_runtime_row(selector, {**client, "live_settings": settings})
+        refreshed.append(ui_helpers.refresh_native_satellite_item(form, runtime))
+    metrics = payload.get("header_stats") if isinstance(payload.get("header_stats"), list) else []
+    header_stats = [
+        {**metric, "value": sum(bool(form.get("connected")) for form in refreshed
+                                 if isinstance(form, dict) and form.get("group") == "satellite")}
+        if isinstance(metric, dict) and metric.get("label") == "Connected" else metric
+        for metric in metrics
+    ]
+    return {**payload, "ui": {**ui, "item_forms": refreshed}, "header_stats": header_stats}
 
 
 def get_runtime_payload(

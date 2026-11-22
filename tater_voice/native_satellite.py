@@ -2152,10 +2152,10 @@ async def status(*, include_live_settings: bool = True) -> Dict[str, Any]:
     return {"ok": True, "protocol": PROTOCOL_VERSION, "clients": clients, "count": len(clients)}
 
 
-def status_snapshot_sync() -> Dict[str, Any]:
+def status_snapshot_sync(*, include_live_settings: bool = True) -> Dict[str, Any]:
     clients = {
-        selector: _client_snapshot(selector, row)
-        for selector, row in _clients.items()
+        selector: _client_snapshot(selector, row, include_live_settings=include_live_settings)
+        for selector, row in list(_clients.items())
         if isinstance(row, dict)
     }
     return {"ok": True, "protocol": PROTOCOL_VERSION, "clients": clients, "count": len(clients)}

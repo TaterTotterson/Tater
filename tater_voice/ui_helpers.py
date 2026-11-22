@@ -91,6 +91,68 @@ def _native_popup_fields_from_sections(sections: List[Dict[str, Any]]) -> List[D
     return fields
 
 
+def refresh_native_satellite_item(item: Dict[str, Any], runtime: Dict[str, Any]) -> Dict[str, Any]:
+    """Replace live details while keeping cached settings and discovery results."""
+    live_sections = {
+        section["title"]: section for section in runtime.get("native_detail_sections", [])
+        if isinstance(section, dict) and section.get("title") != "Settings"
+    }
+    sections: List[Dict[str, Any]] = []
+    for field in item.get("info_fields", []):
+        if not isinstance(field, dict):
+            continue
+        if field.get("type") == "section":
+            sections.append({"title": field.get("label"), "rows": []})
+        elif sections:
+            sections[-1]["rows"].append({"label": field.get("label"), "value": field.get("value")})
+    merged = []
+    for section in sections:
+        title = section["title"]
+        if title in live_sections:
+            merged.append(live_sections.pop(title))
+        elif title == "Transport":
+            continue  # Do not retain counters from an earlier connection.
+        elif title == "Connection":
+            merged.append({**section, "rows": [
+                {**row, "value": format_ts_label(runtime.get("last_seen_ts"))}
+                if row.get("label") == "Last Seen" else row for row in section["rows"]
+            ]})
+        else:
+            merged.append(section)
+    merged.extend(live_sections.values())
+    overview_values = {
+        "State": _native_section_value(merged, "Device Info", "State"),
+        "Wake Model": _native_section_value(merged, "Diagnostics", "Active Wake Model"),
+        "Wi-Fi RSSI": _native_section_value(merged, "Diagnostics", "Wi-Fi RSSI"),
+        "Last Reset": _native_section_value(merged, "Diagnostics", "Last Reset"),
+        "Firmware": _native_section_value(merged, "Device Info", "Firmware"),
+    }
+    detail_sections = [
+        {**section, "rows": [
+            {**row, "value": overview_values[row["label"]] or "-"}
+            if row.get("label") in overview_values else row for row in section.get("rows", [])
+        ]} if section.get("title") == "Overview" else section
+        for section in item.get("detail_sections", [])
+    ]
+    connected = bool(runtime.get("connected"))
+    badges = [
+        {**badge, "label": "Connected" if connected else "Offline", "tone": "success" if connected else "danger"}
+        if badge.get("label") in {"Connected", "Offline"} else badge
+        for badge in item.get("hero_badges", [])
+    ]
+    return {
+        **item,
+        "connected": connected,
+        "connection_transport": runtime.get("connection_transport"),
+        "connection_degraded": runtime.get("connection_degraded"),
+        "connection_note": runtime.get("connection_note"),
+        "info_fields": _native_popup_fields_from_sections(merged),
+        "detail_sections": detail_sections,
+        "hero_badges": badges,
+        "remove_action": "" if connected else "voice_satellite_remove",
+    }
+
+
 def _default_satellite_image_src() -> str:
     return _named_satellite_image_src("tatervoice.png")
 
