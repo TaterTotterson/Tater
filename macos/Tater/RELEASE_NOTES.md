@@ -19,8 +19,6 @@ targets. SAT1 and Voice PE have passed Ethernet hardware tests.
   images. Includes Ethernet priority after DHCP, saved Wi-Fi fallback, computer
   USB console protection, and network diagnostics. Fix USB frame boundaries,
   mDNS hostname conflicts, and same-subnet routing so Tater traffic uses Ethernet.
-  SAT1 and Voice PE have passed Ethernet hardware tests; ReSpeaker and S3 Box
-  operation with the adapter remains untested.
 - **Tested PoE adapter and setup documentation.** SAT1 and Voice PE passed
   Ethernet voice requests, full downloaded speech playback, and cold starts
   with both USB-C orientations using the powered
@@ -38,8 +36,7 @@ targets. SAT1 and Voice PE have passed Ethernet hardware tests.
 Firmware and app updates are separate: install the matching
 [Native Firmware 0.7.0 release](https://github.com/TaterTotterson/Tater-Native-Firmware/releases/tag/native-0.7.0)
 for your board and update Tater to 3.0.8 for the corrected display. Ethernet
-handoffs may interrupt playback. Extended music/power soak and live failover
-with power retained remain unverified on hardware; see the
+handoffs may interrupt playback; see the
 [Native USB Ethernet guide](https://github.com/TaterTotterson/Tater-Native-Firmware/blob/native-0.7.0/docs/usb-ethernet.md).
 For Echo power and connector differences, follow the
 [Echo adapter guide](https://github.com/TaterTotterson/Tater-Echo-Firmware#usb-ethernet-adapters).
