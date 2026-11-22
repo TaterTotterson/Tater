@@ -3,9 +3,12 @@
 # not credential material.
 # Optional NVIDIA build for local STT/TTS acceleration.
 # The default Dockerfile stays CPU-first; use this with docker-compose.nvidia.yml.
+# CUDA 13 stack: onnxruntime-gpu >=1.29 (first releases with aarch64 wheels)
+# depends on CUDA 13 runtime packages, and CUDA >=12.9 is needed to build
+# llama.cpp for SM 121 (DGX Spark / GB202). Host driver must be 580 or newer.
 ARG LLAMA_CPP_REF=master
 ARG LLAMA_CPP_CMAKE_ARGS=-DGGML_CUDA=on
-ARG LLAMA_CPP_CUDA_BUILDER_IMAGE=nvcr.io/nvidia/cuda:12.8.1-devel-ubuntu24.04
+ARG LLAMA_CPP_CUDA_BUILDER_IMAGE=nvidia/cuda:13.0.0-cudnn-devel-ubuntu24.04
 ARG PYTHON_BASE_IMAGE=docker.io/library/python:3.11-slim
 
 FROM ${LLAMA_CPP_CUDA_BUILDER_IMAGE} AS llama_cpp_builder
@@ -48,7 +51,7 @@ ENV PIP_NO_CACHE_DIR=1 \
     TATER_AIRPLAY_CLI_PATH=/usr/local/bin/cliairplay \
     TATER_SHAIRPORT_SYNC_PATH=/usr/local/bin/shairport-sync \
     TATER_FFMPEG_PATH=/usr/bin/ffmpeg \
-    LD_LIBRARY_PATH=/usr/local/nvidia/lib:/usr/local/nvidia/lib64:/usr/local/lib/python3.11/site-packages/nvidia/cublas/lib:/usr/local/lib/python3.11/site-packages/nvidia/cuda_runtime/lib:/usr/local/lib/python3.11/site-packages/nvidia/cuda_nvrtc/lib:/usr/local/lib/python3.11/site-packages/nvidia/cudnn/lib:/usr/local/lib/python3.11/site-packages/nvidia/curand/lib:/usr/local/lib/python3.11/site-packages/nvidia/cusolver/lib:/usr/local/lib/python3.11/site-packages/nvidia/cusparse/lib:/usr/local/lib/python3.11/site-packages/nvidia/nvjitlink/lib:/usr/local/lib/python3.11/site-packages/nvidia/nccl/lib
+    LD_LIBRARY_PATH=/usr/local/nvidia/lib:/usr/local/nvidia/lib64:/usr/local/lib/python3.11/site-packages/nvidia/cu13/lib:/usr/local/lib/python3.11/site-packages/nvidia/cudnn/lib:/usr/local/lib/python3.11/site-packages/nvidia/nccl/lib:/usr/local/lib/python3.11/site-packages/nvidia/cusparselt/lib:/usr/local/lib/python3.11/site-packages/nvidia/nvshmem/lib
 
 ARG TARGETARCH
 ARG AIRPLAY_CLI_VERSION=0.4.12
@@ -122,15 +125,18 @@ RUN set -eu; \
 
 COPY requirements.txt .
 
+# cu130 wheels share one CUDA 13 package set (nvidia/cu13, nvidia/cudnn,
+# nvidia/nccl, ...) with onnxruntime-gpu's cuda/cudnn extras, so mixing cu12
+# and cu13 wheels is not an option. The pair is pinned to the newest
+# torch/torchaudio release published for both linux/amd64 and linux/arm64.
 RUN python -m pip install --upgrade pip \
  && grep -Ev '^[[:space:]]*(torch|torchaudio|torchvision)([[:space:]=<>!~]|$)' requirements.txt > /tmp/requirements.nvidia.txt \
- && python -m pip install --index-url https://download.pytorch.org/whl/cu128 torch torchaudio \
- && python -m pip install "nvidia-cublas-cu12" "nvidia-cudnn-cu12==9.*" \
+ && python -m pip install --index-url https://download.pytorch.org/whl/cu130 "torch==2.11.0+cu130" "torchaudio==2.11.0+cu130" \
  && python -m pip install -r /tmp/requirements.nvidia.txt \
  && python -c "import importlib.util; required=('cv2','numpy','torch','transformers','huggingface_hub','pychromecast'); missing=[name for name in required if importlib.util.find_spec(name) is None]; assert not missing, missing" \
  && python -c "import cv2, numpy; assert callable(cv2.FaceDetectorYN.create) and callable(cv2.FaceRecognizerSF.create); print('Face ID ready: YuNet + SFace, OpenCV ' + cv2.__version__)" \
  && python -m pip uninstall -y onnxruntime \
- && python -m pip install "onnxruntime-gpu[cuda,cudnn]<1.27" \
+ && python -m pip install "onnxruntime-gpu[cuda,cudnn]>=1.29,<1.33" \
  && python -c "import pathlib; libraries=sorted(pathlib.Path('/usr/local/lib/python3.11/site-packages/nvidia/nccl/lib').glob('libnccl.so.2*')); assert libraries, 'PyTorch did not install the NCCL runtime'; print('nccl_runtime', libraries[0])" \
  && python -c "from google.protobuf import runtime_version; import onnx_asr, onnxruntime as ort, torch, torchaudio, transformers, webrtcvad; providers=ort.get_available_providers(); assert 'CUDAExecutionProvider' in providers, providers; print('protobuf_runtime', runtime_version.__name__, 'torch', torch.__version__, 'cuda', torch.version.cuda, 'torchaudio', torchaudio.__version__, 'transformers', transformers.__version__, 'webrtcvad', webrtcvad.__name__, 'onnx_providers', ','.join(providers))"
 

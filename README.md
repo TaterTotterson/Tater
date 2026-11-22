@@ -231,7 +231,7 @@ If port 8501 is already in use, change `HTMLUI_PORT` in the command. Continue to
 
 ### NVIDIA Docker
 
-The NVIDIA image is available for amd64 systems with an NVIDIA driver and NVIDIA Container Toolkit installed:
+The NVIDIA image is available for amd64 and arm64 systems (including the NVIDIA DGX Spark) with an NVIDIA driver 580 or newer and the NVIDIA Container Toolkit installed:
 
 ```bash
 docker pull ghcr.io/tatertotterson/tater:nvidia
@@ -262,7 +262,7 @@ The setup menu asks which runtime fits your system, creates `.venv`, installs de
 | --- | --- |
 | CPU | Most Linux PCs and generic ARM systems |
 | macOS | Apple Silicon Macs |
-| NVIDIA | Linux PCs and servers with NVIDIA GPUs |
+| NVIDIA | Linux PCs and servers with NVIDIA GPUs (driver 580+, amd64 or arm64) |
 | AMD ROCm | Supported Linux systems with AMD GPUs or Ryzen AI |
 | Jetson | NVIDIA Jetson systems |
 | Thor | Jetson Thor systems |
