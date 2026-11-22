@@ -14,7 +14,7 @@ targets. SAT1 and Voice PE have passed Ethernet hardware tests.
   network and wake readiness stale for up to five minutes. Keep cached
   discovery/settings and unsaved edits. Missing wake readiness is shown as
   unavailable; a successful cached wake-model load no longer appears as an error.
-- **Native Firmware 0.7.0.** Release build `native-0.7.0-rev1` enables USB
+- **Native Firmware 0.7.0.** Enable USB
   Ethernet in the standard SAT1, Voice PE, ReSpeaker XVF3800, and ESP32-S3-BOX-3
   images. Includes Ethernet priority after DHCP, saved Wi-Fi fallback, computer
   USB console protection, and network diagnostics. Fix USB frame boundaries,
@@ -36,11 +36,11 @@ targets. SAT1 and Voice PE have passed Ethernet hardware tests.
   instructions. The README now documents both firmware families.
 
 Firmware and app updates are separate: install the matching
-[Native Firmware 0.7.0 release](https://github.com/TaterTotterson/Tater-Native-Firmware/releases/tag/native-0.7.0-rev1)
+[Native Firmware 0.7.0 release](https://github.com/TaterTotterson/Tater-Native-Firmware/releases/tag/native-0.7.0)
 for your board and update Tater to 3.0.8 for the corrected display. Ethernet
 handoffs may interrupt playback. Extended music/power soak and live failover
 with power retained remain unverified on hardware; see the
-[Native USB Ethernet guide](https://github.com/TaterTotterson/Tater-Native-Firmware/blob/native-0.7.0-rev1/docs/usb-ethernet.md).
+[Native USB Ethernet guide](https://github.com/TaterTotterson/Tater-Native-Firmware/blob/native-0.7.0/docs/usb-ethernet.md).
 For Echo power and connector differences, follow the
 [Echo adapter guide](https://github.com/TaterTotterson/Tater-Echo-Firmware#usb-ethernet-adapters).
 

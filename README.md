@@ -13,7 +13,7 @@
 
 **New in 3.0.8:** Satellite diagnostics refresh live network and wake status,
 including USB Ethernet with Tater Native Firmware **0.7.0** on all four ESP32
-satellite targets (release build `native-0.7.0-rev1`).
+satellite targets.
 The tested powered adapter also works with supported Echo satellites; see
 [Ethernet and PoE adapters](#ethernet-and-poe-adapters).
 [Read the release notes](macos/Tater/RELEASE_NOTES.md).
@@ -64,7 +64,7 @@ Micro-USB female → USB-C male converter**.
 | Satellite | Connection and support |
 | --- | --- |
 | SAT1 and Voice PE | Use Native Firmware **0.7.0+** and a **data-capable Micro-USB female → USB-C male converter**. Connect to the ESP32 USB port (not SAT1's XMOS port), then cold boot through the powered adapter. Both boards passed voice, downloaded speech, and cold-start checks in both USB-C orientations. |
-| ReSpeaker XVF3800 and ESP32-S3-BOX-3 | USB Ethernet is included in Native Firmware **0.7.0**, release build `native-0.7.0-rev1`. Hardware testing with the adapter is still pending; USB wiring, power delivery, and voice performance have not been verified. Use the ESP32 USB port (the XIAO port on ReSpeaker), not a separate XMOS USB audio port. |
+| ReSpeaker XVF3800 and ESP32-S3-BOX-3 | USB Ethernet is included in Native Firmware **0.7.0**. Hardware testing with the adapter is still pending; USB wiring, power delivery, and voice performance have not been verified. Use the ESP32 USB port (the XIAO port on ReSpeaker), not a separate XMOS USB audio port. |
 | Supported Echo satellites | The same adapter was tested on Biscuit, Checkers, Cronos, Crown, Athena, and Rook. Biscuit can receive power through it; the other listed models retain their normal power supplies. Follow the [Echo adapter and per-device instructions](https://github.com/TaterTotterson/Tater-Echo-Firmware#usb-ethernet-adapters). |
 
 Native firmware currently accepts only RTL8152 adapters exposing USB
