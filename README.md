@@ -9,7 +9,7 @@
   </a>
 </p>
 
-**Tater** is a local-first AI platform that can run local models through **llama.cpp**, or connect to remote OpenAI-compatible and llama.cpp APIs. It supports voice satellites like **VoicePE**, **Sat1**, **S3Box**, and **ReSpeaker XVF3800**, plus portals for **Discord**, **Home Assistant**, **HomeKit**, **IRC**, **macOS**, **Matrix**, **Meshtastic**, **Telegram**, and **XBMC4Xbox**.
+**Tater** is a local-first AI platform that can run local models through **llama.cpp**, or connect to remote OpenAI-compatible and llama.cpp APIs. It supports voice satellites like **VoicePE**, **Sat1**, **S3Box**, **ReSpeaker XVF3800**, supported **Amazon Echo** devices, and **ThirdReality S420**, plus portals for **Discord**, **Home Assistant**, **HomeKit**, **IRC**, **macOS**, **Matrix**, **Meshtastic**, **Telegram**, and **XBMC4Xbox**.
 
 ---
 
