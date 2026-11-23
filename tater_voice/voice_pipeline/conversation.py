@@ -431,6 +431,7 @@ async def _run_hydra_turn_for_voice(*, transcript: str, conv_id: str, session: V
             bool(getattr(session, "continued_chat_reopen", False))
             and vp._text(getattr(session, "speaker_match_reason", "")) == "too_short"
             and bool(prior_speaker_id or prior_speaker_name)
+            and context.get("speaker_model_source") == "zl389/w2v-bert-2.0_SV"
         )
         if reuse_prior_speaker:
             session.speaker_id = prior_speaker_id
@@ -449,7 +450,7 @@ async def _run_hydra_turn_for_voice(*, transcript: str, conv_id: str, session: V
                 f"session_id={session.session_id} speaker={prior_speaker_name or prior_speaker_id!r}"
             )
         else:
-            for key in ("speaker_id", "speaker_name", "speaker_score"):
+            for key in ("speaker_id", "speaker_name", "speaker_score", "speaker_model_source"):
                 context.pop(key, None)
     if not session_has_emotion:
         for key in ("voice_emotion", "voice_emotion_score", "voice_emotion_prompt_hint"):

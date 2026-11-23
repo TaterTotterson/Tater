@@ -71,7 +71,7 @@ const state = {
   appShellController: null,
   sidebarCollapsed: String(safeStorageGet("tater_tateros_sidebar_collapsed", "false")).trim().toLowerCase() === "true",
   settingsLogAutoScroll: String(safeStorageGet("tater_settings_log_auto_scroll", "true")).trim().toLowerCase() !== "false",
-  popupEffectStyle: String(safeStorageGet("tater_tateros_popup_effect_style", "scale")).trim().toLowerCase() || "scale",
+  popupEffectStyle: String(safeStorageGet("tater_tateros_popup_effect_style", "tilt")).trim().toLowerCase() || "tilt",
   webuiTheme: String(safeStorageGet("tater_tateros_theme", "tater")).trim().toLowerCase() || "tater",
   activeChatJobs: {},
   redisStatus: {
@@ -162,7 +162,7 @@ function normalizePopupEffectStyle(value) {
   if (POPUP_EFFECT_STYLE_CHOICES.includes(normalized)) {
     return normalized;
   }
-  return Object.prototype.hasOwnProperty.call(POPUP_EFFECT_STYLE_ALIASES, normalized) ? POPUP_EFFECT_STYLE_ALIASES[normalized] : "scale";
+  return Object.prototype.hasOwnProperty.call(POPUP_EFFECT_STYLE_ALIASES, normalized) ? POPUP_EFFECT_STYLE_ALIASES[normalized] : "tilt";
 }
 
 function applyPopupEffectStyle(value) {

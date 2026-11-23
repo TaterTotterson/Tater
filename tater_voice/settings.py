@@ -21,8 +21,8 @@ VOICE_MODEL_SETTING_GROUPS = [
         ],
     ),
     (
-        "SpeechBrain Models",
-        ["VOICE_SPEECHBRAIN_ACCELERATION"],
+        "Voice Identity Models",
+        ["VOICE_IDENTITY_ACCELERATION"],
     ),
 ]
 
@@ -501,10 +501,10 @@ def voice_ui_setting_specs() -> List[Dict[str, Any]]:
             "description": "WebRTC only. 0 is least aggressive; 3 filters non-speech most aggressively.",
         },
         {
-            "key": "VOICE_SPEECHBRAIN_ACCELERATION",
-            "label": "SpeechBrain Acceleration",
+            "key": "VOICE_IDENTITY_ACCELERATION",
+            "label": "Identity Model Acceleration",
             "type": "select",
-            "default": vp.DEFAULT_SPEECHBRAIN_ACCELERATION,
+            "default": vp.DEFAULT_IDENTITY_ACCELERATION,
             "options": [
                 {"value": "auto", "label": "Auto"},
                 {"value": "cpu", "label": "CPU"},
@@ -512,7 +512,7 @@ def voice_ui_setting_specs() -> List[Dict[str, Any]]:
                 {"value": "rocm", "label": "AMD ROCm"},
                 {"value": "mps", "label": "Apple Metal / MPS"},
             ],
-            "description": "Controls SpeechBrain models used by Speaker ID and Emotion ID. Auto uses NVIDIA CUDA, AMD ROCm, then Apple MPS when available, with CPU fallback if accelerated load fails.",
+            "description": "Controls the w2v-BERT Speaker ID and Emotion2vec+ Emotion ID models. Auto uses NVIDIA CUDA, AMD ROCm, then Apple MPS when available, with CPU fallback if accelerated load fails.",
         },
         {
             "key": "VOICE_EXPERIMENTAL_LIVE_TOOL_PROGRESS_ENABLED",

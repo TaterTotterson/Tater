@@ -1154,6 +1154,10 @@ pip_install_requirements() {
   # floor without modifying the third-party source.
   CMAKE_POLICY_VERSION_MINIMUM="${CMAKE_POLICY_VERSION_MINIMUM:-3.5}" \
     "${venv_python}" -m pip install -r "${requirements_file}"
+  if "${venv_python}" -m pip show speechbrain >/dev/null 2>&1; then
+    info "Removing the retired SpeechBrain dependency"
+    "${venv_python}" -m pip uninstall -y speechbrain
+  fi
 }
 
 install_cpu() {
@@ -1672,7 +1676,7 @@ if remote_only:
         "faster_whisper",
         "transformers",
         "onnx_asr",
-        "speechbrain",
+        "funasr",
     ]
     unexpectedly_installed = [name for name in forbidden if importlib.util.find_spec(name) is not None]
     if unexpectedly_installed:

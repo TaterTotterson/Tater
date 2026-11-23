@@ -56,8 +56,8 @@ class PopupEffectsUiTests(unittest.TestCase):
             self.assertEqual(normalize('unknown', old), new)
         for effect in ('disabled', 'fade', 'scale', 'slide', 'tilt', 'fold'):
             self.assertEqual(normalize(effect), effect)
-        self.assertEqual(normalize(None), 'scale')
-        self.assertEqual(normalize('unknown', 'invalid'), 'scale')
+        self.assertEqual(normalize(None), 'tilt')
+        self.assertEqual(normalize('unknown', 'invalid'), 'tilt')
         self.assertIn('raw_style not in WEBUI_POPUP_EFFECT_STYLE_ALIASES', source('tater/web/application.py'))
 
 if __name__ == '__main__':

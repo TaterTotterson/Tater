@@ -1,8 +1,8 @@
 export const popupEffects = [
-  { id: "scale", label: "Soft zoom", description: "Gently grow into view and shrink away.", hint: "Default" },
+  { id: "scale", label: "Soft zoom", description: "Gently grow into view and shrink away.", hint: "Gentle" },
   { id: "fade", label: "Fade", description: "A quiet dissolve, with no movement.", hint: "Subtle" },
   { id: "slide", label: "Slide", description: "Glide up into view and down to close.", hint: "Smooth" },
-  { id: "tilt", label: "Tilt", description: "Tip into view with a little 3D depth.", hint: "Playful" },
+  { id: "tilt", label: "Tilt", description: "Tip into view with a little 3D depth.", hint: "Default" },
   { id: "fold", label: "Fold", description: "Unfold from the top, then flatten away.", hint: "Compiz inspired" },
   { id: "disabled", label: "Off", description: "Open and close instantly, without animation.", hint: "No motion" },
 ] as const;
@@ -15,7 +15,7 @@ export type PopupSurface = "dialog" | "toast";
 const legacyEffects: Record<string, PopupEffect> = { flame: "scale", dust: "fade", glitch: "tilt", portal: "fold", melt: "slide" };
 export function normalizePopupEffect(value: unknown): PopupEffect {
   const token = String(value || "").trim().toLowerCase();
-  return popupEffects.some(effect => effect.id === token) ? token as PopupEffect : Object.prototype.hasOwnProperty.call(legacyEffects, token) ? legacyEffects[token] : "scale";
+  return popupEffects.some(effect => effect.id === token) ? token as PopupEffect : Object.prototype.hasOwnProperty.call(legacyEffects, token) ? legacyEffects[token] : "tilt";
 }
 
 export function prefersReducedMotion(): boolean {

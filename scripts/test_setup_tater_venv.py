@@ -427,6 +427,7 @@ class SetupTaterVenvTests(unittest.TestCase):
             fake_python = Path(temp_dir) / "python"
             fake_python.write_text(
                 "#!/bin/sh\n"
+                "if [ \"$1 $2 $3\" = '-m pip show' ]; then exit 1; fi\n"
                 "printf '%s\\n' \"${CMAKE_POLICY_VERSION_MINIMUM:-}\" \"$*\" > \"${TEST_LOG}\"\n",
                 encoding="utf-8",
             )
@@ -451,6 +452,39 @@ class SetupTaterVenvTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
         self.assertEqual(output.splitlines()[0], "3.5")
         self.assertIn(f"-m pip install -r {requirements}", output)
+
+    def test_speechbrain_is_removed_only_after_successful_dependency_update(self) -> None:
+        for installed, install_status in (("1", "0"), ("0", "0"), ("1", "7")):
+            with self.subTest(installed=installed, install_status=install_status), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                python = root / "python"
+                python.write_text(
+                    "#!/bin/sh\n"
+                    "printf '%s\\n' \"$*\" >> \"${TEST_LOG}\"\n"
+                    "case \"$1 $2 $3\" in\n"
+                    "  '-m pip install') exit \"${TEST_INSTALL_STATUS}\" ;;\n"
+                    "  '-m pip show') test \"${TEST_INSTALLED}\" = 1 ;;\n"
+                    "  '-m pip uninstall') exit 0 ;;\n"
+                    "  *) exit 1 ;;\n"
+                    "esac\n",
+                    encoding="utf-8",
+                )
+                python.chmod(0o755)
+                log = root / "pip.log"
+                completed = run_setup_functions(
+                    'pip_install_requirements "${TEST_PYTHON}" /test/requirements.txt',
+                    environ={"TEST_PYTHON": str(python), "TEST_LOG": str(log),
+                             "TEST_INSTALLED": installed, "TEST_INSTALL_STATUS": install_status},
+                )
+                calls = log.read_text().splitlines()
+                self.assertEqual(completed.returncode, int(install_status), completed.stderr)
+                self.assertEqual(calls[0], "-m pip install -r /test/requirements.txt")
+                if install_status != "0":
+                    self.assertEqual(len(calls), 1)
+                elif installed == "1":
+                    self.assertEqual(calls[-1], "-m pip uninstall -y speechbrain")
+                else:
+                    self.assertNotIn("-m pip uninstall -y speechbrain", calls)
 
     def test_all_requirement_files_use_the_compatibility_helper(self) -> None:
         self.assertEqual(SETUP_LIBRARY.count('-m pip install -r'), 1)

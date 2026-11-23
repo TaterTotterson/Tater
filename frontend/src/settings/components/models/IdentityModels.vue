@@ -286,7 +286,7 @@ defineExpose({ apply, refresh });
     </template>
 
     <article v-if="!isSpeaker" class="tm-form-card tm-emotion-result-card">
-      <header><div><span class="tv-eyebrow">Live result</span><h3>Latest voice tone</h3><p>Updates automatically after a long enough voice turn is classified.</p></div><span class="tm-speech-status-chip">{{ lastResult.updated_at || "Waiting" }}</span></header>
+      <header><div><span class="tv-eyebrow">Live result</span><h3>Latest voice tone</h3><p>Emotion2vec+ recognizes angry, disgusted, fearful, happy, neutral, sad, and surprised delivery. Other and unknown results add no tone hint.</p></div><span class="tm-speech-status-chip">{{ lastResult.updated_at || "Waiting" }}</span></header>
       <div class="tm-emotion-result"><div class="tm-emotion-score" :style="{ '--tm-score': `${scorePercent * 3.6}deg` }"><span><strong>{{ scorePercent }}%</strong><small>confidence</small></span></div><div class="tm-emotion-copy"><span>Detected tone</span><strong>{{ lastResult.emotion || "No result yet" }}</strong><p>{{ lastResult.prompt_hint || "No prompt hint was added for the latest turn." }}</p></div></div>
     </article>
   </section>

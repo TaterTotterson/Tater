@@ -27,7 +27,7 @@ const settle = () => new Promise(resolve => setImmediate(resolve));
 test('all existing preferences migrate and unknown values choose the default', () => {
   for (const [old, current] of Object.entries(legacy)) assert.equal(normalizePopupEffect(` ${old.toUpperCase()} `), current);
   for (const effect of popupEffects) assert.equal(normalizePopupEffect(effect.id), effect.id);
-  for (const value of [undefined, '', 'unknown', 'constructor', '__proto__']) assert.equal(normalizePopupEffect(value), 'scale');
+  for (const value of [undefined, '', 'unknown', 'constructor', '__proto__']) assert.equal(normalizePopupEffect(value), 'tilt');
 });
 
 test('bootstrap and Vue normalize exactly the same saved values', async () => {

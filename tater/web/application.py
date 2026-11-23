@@ -428,7 +428,7 @@ SPUD_LINK_SERVER_MODE_CHOICES = {
 SPUD_LINK_PAIRING_TTL_SECONDS = 10 * 60
 SPUD_LINK_ACTIVE_RUN_TTL_SECONDS = 24 * 60 * 60
 WEBUI_POPUP_EFFECT_STYLE_KEY = "tater:webui:popup_effect_style"
-DEFAULT_WEBUI_POPUP_EFFECT_STYLE = "scale"
+DEFAULT_WEBUI_POPUP_EFFECT_STYLE = "tilt"
 WEBUI_POPUP_EFFECT_STYLE_CHOICES = {"disabled", "fade", "scale", "slide", "tilt", "fold"}
 WEBUI_POPUP_EFFECT_STYLE_ALIASES = {"flame": "scale", "dust": "fade", "glitch": "tilt", "portal": "fold", "melt": "slide"}
 WEBUI_THEME_KEY = "tater:webui:theme"
@@ -4314,7 +4314,7 @@ def _warm_speech_model_item(item: Dict[str, str]) -> str:
         from tater_voice import speaker_id as esphome_speaker_id
 
         token = backend.lower()
-        if token != "speechbrain":
+        if token != "w2v_bert2_sv":
             raise RuntimeError(f"unsupported Speaker ID backend: {token or 'unknown'}")
         return esphome_speaker_id.warmup_model(enabled_only=True)
 
@@ -4322,7 +4322,7 @@ def _warm_speech_model_item(item: Dict[str, str]) -> str:
         from tater_voice import emotion_id as esphome_emotion_id
 
         token = backend.lower()
-        if token != "speechbrain":
+        if token != "emotion2vec":
             raise RuntimeError(f"unsupported Emotion ID backend: {token or 'unknown'}")
         return esphome_emotion_id.warmup_model(enabled_only=True)
 
@@ -4333,8 +4333,8 @@ def _run_speech_model_warmup(settings: Dict[str, Any], *, reason: str) -> None:
     items = [
         {"kind": "stt", "backend": str(settings.get("stt_backend") or "").strip()},
         *_speech_model_warmup_tts_items(settings),
-        {"kind": "speaker_id", "backend": "speechbrain"},
-        {"kind": "emotion_id", "backend": "speechbrain"},
+        {"kind": "speaker_id", "backend": "w2v_bert2_sv"},
+        {"kind": "emotion_id", "backend": "emotion2vec"},
     ]
     items = [item for item in items if str(item.get("backend") or "").strip()]
     with speech_model_warmup_lock:
@@ -11271,7 +11271,7 @@ def _runtime_managed_tts_worker_rows() -> List[Dict[str, Any]]:
     return rows
 
 
-def _runtime_speechbrain_engine_row(module: Any, *, category: str, kind_label: str, provider: str, provider_label: str) -> List[Dict[str, Any]]:
+def _runtime_identity_engine_row(module: Any, *, category: str, kind_label: str, provider: str, provider_label: str) -> List[Dict[str, Any]]:
     try:
         lock = getattr(module, "_ENGINE_LOCK")
         with lock:
@@ -11321,12 +11321,12 @@ def _runtime_managed_voice_model_rows() -> List[Dict[str, Any]]:
         from tater_voice import speaker_id as speaker_id_module
 
         rows.extend(
-            _runtime_speechbrain_engine_row(
+            _runtime_identity_engine_row(
                 speaker_id_module,
                 category="speaker_id",
                 kind_label="SpeakerID",
-                provider="speaker_id_speechbrain",
-                provider_label="SpeakerID • SpeechBrain",
+                provider="speaker_id_w2v_bert2_sv",
+                provider_label="SpeakerID • w2v-BERT 2.0 SV",
             )
         )
     except Exception:
@@ -11335,12 +11335,12 @@ def _runtime_managed_voice_model_rows() -> List[Dict[str, Any]]:
         from tater_voice import emotion_id as emotion_id_module
 
         rows.extend(
-            _runtime_speechbrain_engine_row(
+            _runtime_identity_engine_row(
                 emotion_id_module,
                 category="emotion_id",
                 kind_label="EmotionID",
-                provider="emotion_id_speechbrain",
-                provider_label="EmotionID • SpeechBrain",
+                provider="emotion_id_emotion2vec",
+                provider_label="EmotionID • Emotion2vec+ Base",
             )
         )
     except Exception:
@@ -17622,8 +17622,8 @@ def _spud_link_model_capability_payload() -> Dict[str, Any]:
         "vision": vision_capability,
         "audio": audio_capability,
         "video": video_capability,
-        "speaker_id": {"available": bool(speaker_id_module.speaker_id_enabled() and speaker.get("available")), "loaded": getattr(speaker_id_module, "_ENGINE", None) is not None, "model": str(speaker.get("model_source") or "SpeechBrain")},
-        "emotion_id": {"available": bool(emotion_id_module.emotion_id_enabled() and emotion.get("available")), "loaded": getattr(emotion_id_module, "_ENGINE", None) is not None, "model": str(emotion.get("model_source") or "SpeechBrain")},
+        "speaker_id": {"available": bool(speaker_id_module.speaker_id_enabled() and speaker.get("available")), "loaded": getattr(speaker_id_module, "_ENGINE", None) is not None, "model": str(speaker.get("model_source") or "w2v-BERT 2.0 SV")},
+        "emotion_id": {"available": bool(emotion_id_module.emotion_id_enabled() and emotion.get("available")), "loaded": getattr(emotion_id_module, "_ENGINE", None) is not None, "model": str(emotion.get("model_source") or "Emotion2vec+ Base")},
         "face_id": {"available": bool(face.get("enabled")), "loaded": bool(face.get("loaded")), "model": str(face.get("model") or "Face ID")},
     }
 

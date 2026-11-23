@@ -6541,7 +6541,7 @@ var Au = {
 		id: "scale",
 		label: "Soft zoom",
 		description: "Gently grow into view and shrink away.",
-		hint: "Default"
+		hint: "Gentle"
 	},
 	{
 		id: "fade",
@@ -6559,7 +6559,7 @@ var Au = {
 		id: "tilt",
 		label: "Tilt",
 		description: "Tip into view with a little 3D depth.",
-		hint: "Playful"
+		hint: "Default"
 	},
 	{
 		id: "fold",
@@ -6582,7 +6582,7 @@ var Au = {
 };
 function uf(e) {
 	let t = String(e || "").trim().toLowerCase();
-	return cf.some((e) => e.id === t) ? t : Object.prototype.hasOwnProperty.call(lf, t) ? lf[t] : "scale";
+	return cf.some((e) => e.id === t) ? t : Object.prototype.hasOwnProperty.call(lf, t) ? lf[t] : "tilt";
 }
 function df() {
 	return window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === !0;
@@ -15570,7 +15570,7 @@ var fD = { class: "tset-resource" }, pD = { class: "tset-resource-grid" }, mD = 
 	emits: ["saved", "notify"],
 	setup(e, { expose: t, emit: n }) {
 		let r = e, i = n, a = /* @__PURE__ */ Dt({
-			popup_effect_style: "scale",
+			popup_effect_style: "tilt",
 			emoji_enable_on_reaction_add: !0,
 			emoji_enable_auto_reaction_on_reply: !0,
 			emoji_reaction_chain_chance_percent: 100,
@@ -15578,7 +15578,7 @@ var fD = { class: "tset-resource" }, pD = { class: "tset-resource-grid" }, mD = 
 			emoji_reaction_chain_cooldown_seconds: 30,
 			emoji_reply_reaction_cooldown_seconds: 120,
 			emoji_min_message_length: 4
-		}), o = /* @__PURE__ */ H(!1), s = /* @__PURE__ */ H(!1), c = /* @__PURE__ */ H(""), l = /* @__PURE__ */ H(""), u = /* @__PURE__ */ H(!1), d = /* @__PURE__ */ H(!1), f = /* @__PURE__ */ H("scale"), p = /* @__PURE__ */ H(""), m = 0, h = Q(() => cf.find((e) => e.id === a.popup_effect_style) || cf[0]);
+		}), o = /* @__PURE__ */ H(!1), s = /* @__PURE__ */ H(!1), c = /* @__PURE__ */ H(""), l = /* @__PURE__ */ H(""), u = /* @__PURE__ */ H(!1), d = /* @__PURE__ */ H(!1), f = /* @__PURE__ */ H("tilt"), p = /* @__PURE__ */ H(""), m = 0, h = Q(() => cf.find((e) => e.id === a.popup_effect_style) || cf[0]);
 		function g(e, t, n, r) {
 			let i = Number(e);
 			return Number.isFinite(i) ? Math.min(r, Math.max(n, Math.round(i))) : t;
@@ -17009,7 +17009,7 @@ var Lk = { class: "tm-stack tm-hf-browser" }, Rk = {
 			g.value ? Z("", !0) : (K(), q("article", kM, [J("header", null, [t[35] ||= J("div", null, [
 				J("span", { class: "tv-eyebrow" }, "Live result"),
 				J("h3", null, "Latest voice tone"),
-				J("p", null, "Updates automatically after a long enough voice turn is classified.")
+				J("p", null, "Emotion2vec+ recognizes angry, disgusted, fearful, happy, neutral, sad, and surprised delivery. Other and unknown results add no tone hint.")
 			], -1), J("span", AM, B(S.value.updated_at || "Waiting"), 1)]), J("div", jM, [J("div", {
 				class: "tm-emotion-score",
 				style: ne({ "--tm-score": `${O.value * 3.6}deg` })

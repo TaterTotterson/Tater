@@ -1,17 +1,16 @@
 from __future__ import annotations
 
-import array
 import base64
 import contextlib
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import threading
 import time
 import uuid
-import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -23,6 +22,7 @@ from spud_link_models import request_json as spud_link_request_json
 from spud_link_models import should_use_hub as spud_link_should_use_hub
 
 from . import runtime as esphome_runtime
+from . import identity_backends as identity_models
 
 
 logger = logging.getLogger("voice_core")
@@ -88,27 +88,15 @@ SPEAKER_ID_LAST_HASH_KEY = "voice_speaker_id_last"
 SPEAKER_ID_PENDING_TTL_S = 15 * 60
 SPEAKER_ID_AGENT_LABS_ROOT = agent_lab_path("speaker_id")
 SPEAKER_ID_MODEL_ROOT = agent_lab_path("models", "speaker_id")
-SPEAKER_ID_PROFILES_PATH = SPEAKER_ID_AGENT_LABS_ROOT / "profiles.json"
+SPEAKER_ID_PROFILES_PATH = SPEAKER_ID_AGENT_LABS_ROOT / "profiles-w2v-bert2.json"
 
 DEFAULT_SPEAKER_ID_ENABLED = False
 DEFAULT_SPEAKER_ID_BEST_MATCH = False
-DEFAULT_SPEAKER_ID_MODEL_SOURCE = "speechbrain/spkrec-ecapa-voxceleb"
-DEFAULT_SPEAKER_ID_MATCH_THRESHOLD = 0.68
+DEFAULT_SPEAKER_ID_MODEL_SOURCE = identity_models.SPEAKER_MODEL
+DEFAULT_SPEAKER_ID_MATCH_THRESHOLD = 0.60
 DEFAULT_SPEAKER_ID_MATCH_MARGIN = 0.05
 DEFAULT_SPEAKER_ID_MIN_SPEECH_S = 1.15
 DEFAULT_SPEAKER_ID_ENROLL_MIN_SPEECH_S = 2.25
-_SPEECHBRAIN_REPO_FILES = (
-    "hyperparams.yaml",
-    "embedding_model.ckpt",
-    "mean_var_norm_emb.ckpt",
-    "classifier.ckpt",
-    "label_encoder.txt",
-)
-
-_AUDIOOP = None
-with contextlib.suppress(Exception):
-    import audioop as _AUDIOOP  # type: ignore[assignment]
-
 _ENGINE_LOCK = threading.Lock()
 _ENGINE: Any = None
 _ENGINE_SOURCE = ""
@@ -196,10 +184,11 @@ def _setting_specs() -> List[Dict[str, Any]]:
         },
         {
             "key": "VOICE_SPEAKER_ID_MODEL_SOURCE",
-            "label": "SpeechBrain Model",
+            "label": "Speaker Model",
+            "read_only": True,
             "type": "text",
             "default": DEFAULT_SPEAKER_ID_MODEL_SOURCE,
-            "description": "SpeechBrain speaker-recognition model source used for enrollment and matching.",
+            "description": "Trained w2v-BERT 2.0 speaker model used for enrollment and matching.",
         },
     ]
 
@@ -215,11 +204,16 @@ def _settings_map() -> Dict[str, Dict[str, Any]]:
 
 
 def _settings() -> Dict[str, Any]:
-    vp = _vp()
     with contextlib.suppress(Exception):
         row = redis_client.hgetall(SPEAKER_ID_SETTINGS_HASH_KEY) or {}
         if isinstance(row, dict):
-            return dict(row)
+            row = dict(row)
+            if row and _vp()._text(row.get("VOICE_SPEAKER_ID_MODEL_SOURCE")) != DEFAULT_SPEAKER_ID_MODEL_SOURCE:
+                row.update({"VOICE_SPEAKER_ID_MODEL_SOURCE": DEFAULT_SPEAKER_ID_MODEL_SOURCE,
+                            "VOICE_SPEAKER_ID_MATCH_THRESHOLD": str(DEFAULT_SPEAKER_ID_MATCH_THRESHOLD),
+                            "VOICE_SPEAKER_ID_MATCH_MARGIN": str(DEFAULT_SPEAKER_ID_MATCH_MARGIN)})
+                redis_client.hset(SPEAKER_ID_SETTINGS_HASH_KEY, mapping=row)
+            return row
     return {}
 
 
@@ -229,11 +223,6 @@ def _get_bool_setting(name: str, default: bool) -> bool:
 
 def _get_float_setting(name: str, default: float, *, minimum: Optional[float] = None, maximum: Optional[float] = None) -> float:
     return _vp()._as_float(_settings().get(name), default, minimum=minimum, maximum=maximum)
-
-
-def _get_text_setting(name: str, default: str) -> str:
-    value = _vp()._text(_settings().get(name))
-    return value or str(default or "")
 
 
 def speaker_id_enabled() -> bool:
@@ -266,7 +255,7 @@ def last_result() -> Dict[str, Any]:
         raw = redis_client.hget(SPEAKER_ID_LAST_HASH_KEY, "last_result")
         if raw:
             parsed = json.loads(_vp()._text(raw))
-            if isinstance(parsed, dict):
+            if isinstance(parsed, dict) and parsed.get("model_source") == _model_source():
                 return parsed
     return {}
 
@@ -281,13 +270,15 @@ def _enroll_min_speech_seconds() -> float:
 
 
 def _model_source() -> str:
-    return _get_text_setting("VOICE_SPEAKER_ID_MODEL_SOURCE", DEFAULT_SPEAKER_ID_MODEL_SOURCE)
+    return DEFAULT_SPEAKER_ID_MODEL_SOURCE
 
 
 def speaker_embedding_model_metadata(*, dimensions: int = 0) -> Dict[str, Any]:
     """Describe voice embeddings without exposing model cache paths."""
     return {
-        "provider": "speechbrain",
+        "provider": identity_models.SPEAKER_PROVIDER,
+        "model_revision": identity_models.SPEAKER_REVISION,
+        "checkpoint": identity_models.SPEAKER_CHECKPOINT,
         "model_source": _model_source(),
         "distance_metric": "cosine_similarity",
         "embedding_dimensions": max(0, int(dimensions or 0)),
@@ -302,6 +293,8 @@ def _normalize_embedding_model(raw: Any = None, *, dimensions: int = 0) -> Dict[
         "model_source": _vp()._text(source.get("model_source")) or _vp()._text(local.get("model_source")),
         "distance_metric": _vp()._text(source.get("distance_metric"))
         or _vp()._text(local.get("distance_metric")),
+        "model_revision": _vp()._text(source.get("model_revision")),
+        "checkpoint": _vp()._text(source.get("checkpoint")),
         "embedding_dimensions": max(
             0,
             int(dimensions or source.get("embedding_dimensions") or local.get("embedding_dimensions") or 0),
@@ -317,6 +310,8 @@ def _embedding_model_signature(metadata: Any, *, dimensions: int = 0) -> str:
             _vp()._text(normalized.get("model_source")).lower(),
             _vp()._text(normalized.get("distance_metric")).lower(),
             str(max(0, int(dimensions or normalized.get("embedding_dimensions") or 0))),
+            _vp()._text(normalized.get("model_revision")),
+            _vp()._text(normalized.get("checkpoint")),
         )
     )
 
@@ -330,7 +325,7 @@ def settings_fields() -> List[Dict[str, Any]]:
         row = dict(spec)
         key = vp._text(row.get("key"))
         field_type = vp._lower(row.get("type") or "text")
-        raw_value = current.get(key, row.get("default"))
+        raw_value = row.get("default") if row.get("read_only") else current.get(key, row.get("default"))
         if field_type == "checkbox":
             row["value"] = vp._as_bool(raw_value, vp._as_bool(row.get("default"), False))
         elif field_type == "number":
@@ -362,7 +357,7 @@ def save_settings_values(values: Dict[str, Any]) -> Dict[str, Any]:
     changed: List[str] = []
 
     for key, spec in specs.items():
-        if key not in incoming:
+        if key not in incoming or spec.get("read_only"):
             continue
         field_type = vp._lower(spec.get("type") or "text")
         raw_value = incoming.get(key)
@@ -407,61 +402,24 @@ def _huggingface_auth_label() -> str:
     return "configured" if _huggingface_auth_fingerprint() != "none" else "missing"
 
 
-def _call_speechbrain_loader_with_hf_token(loader: Any, kwargs: Dict[str, Any]) -> Any:
-    # SpeechBrain loaders can reject use_auth_token after partially building the
-    # model, which causes an expensive second load. The temporary HF environment
-    # above carries the token without triggering that retry path.
-    return loader(**kwargs)
-
-
-def _snapshot_complete(savedir: Path) -> bool:
-    return all((savedir / filename).exists() for filename in _SPEECHBRAIN_REPO_FILES)
-
-
-def _ensure_speechbrain_snapshot(source: str, savedir: Path, hf_cache_dir: Path) -> str:
-    source_path = Path(str(source or "")).expanduser()
-    if source_path.exists():
-        return str(source_path)
-    if _snapshot_complete(savedir):
-        return str(savedir)
-    try:
-        from huggingface_hub import snapshot_download  # type: ignore
-    except Exception as exc:
-        _log_warning("huggingface_hub snapshot download unavailable source=%s detail=%s", source, exc)
-        return source
-
-    token = str(huggingface_token() or "").strip() or None
-    savedir.mkdir(parents=True, exist_ok=True)
-    _log_info("downloading model snapshot source=%s savedir=%s hf_auth=%s", source, str(savedir), _huggingface_auth_label())
-    snapshot_download(
-        repo_id=source,
-        cache_dir=str(hf_cache_dir / "hub"),
-        local_dir=str(savedir),
-        local_dir_use_symlinks=False,
-        token=token,
-        allow_patterns=list(_SPEECHBRAIN_REPO_FILES),
-    )
-    return str(savedir) if _snapshot_complete(savedir) else source
-
-
 def _load_profiles() -> Dict[str, Any]:
     _ensure_dirs()
     if not SPEAKER_ID_PROFILES_PATH.is_file():
-        return {"version": 1, "speakers": []}
+        return {"version": 2, "speakers": []}
     with contextlib.suppress(Exception):
         payload = json.loads(SPEAKER_ID_PROFILES_PATH.read_text(encoding="utf-8"))
         if isinstance(payload, dict):
-            payload.setdefault("version", 1)
+            payload.setdefault("version", 2)
             payload.setdefault("speakers", [])
             if isinstance(payload.get("speakers"), list):
                 return payload
-    return {"version": 1, "speakers": []}
+    return {"version": 2, "speakers": []}
 
 
 def _save_profiles(data: Dict[str, Any]) -> None:
     _ensure_dirs()
     payload = dict(data or {})
-    payload["version"] = int(payload.get("version") or 1)
+    payload["version"] = 2
     payload["speakers"] = list(payload.get("speakers") or [])
     SPEAKER_ID_PROFILES_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -739,30 +697,18 @@ def consume_pending_enrollment(selector: str = "") -> Dict[str, Any]:
     return pending
 
 
-def _speechbrain_import_state() -> Tuple[bool, str]:
-    with contextlib.suppress(Exception):
-        import speechbrain.inference.speaker  # type: ignore  # noqa: F401
-        import torch  # type: ignore  # noqa: F401
-        return True, ""
-    try:
-        import speechbrain.inference.speaker  # type: ignore  # noqa: F401
-    except Exception as exc:
-        return False, f"SpeechBrain is unavailable: {exc}"
-    try:
-        import torch  # type: ignore  # noqa: F401
-    except Exception as exc:
-        return False, f"PyTorch is unavailable: {exc}"
-    return False, "Speaker ID dependencies are unavailable."
+def _model_import_state() -> Tuple[bool, str]:
+    return identity_models.dependencies("speaker_id")
 
 
-def _speechbrain_run_device(device: str) -> str:
+def _identity_run_device(device: str) -> str:
     return "cuda:0" if device == "cuda" else device
 
 
 def _accelerated_device_label(device: str) -> str:
     if device == "cuda":
         with contextlib.suppress(Exception):
-            if _vp()._speechbrain_acceleration_setting() == "rocm" or _vp()._torch_rocm_available():
+            if _vp()._identity_acceleration_setting() == "rocm" or _vp()._torch_rocm_available():
                 return "AMD ROCm"
         return "CUDA"
     if device == "mps":
@@ -770,39 +716,10 @@ def _accelerated_device_label(device: str) -> str:
     return device.upper()
 
 
-def _apply_speechbrain_yaml_compat_shim() -> None:
-    # SpeechBrain/HyperPyYAML still assumes a max_depth attribute exists on the
-    # ruamel loader object, but recent ESPHome releases bring in ruamel.yaml 0.19.x.
-    # Add a benign default so Speaker ID can coexist with ESPHome's pinned YAML.
-    with contextlib.suppress(Exception):
-        import ruamel.yaml  # type: ignore
-        import ruamel.yaml.loader  # type: ignore
-
-        for target in (
-            getattr(ruamel.yaml, "Loader", None),
-            getattr(ruamel.yaml, "SafeLoader", None),
-            getattr(ruamel.yaml, "RoundTripLoader", None),
-            getattr(ruamel.yaml.loader, "Loader", None),
-            getattr(ruamel.yaml.loader, "SafeLoader", None),
-            getattr(ruamel.yaml.loader, "RoundTripLoader", None),
-        ):
-            if target is not None and not hasattr(target, "max_depth"):
-                setattr(target, "max_depth", None)
-    with contextlib.suppress(Exception):
-        import hyperpyyaml.core  # type: ignore
-
-        defaults = getattr(hyperpyyaml.core.load_hyperpyyaml, "__defaults__", None)
-        if isinstance(defaults, tuple):
-            for target in defaults:
-                if isinstance(target, type) and not hasattr(target, "max_depth"):
-                    setattr(target, "max_depth", None)
-    _debug("yaml compat shim applied")
-
-
-def _speechbrain_state() -> Tuple[bool, str]:
+def _model_state() -> Tuple[bool, str]:
     global _ENGINE, _ENGINE_SOURCE, _ENGINE_DEVICE, _ENGINE_REQUESTED_DEVICE, _ENGINE_AUTH_FINGERPRINT, _ENGINE_ERROR
     source = _model_source()
-    requested_device = _vp()._speechbrain_device()
+    requested_device = _vp()._identity_device()
     auth_fingerprint = _huggingface_auth_fingerprint()
     source_key = f"{source}|{requested_device}|{auth_fingerprint}"
     with _ENGINE_LOCK:
@@ -815,7 +732,7 @@ def _speechbrain_state() -> Tuple[bool, str]:
             return True, ""
         if _ENGINE_ERROR and _ENGINE_SOURCE == source_key:
             return False, _ENGINE_ERROR
-        imports_ok, import_detail = _speechbrain_import_state()
+        imports_ok, import_detail = _model_import_state()
         if not imports_ok:
             _ENGINE = None
             _ENGINE_SOURCE = source_key
@@ -826,8 +743,6 @@ def _speechbrain_state() -> Tuple[bool, str]:
             _log_warning("dependencies unavailable source=%s detail=%s", source, import_detail or "unknown")
             _debug(f"dependencies unavailable source={source!r} detail={import_detail!r}")
             return False, _ENGINE_ERROR
-        _apply_speechbrain_yaml_compat_shim()
-        from speechbrain.inference.speaker import SpeakerRecognition  # type: ignore
         load_errors: List[str] = []
         try:
             _ensure_dirs()
@@ -838,7 +753,7 @@ def _speechbrain_state() -> Tuple[bool, str]:
             if requested_device in {"cuda", "mps"}:
                 devices.append("cpu")
             for device in devices:
-                run_device = _speechbrain_run_device(device)
+                run_device = _identity_run_device(device)
                 try:
                     _log_info(
                         "loading model source=%s savedir=%s cache=%s device=%s hf_auth=%s",
@@ -850,18 +765,16 @@ def _speechbrain_state() -> Tuple[bool, str]:
                     )
                     _debug(f"loading model source={source!r} savedir={str(savedir)!r} device={run_device!r}")
                     with _temporary_huggingface_env(hf_cache_dir):
-                        load_source = _ensure_speechbrain_snapshot(source, savedir, hf_cache_dir)
-                        kwargs = {
-                            "source": load_source,
-                            "savedir": str(savedir),
-                            "run_opts": {"device": run_device},
-                        }
-                        _ENGINE = _call_speechbrain_loader_with_hf_token(SpeakerRecognition.from_hparams, kwargs)
+                        _ENGINE = identity_models.SpeakerBackend(savedir, run_device, huggingface_token())
                     _ENGINE_SOURCE = source
-                    _ENGINE_DEVICE = run_device
+                    _ENGINE_DEVICE = _ENGINE.device
                     _ENGINE_REQUESTED_DEVICE = requested_device
                     _ENGINE_AUTH_FINGERPRINT = auth_fingerprint
                     _ENGINE_ERROR = ""
+                    try:
+                        identity_models.retire_legacy_cache(SPEAKER_ID_MODEL_ROOT, "speaker_id")
+                    except OSError as exc:
+                        _log_warning("old model cache cleanup failed: %s", exc)
                     with contextlib.suppress(Exception):
                         if hasattr(_ENGINE, "eval"):
                             _ENGINE.eval()
@@ -887,7 +800,7 @@ def _speechbrain_state() -> Tuple[bool, str]:
             _ENGINE_DEVICE = requested_device
             _ENGINE_REQUESTED_DEVICE = requested_device
             _ENGINE_AUTH_FINGERPRINT = auth_fingerprint
-            detail = str(exc) or "unknown SpeechBrain error"
+            detail = str(exc) or "unknown speaker model error"
             _ENGINE_ERROR = "; ".join(load_errors) or f"{exc.__class__.__name__}: {detail}"
             _log_exception("model load failed source=%s detail=%s", source, _ENGINE_ERROR)
             _debug(f"model load failed source={source!r} detail={_ENGINE_ERROR!r}")
@@ -909,9 +822,9 @@ def runtime_availability() -> Dict[str, Any]:
             "routed_via": "spud_link",
             "identity_owner": "This Tater",
         }
-    available, detail = _speechbrain_import_state()
+    available, detail = _model_import_state()
     source = _model_source()
-    requested_device = _vp()._speechbrain_device()
+    requested_device = _vp()._identity_device()
     auth_fingerprint = _huggingface_auth_fingerprint()
     actual_device = requested_device
     if available:
@@ -919,8 +832,8 @@ def runtime_availability() -> Dict[str, Any]:
             actual_device = _ENGINE_DEVICE or requested_device
             if _ENGINE is not None and _ENGINE_SOURCE == source and _ENGINE_AUTH_FINGERPRINT == auth_fingerprint:
                 detail = ""
-                if _ENGINE_REQUESTED_DEVICE == "cuda" and _ENGINE_DEVICE == "cpu":
-                    detail = "CUDA load failed; running on CPU fallback."
+                if _ENGINE_REQUESTED_DEVICE in {"cuda", "mps"} and _ENGINE_DEVICE == "cpu":
+                    detail = f"{_accelerated_device_label(_ENGINE_REQUESTED_DEVICE)} unavailable; running on CPU fallback."
                 elif _ENGINE_REQUESTED_DEVICE and _ENGINE_REQUESTED_DEVICE != requested_device:
                     detail = "Loaded with the previous acceleration setting; it will reload on next use."
             elif _ENGINE_ERROR and _ENGINE_SOURCE == f"{source}|{requested_device}|{auth_fingerprint}":
@@ -935,7 +848,7 @@ def runtime_availability() -> Dict[str, Any]:
         "huggingface_cache_dir": str(_model_savedir(source) / "huggingface"),
         "huggingface_auth": _huggingface_auth_label(),
         "device": actual_device,
-        "acceleration": _vp()._speechbrain_acceleration_setting(),
+        "acceleration": _vp()._identity_acceleration_setting(),
     }
 
 
@@ -943,10 +856,10 @@ def warmup_model(*, enabled_only: bool = True) -> str:
     if enabled_only and not speaker_id_enabled():
         return "skipped Speaker ID disabled"
     source = _model_source()
-    available, detail = _speechbrain_state()
+    available, detail = _model_state()
     if not available:
-        raise RuntimeError(detail or "SpeechBrain model is unavailable.")
-    return f"loaded Speaker ID SpeechBrain model {source} on {_ENGINE_DEVICE or _vp()._speechbrain_device()}"
+        raise RuntimeError(detail or "w2v-BERT speaker model is unavailable.")
+    return f"loaded Speaker ID w2v-BERT model {source} on {_ENGINE_DEVICE or _vp()._identity_device()}"
 
 
 def unload_model() -> Dict[str, Any]:
@@ -962,45 +875,7 @@ def unload_model() -> Dict[str, Any]:
 
 
 def _pcm_to_waveform(audio_bytes: bytes, audio_format: Dict[str, Any]) -> Any:
-    available, detail = _speechbrain_state()
-    if not available:
-        raise RuntimeError(detail or "SpeechBrain is unavailable")
-    import torch  # type: ignore
-
-    pcm = bytes(audio_bytes or b"")
-    rate = int(audio_format.get("rate") or _vp().DEFAULT_VOICE_SAMPLE_RATE_HZ)
-    width = int(audio_format.get("width") or _vp().DEFAULT_VOICE_SAMPLE_WIDTH)
-    channels = int(audio_format.get("channels") or _vp().DEFAULT_VOICE_CHANNELS)
-    if width != 2:
-        raise RuntimeError(f"Unsupported sample width for Speaker ID: {width}")
-
-    if channels > 1:
-        if _AUDIOOP is None:
-            raise RuntimeError("Stereo audio requires audioop for Speaker ID conversion.")
-        pcm = _AUDIOOP.tomono(pcm, width, 0.5, 0.5)
-        channels = 1
-
-    if rate != 16000:
-        if _AUDIOOP is None:
-            raise RuntimeError("Resampling requires audioop for Speaker ID conversion.")
-        pcm, _ = _AUDIOOP.ratecv(pcm, width, channels, rate, 16000, None)
-        rate = 16000
-
-    if not pcm:
-        raise RuntimeError("No audio available for Speaker ID.")
-
-    samples = array.array("h")
-    samples.frombytes(pcm)
-    if sys.byteorder != "little":
-        samples.byteswap()
-    tensor = torch.tensor(samples, dtype=torch.float32) / 32768.0
-    if tensor.numel() <= 0:
-        raise RuntimeError("Speaker ID waveform was empty.")
-    _debug(
-        f"waveform prepared rate={rate} width={width} channels={channels} "
-        f"bytes={len(pcm)} samples={tensor.numel()}"
-    )
-    return tensor.unsqueeze(0)
+    return identity_models.pcm_waveform(audio_bytes, audio_format)
 
 
 def _estimate_audio_duration_s(audio_bytes: bytes, audio_format: Dict[str, Any]) -> float:
@@ -1015,38 +890,14 @@ def _estimate_audio_duration_s(audio_bytes: bytes, audio_format: Dict[str, Any])
 
 
 def _compute_embedding(audio_bytes: bytes, audio_format: Dict[str, Any]) -> List[float]:
-    available, detail = _speechbrain_state()
+    available, detail = _model_state()
     if not available:
-        raise RuntimeError(detail or "SpeechBrain is unavailable")
-    import torch  # type: ignore
-
+        raise RuntimeError(detail or "w2v-BERT speaker model is unavailable")
     waveform = _pcm_to_waveform(audio_bytes, audio_format)
-    lengths = torch.tensor([1.0], dtype=torch.float32)
     with _ENGINE_LOCK:
-        encoder = _ENGINE
-        device = _ENGINE_DEVICE or "cpu"
-    if encoder is None:
-        raise RuntimeError("Speaker ID model is not loaded.")
-    if device != "cpu":
-        waveform = waveform.to(device)
-        lengths = lengths.to(device)
-    with torch.no_grad():
-        try:
-            embedding = encoder.encode_batch(waveform, lengths=lengths)
-        except TypeError as exc:
-            message = str(exc) or ""
-            if "unexpected keyword argument 'lengths'" not in message:
-                raise
-            _debug("encode_batch does not accept lengths keyword; retrying without lengths")
-            embedding = encoder.encode_batch(waveform)
-    vector = embedding.squeeze().flatten().detach().cpu().to(torch.float32)
-    if vector.numel() <= 0:
-        raise RuntimeError("Speaker ID embedding was empty.")
-    norm = float(torch.linalg.norm(vector).item())
-    if norm <= 1e-9:
-        raise RuntimeError("Speaker ID embedding norm was zero.")
-    vector = vector / norm
-    _debug(f"embedding computed dim={vector.numel()} norm={norm:.6f}")
+        if _ENGINE is None:
+            raise RuntimeError("Speaker ID model is not loaded.")
+        vector = _ENGINE.embed(waveform)
     return [float(item) for item in vector.tolist()]
 
 
@@ -1089,7 +940,14 @@ def _routed_speaker_embedding(
                     "The Spud Hub needs the stateless Speaker ID embedding update before this Spudlet can use Hub Speaker ID."
                 )
             vector = [float(item) for item in embedding]
+            if len(vector) != 256 or not all(math.isfinite(value) for value in vector) or not any(vector):
+                raise RuntimeError("The Spud Hub returned an invalid w2v-BERT speaker embedding.")
             model = _normalize_embedding_model(result.get("model"), dimensions=len(vector))
+            if (model.get("provider") != identity_models.SPEAKER_PROVIDER
+                    or model.get("model_source") != identity_models.SPEAKER_MODEL
+                    or model.get("model_revision") != identity_models.SPEAKER_REVISION
+                    or model.get("checkpoint") != identity_models.SPEAKER_CHECKPOINT):
+                raise RuntimeError("Update the paired Spud Hub to the w2v-BERT speaker model and enroll voices again.")
             return vector, model, {
                 "routed_via": "spud_link",
                 "loaded_on": "Spud Hub",

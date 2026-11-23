@@ -58,20 +58,22 @@ class SpudLinkRemoteIdentityTests(unittest.TestCase):
         self.assertIn('"routed_via": "spud_link"', status_source)
 
     @staticmethod
-    def _speaker(model_source="speechbrain/spkrec-ecapa-voxceleb"):
+    def _speaker(model_source=speaker_id.DEFAULT_SPEAKER_ID_MODEL_SOURCE):
         model = {
-            "provider": "speechbrain",
+            "provider": speaker_id.identity_models.SPEAKER_PROVIDER,
+            "model_revision": speaker_id.identity_models.SPEAKER_REVISION,
+            "checkpoint": speaker_id.identity_models.SPEAKER_CHECKPOINT,
             "model_source": model_source,
             "distance_metric": "cosine_similarity",
-            "embedding_dimensions": 2,
+            "embedding_dimensions": 256,
         }
-        signature = f"speechbrain|{model_source}|cosine_similarity|2"
+        signature = speaker_id._embedding_model_signature(model, dimensions=256)
         return {
             "id": "speaker_fred",
             "name": "Fred",
             "samples": [
                 {
-                    "embedding": [1.0, 0.0],
+                    "embedding": [1.0] + [0.0] * 255,
                     "embedding_model": model,
                     "embedding_model_signature": signature,
                 }
@@ -79,15 +81,17 @@ class SpudLinkRemoteIdentityTests(unittest.TestCase):
         }
 
     @staticmethod
-    def _remote_embedding(model_source="speechbrain/spkrec-ecapa-voxceleb"):
+    def _remote_embedding(model_source=speaker_id.DEFAULT_SPEAKER_ID_MODEL_SOURCE):
         return {
             "result": {
-                "embedding": [0.999, 0.001],
+                "embedding": [0.999, 0.001] + [0.0] * 254,
                 "model": {
-                    "provider": "speechbrain",
+                    "provider": speaker_id.identity_models.SPEAKER_PROVIDER,
+                    "model_revision": speaker_id.identity_models.SPEAKER_REVISION,
+                    "checkpoint": speaker_id.identity_models.SPEAKER_CHECKPOINT,
                     "model_source": model_source,
                     "distance_metric": "cosine_similarity",
-                    "embedding_dimensions": 2,
+                    "embedding_dimensions": 256,
                 },
                 "stored": False,
             }
@@ -156,7 +160,7 @@ class SpudLinkRemoteIdentityTests(unittest.TestCase):
         self.assertEqual(result["speaker_id"], "speaker_fred")
         self.assertEqual(result["routed_via"], "spud_link")
         sample = saved["rows"][0]["samples"][0]
-        self.assertEqual(sample["embedding"], [0.999, 0.001])
+        self.assertEqual(sample["embedding"], [0.999, 0.001] + [0.0] * 254)
         self.assertTrue(sample["embedding_model_signature"])
 
     def test_spudlet_speaker_id_does_not_mix_incompatible_models(self):
@@ -172,20 +176,17 @@ class SpudLinkRemoteIdentityTests(unittest.TestCase):
             patch.object(speaker_id, "_best_match_enabled", return_value=False),
             patch.object(speaker_id, "_min_speech_seconds", return_value=1.0),
             patch.object(speaker_id, "_all_speakers", return_value=[self._speaker()]),
+            patch.object(speaker_id, "spud_link_allow_local_fallback", return_value=False),
             patch.object(speaker_id, "_save_last_result"),
             patch.object(speaker_id, "_debug"),
             patch.object(speaker_id, "_log_info"),
         ):
-            result = speaker_id.match_speaker_for_audio(
-                audio_bytes=b"pcm",
-                audio_format={"rate": 16000, "width": 2, "channels": 1},
-                speech_s=2.0,
-            )
+            with self.assertRaisesRegex(RuntimeError, "Update the paired Spud Hub"):
+                speaker_id.match_speaker_for_audio(
+                    audio_bytes=b"pcm", audio_format={"rate": 16000, "width": 2, "channels": 1}, speech_s=2.0,
+                )
 
-        self.assertFalse(result["matched"])
-        self.assertEqual(result["reason"], "no_embeddings")
-
-    def test_existing_local_speaker_samples_gain_compatible_model_metadata(self):
+    def test_unversioned_speaker_samples_remain_incompatible(self):
         with patch.object(speaker_id, "_vp", return_value=self.FakeVoicePipeline):
             normalized = speaker_id._normalize_speaker_row(
                 {
@@ -201,6 +202,20 @@ class SpudLinkRemoteIdentityTests(unittest.TestCase):
             speaker_id.DEFAULT_SPEAKER_ID_MODEL_SOURCE,
         )
         self.assertTrue(sample["embedding_model_signature"])
+        with patch.object(speaker_id, "_vp", return_value=self.FakeVoicePipeline):
+            self.assertNotEqual(sample["embedding_model_signature"], speaker_id._embedding_model_signature(
+                speaker_id.speaker_embedding_model_metadata(dimensions=2), dimensions=2))
+
+    def test_hub_rejects_invalid_embeddings(self):
+        for vector in ([float("nan")] * 256, [0.0] * 256, [1.0, 0.0]):
+            response = self._remote_embedding()
+            response["result"]["embedding"] = vector
+            with patch.object(speaker_id, "_vp", return_value=self.FakeVoicePipeline), \
+                    patch.object(speaker_id, "spud_link_should_use_hub", return_value=True), \
+                    patch.object(speaker_id, "spud_link_request_json", return_value=response), \
+                    patch.object(speaker_id, "spud_link_allow_local_fallback", return_value=False):
+                with self.assertRaisesRegex(RuntimeError, "invalid w2v-BERT"):
+                    speaker_id._routed_speaker_embedding(audio_bytes=b"pcm", audio_format={})
 
 
 if __name__ == "__main__":

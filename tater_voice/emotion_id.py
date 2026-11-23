@@ -6,10 +6,8 @@ import hashlib
 import json
 import logging
 import os
-import tempfile
 import threading
 import time
-import wave
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -21,6 +19,7 @@ from spud_link_models import request_json as spud_link_request_json
 from spud_link_models import should_use_hub as spud_link_should_use_hub
 
 from . import runtime as esphome_runtime
+from . import identity_backends as identity_models
 
 
 logger = logging.getLogger("voice_core")
@@ -94,22 +93,9 @@ EMOTION_ID_MODEL_ROOT = agent_lab_path("models", "emotion_id")
 DEFAULT_EMOTION_ID_ENABLED = False
 DEFAULT_EMOTION_ID_PROMPT_HINT_ENABLED = True
 DEFAULT_EMOTION_ID_INCLUDE_NEUTRAL = True
-DEFAULT_EMOTION_ID_MODEL_SOURCE = "speechbrain/emotion-recognition-wav2vec2-IEMOCAP"
-_DEPRECATED_SPEECHBRAIN_HF_PATH = "speechbrain.lobes.models.huggingface_transformers."
-_CURRENT_SPEECHBRAIN_HF_PATH = "speechbrain.integrations.huggingface."
+DEFAULT_EMOTION_ID_MODEL_SOURCE = identity_models.EMOTION_MODEL
 DEFAULT_EMOTION_ID_MIN_SPEECH_S = 1.0
-DEFAULT_EMOTION_ID_CONFIDENCE_THRESHOLD = 0.45
-_SPEECHBRAIN_REPO_FILES = (
-    "custom_interface.py",
-    "hyperparams.yaml",
-    "model.ckpt",
-    "wav2vec2.ckpt",
-    "label_encoder.txt",
-)
-
-_AUDIOOP = None
-with contextlib.suppress(Exception):
-    import audioop as _AUDIOOP  # type: ignore[assignment]
+DEFAULT_EMOTION_ID_CONFIDENCE_THRESHOLD = 0.60
 
 _ENGINE_LOCK = threading.Lock()
 _ENGINE: Any = None
@@ -191,10 +177,11 @@ def _setting_specs() -> List[Dict[str, Any]]:
         },
         {
             "key": "VOICE_EMOTION_ID_MODEL_SOURCE",
-            "label": "SpeechBrain Model",
+            "label": "Emotion Model",
+            "read_only": True,
             "type": "text",
             "default": DEFAULT_EMOTION_ID_MODEL_SOURCE,
-            "description": "SpeechBrain emotion-recognition model source.",
+            "description": "Emotion2vec+ Base: seven emotion categories plus other and unknown.",
         },
     ]
 
@@ -203,7 +190,12 @@ def _settings() -> Dict[str, Any]:
     with contextlib.suppress(Exception):
         row = redis_client.hgetall(EMOTION_ID_SETTINGS_HASH_KEY) or {}
         if isinstance(row, dict):
-            return dict(row)
+            row = dict(row)
+            if row and _vp()._text(row.get("VOICE_EMOTION_ID_MODEL_SOURCE")) != DEFAULT_EMOTION_ID_MODEL_SOURCE:
+                row.update({"VOICE_EMOTION_ID_MODEL_SOURCE": DEFAULT_EMOTION_ID_MODEL_SOURCE,
+                            "VOICE_EMOTION_ID_CONFIDENCE_THRESHOLD": str(DEFAULT_EMOTION_ID_CONFIDENCE_THRESHOLD)})
+                redis_client.hset(EMOTION_ID_SETTINGS_HASH_KEY, mapping=row)
+            return row
     return {}
 
 
@@ -213,11 +205,6 @@ def _get_bool_setting(name: str, default: bool) -> bool:
 
 def _get_float_setting(name: str, default: float, *, minimum: Optional[float] = None, maximum: Optional[float] = None) -> float:
     return _vp()._as_float(_settings().get(name), default, minimum=minimum, maximum=maximum)
-
-
-def _get_text_setting(name: str, default: str) -> str:
-    value = _vp()._text(_settings().get(name))
-    return value or str(default or "")
 
 
 def emotion_id_enabled() -> bool:
@@ -251,7 +238,7 @@ def _min_speech_seconds() -> float:
 
 
 def _model_source() -> str:
-    return _get_text_setting("VOICE_EMOTION_ID_MODEL_SOURCE", DEFAULT_EMOTION_ID_MODEL_SOURCE)
+    return DEFAULT_EMOTION_ID_MODEL_SOURCE
 
 
 def _huggingface_auth_fingerprint() -> str:
@@ -265,72 +252,6 @@ def _huggingface_auth_label() -> str:
     return "configured" if _huggingface_auth_fingerprint() != "none" else "missing"
 
 
-def _call_speechbrain_loader_with_hf_token(loader: Any, kwargs: Dict[str, Any]) -> Any:
-    # SpeechBrain's foreign_class loader can reject use_auth_token only after it
-    # has already started building the model. The temporary HF environment above
-    # carries the token without causing a partial load + retry.
-    return loader(**kwargs)
-
-
-def _snapshot_complete(savedir: Path) -> bool:
-    return all((savedir / filename).exists() for filename in _SPEECHBRAIN_REPO_FILES)
-
-
-def _speechbrain_huggingface_integration_available() -> bool:
-    with contextlib.suppress(Exception):
-        import importlib.util
-
-        return importlib.util.find_spec("speechbrain.integrations.huggingface.wav2vec2") is not None
-    return False
-
-
-def _patch_speechbrain_hyperparams(savedir: Path) -> None:
-    hyperparams_path = savedir / "hyperparams.yaml"
-    with contextlib.suppress(Exception):
-        raw = hyperparams_path.read_text(encoding="utf-8")
-        patched = raw
-        if _speechbrain_huggingface_integration_available():
-            patched = patched.replace(_DEPRECATED_SPEECHBRAIN_HF_PATH, _CURRENT_SPEECHBRAIN_HF_PATH)
-        legacy_cache_path = "save_path: wav2vec2_checkpoints"
-        if legacy_cache_path in patched:
-            wav2vec2_cache = savedir / "wav2vec2_checkpoints"
-            wav2vec2_cache.mkdir(parents=True, exist_ok=True)
-            patched = patched.replace(
-                legacy_cache_path,
-                f"save_path: {json.dumps(str(wav2vec2_cache))}",
-            )
-        if patched == raw:
-            return
-        hyperparams_path.write_text(patched, encoding="utf-8")
-        _log_info("patched SpeechBrain compatibility paths in %s", str(hyperparams_path))
-
-
-def _ensure_speechbrain_snapshot(source: str, savedir: Path, hf_cache_dir: Path) -> str:
-    if _snapshot_complete(savedir):
-        _patch_speechbrain_hyperparams(savedir)
-        return str(savedir)
-    try:
-        from huggingface_hub import snapshot_download  # type: ignore
-    except Exception as exc:
-        _log_warning("huggingface_hub snapshot download unavailable source=%s detail=%s", source, exc)
-        return source
-
-    token = str(huggingface_token() or "").strip() or None
-    savedir.mkdir(parents=True, exist_ok=True)
-    _log_info("downloading model snapshot source=%s savedir=%s hf_auth=%s", source, str(savedir), _huggingface_auth_label())
-    snapshot_download(
-        repo_id=source,
-        cache_dir=str(hf_cache_dir / "hub"),
-        local_dir=str(savedir),
-        local_dir_use_symlinks=False,
-        token=token,
-        allow_patterns=list(_SPEECHBRAIN_REPO_FILES),
-    )
-    if _snapshot_complete(savedir):
-        _patch_speechbrain_hyperparams(savedir)
-    return str(savedir) if _snapshot_complete(savedir) else source
-
-
 def settings_fields() -> List[Dict[str, Any]]:
     vp = _vp()
     current = _settings()
@@ -339,7 +260,7 @@ def settings_fields() -> List[Dict[str, Any]]:
         row = dict(spec)
         key = vp._text(row.get("key"))
         field_type = vp._lower(row.get("type") or "text")
-        raw_value = current.get(key, row.get("default"))
+        raw_value = row.get("default") if row.get("read_only") else current.get(key, row.get("default"))
         if field_type == "checkbox":
             row["value"] = vp._as_bool(raw_value, vp._as_bool(row.get("default"), False))
         elif field_type == "number":
@@ -361,7 +282,7 @@ def save_settings_values(values: Dict[str, Any]) -> Dict[str, Any]:
     specs = {vp._text(spec.get("key")): spec for spec in _setting_specs()}
     changed: List[str] = []
     for key, spec in specs.items():
-        if not key or key not in incoming:
+        if not key or key not in incoming or spec.get("read_only"):
             continue
         field_type = vp._lower(spec.get("type") or "text")
         if field_type == "checkbox":
@@ -384,47 +305,18 @@ def save_settings_values(values: Dict[str, Any]) -> Dict[str, Any]:
     return {"ok": True, "updated_count": len(changed), "changed_keys": changed}
 
 
-def _speechbrain_import_state() -> Tuple[bool, str]:
-    try:
-        import torch  # type: ignore  # noqa: F401
-    except Exception as exc:
-        return False, f"PyTorch is unavailable: {exc}"
-    try:
-        import transformers  # type: ignore  # noqa: F401
-    except Exception as exc:
-        return False, (
-            "Hugging Face transformers is unavailable. Emotion ID needs transformers for the "
-            f"SpeechBrain wav2vec2 emotion model: {exc}"
-        )
-    try:
-        from speechbrain.inference.interfaces import foreign_class  # type: ignore  # noqa: F401
-        return True, ""
-    except Exception:
-        pass
-    try:
-        from speechbrain.pretrained.interfaces import foreign_class  # type: ignore  # noqa: F401
-        return True, ""
-    except Exception as exc:
-        return False, f"SpeechBrain emotion inference is unavailable: {exc}"
+def _model_import_state() -> Tuple[bool, str]:
+    return identity_models.dependencies("emotion_id")
 
 
-def _foreign_class_loader() -> Any:
-    try:
-        from speechbrain.inference.interfaces import foreign_class  # type: ignore
-        return foreign_class
-    except Exception:
-        from speechbrain.pretrained.interfaces import foreign_class  # type: ignore
-        return foreign_class
-
-
-def _speechbrain_run_device(device: str) -> str:
+def _identity_run_device(device: str) -> str:
     return "cuda:0" if device == "cuda" else device
 
 
 def _accelerated_device_label(device: str) -> str:
     if device == "cuda":
         with contextlib.suppress(Exception):
-            if _vp()._speechbrain_acceleration_setting() == "rocm" or _vp()._torch_rocm_available():
+            if _vp()._identity_acceleration_setting() == "rocm" or _vp()._torch_rocm_available():
                 return "AMD ROCm"
         return "CUDA"
     if device == "mps":
@@ -432,36 +324,10 @@ def _accelerated_device_label(device: str) -> str:
     return device.upper()
 
 
-def _apply_speechbrain_yaml_compat_shim() -> None:
-    with contextlib.suppress(Exception):
-        import ruamel.yaml  # type: ignore
-        import ruamel.yaml.loader  # type: ignore
-
-        for target in (
-            getattr(ruamel.yaml, "Loader", None),
-            getattr(ruamel.yaml, "SafeLoader", None),
-            getattr(ruamel.yaml, "RoundTripLoader", None),
-            getattr(ruamel.yaml.loader, "Loader", None),
-            getattr(ruamel.yaml.loader, "SafeLoader", None),
-            getattr(ruamel.yaml.loader, "RoundTripLoader", None),
-        ):
-            if target is not None and not hasattr(target, "max_depth"):
-                setattr(target, "max_depth", None)
-    with contextlib.suppress(Exception):
-        import hyperpyyaml.core  # type: ignore
-
-        defaults = getattr(hyperpyyaml.core.load_hyperpyyaml, "__defaults__", None)
-        if isinstance(defaults, tuple):
-            for target in defaults:
-                if isinstance(target, type) and not hasattr(target, "max_depth"):
-                    setattr(target, "max_depth", None)
-    _debug("yaml compat shim applied")
-
-
-def _speechbrain_state() -> Tuple[bool, str]:
+def _model_state() -> Tuple[bool, str]:
     global _ENGINE, _ENGINE_SOURCE, _ENGINE_DEVICE, _ENGINE_REQUESTED_DEVICE, _ENGINE_AUTH_FINGERPRINT, _ENGINE_ERROR
     source = _model_source()
-    requested_device = _vp()._speechbrain_device()
+    requested_device = _vp()._identity_device()
     auth_fingerprint = _huggingface_auth_fingerprint()
     source_key = f"{source}|{requested_device}|hf:{auth_fingerprint}"
     with _ENGINE_LOCK:
@@ -474,7 +340,7 @@ def _speechbrain_state() -> Tuple[bool, str]:
             return True, ""
         if _ENGINE_ERROR and _ENGINE_SOURCE == source_key:
             return False, _ENGINE_ERROR
-        imports_ok, import_detail = _speechbrain_import_state()
+        imports_ok, import_detail = _model_import_state()
         if not imports_ok:
             _ENGINE = None
             _ENGINE_SOURCE = source_key
@@ -484,8 +350,6 @@ def _speechbrain_state() -> Tuple[bool, str]:
             _ENGINE_ERROR = import_detail
             _log_warning("dependencies unavailable source=%s detail=%s", source, import_detail or "unknown")
             return False, _ENGINE_ERROR
-        _apply_speechbrain_yaml_compat_shim()
-        foreign_class = _foreign_class_loader()
         load_errors: List[str] = []
         try:
             _ensure_dirs()
@@ -496,7 +360,7 @@ def _speechbrain_state() -> Tuple[bool, str]:
             if requested_device in {"cuda", "mps"}:
                 devices.append("cpu")
             for device in devices:
-                run_device = _speechbrain_run_device(device)
+                run_device = _identity_run_device(device)
                 try:
                     _log_info(
                         "loading model source=%s savedir=%s cache=%s device=%s hf_auth=%s",
@@ -507,26 +371,22 @@ def _speechbrain_state() -> Tuple[bool, str]:
                         _huggingface_auth_label(),
                     )
                     with _temporary_huggingface_env(hf_cache_dir):
-                        load_source = _ensure_speechbrain_snapshot(source, savedir, hf_cache_dir)
-                        kwargs = {
-                            "source": load_source,
-                            "pymodule_file": "custom_interface.py",
-                            "classname": "CustomEncoderWav2vec2Classifier",
-                            "savedir": str(savedir),
-                            "run_opts": {"device": run_device},
-                        }
-                        _ENGINE = _call_speechbrain_loader_with_hf_token(foreign_class, kwargs)
+                        _ENGINE = identity_models.EmotionBackend(savedir, run_device, huggingface_token())
                     _ENGINE_SOURCE = source
-                    _ENGINE_DEVICE = run_device
+                    _ENGINE_DEVICE = _ENGINE.device
                     _ENGINE_REQUESTED_DEVICE = requested_device
                     _ENGINE_AUTH_FINGERPRINT = auth_fingerprint
                     _ENGINE_ERROR = ""
+                    try:
+                        identity_models.retire_legacy_cache(EMOTION_ID_MODEL_ROOT, "emotion_id")
+                    except OSError as exc:
+                        _log_warning("old model cache cleanup failed: %s", exc)
                     with contextlib.suppress(Exception):
                         if hasattr(_ENGINE, "eval"):
                             _ENGINE.eval()
-                    if device != requested_device:
+                    if _ENGINE_DEVICE != requested_device:
                         _log_warning("model loaded with CPU fallback source=%s requested_device=%s", source, requested_device)
-                    _log_info("model loaded source=%s savedir=%s device=%s", source, str(savedir), run_device)
+                    _log_info("model loaded source=%s savedir=%s device=%s", source, str(savedir), _ENGINE_DEVICE)
                     return True, ""
                 except Exception as exc:
                     load_errors.append(f"{run_device}: {exc.__class__.__name__}: {str(exc) or 'unknown error'}")
@@ -545,16 +405,23 @@ def _speechbrain_state() -> Tuple[bool, str]:
             _ENGINE_DEVICE = requested_device
             _ENGINE_REQUESTED_DEVICE = requested_device
             _ENGINE_AUTH_FINGERPRINT = auth_fingerprint
-            detail = str(exc) or "unknown SpeechBrain error"
+            detail = str(exc) or "unknown Emotion2vec error"
             _ENGINE_ERROR = "; ".join(load_errors) or f"{exc.__class__.__name__}: {detail}"
             _log_exception("model load failed source=%s detail=%s", source, _ENGINE_ERROR)
             return False, _ENGINE_ERROR
 
 
 def runtime_availability() -> Dict[str, Any]:
-    available, detail = _speechbrain_import_state()
+    if spud_link_should_use_hub("emotion_id", redis_conn=redis_client):
+        return {
+            "available": True, "label": "available", "detail": "Emotion2vec+ runs on the paired Spud Hub.",
+            "model_source": "Spud Hub", "model_dir": "", "huggingface_cache_dir": "",
+            "huggingface_auth": "Hub managed", "device": "Spud Hub", "acceleration": "remote",
+            "routed_via": "spud_link",
+        }
+    available, detail = _model_import_state()
     source = _model_source()
-    requested_device = _vp()._speechbrain_device()
+    requested_device = _vp()._identity_device()
     auth_fingerprint = _huggingface_auth_fingerprint()
     actual_device = requested_device
     if available:
@@ -562,8 +429,8 @@ def runtime_availability() -> Dict[str, Any]:
             actual_device = _ENGINE_DEVICE or requested_device
             if _ENGINE is not None and _ENGINE_SOURCE == source and _ENGINE_AUTH_FINGERPRINT == auth_fingerprint:
                 detail = ""
-                if _ENGINE_REQUESTED_DEVICE == "cuda" and _ENGINE_DEVICE == "cpu":
-                    detail = "CUDA load failed; running on CPU fallback."
+                if _ENGINE_REQUESTED_DEVICE in {"cuda", "mps"} and _ENGINE_DEVICE == "cpu":
+                    detail = f"{_accelerated_device_label(_ENGINE_REQUESTED_DEVICE)} unavailable; running on CPU fallback."
                 elif _ENGINE_REQUESTED_DEVICE and _ENGINE_REQUESTED_DEVICE != requested_device:
                     detail = "Loaded with the previous acceleration setting; it will reload on next use."
             elif _ENGINE_ERROR and _ENGINE_SOURCE == f"{source}|{requested_device}":
@@ -581,7 +448,7 @@ def runtime_availability() -> Dict[str, Any]:
         "huggingface_cache_dir": str(_model_savedir(source) / "huggingface"),
         "huggingface_auth": _huggingface_auth_label(),
         "device": actual_device,
-        "acceleration": _vp()._speechbrain_acceleration_setting(),
+        "acceleration": _vp()._identity_acceleration_setting(),
     }
 
 
@@ -589,10 +456,10 @@ def warmup_model(*, enabled_only: bool = True) -> str:
     if enabled_only and not emotion_id_enabled():
         return "skipped Emotion ID disabled"
     source = _model_source()
-    available, detail = _speechbrain_state()
+    available, detail = _model_state()
     if not available:
-        raise RuntimeError(detail or "SpeechBrain emotion model is unavailable.")
-    return f"loaded Emotion ID SpeechBrain model {source} on {_ENGINE_DEVICE or _vp()._speechbrain_device()}"
+        raise RuntimeError(detail or "Emotion2vec model is unavailable.")
+    return f"loaded Emotion ID Emotion2vec model {source} on {_ENGINE_DEVICE or _vp()._identity_device()}"
 
 
 def unload_model() -> Dict[str, Any]:
@@ -607,53 +474,6 @@ def unload_model() -> Dict[str, Any]:
     return {"loaded": False, "model": _model_source()}
 
 
-def _prepare_pcm_16k_mono(audio_bytes: bytes, audio_format: Dict[str, Any]) -> bytes:
-    pcm = bytes(audio_bytes or b"")
-    rate = int(audio_format.get("rate") or _vp().DEFAULT_VOICE_SAMPLE_RATE_HZ)
-    width = int(audio_format.get("width") or _vp().DEFAULT_VOICE_SAMPLE_WIDTH)
-    channels = int(audio_format.get("channels") or _vp().DEFAULT_VOICE_CHANNELS)
-    if width != 2:
-        raise RuntimeError(f"Unsupported sample width for Emotion ID: {width}")
-    if channels > 1:
-        if _AUDIOOP is None:
-            raise RuntimeError("Stereo audio requires audioop for Emotion ID conversion.")
-        pcm = _AUDIOOP.tomono(pcm, width, 0.5, 0.5)
-        channels = 1
-    if rate != 16000:
-        if _AUDIOOP is None:
-            raise RuntimeError("Resampling requires audioop for Emotion ID conversion.")
-        pcm, _ = _AUDIOOP.ratecv(pcm, width, channels, rate, 16000, None)
-    if not pcm:
-        raise RuntimeError("No audio available for Emotion ID.")
-    return pcm
-
-
-def _write_temp_wav(audio_bytes: bytes, audio_format: Dict[str, Any]) -> str:
-    pcm = _prepare_pcm_16k_mono(audio_bytes, audio_format)
-    fd, path = tempfile.mkstemp(prefix="tater-emotion-", suffix=".wav")
-    os.close(fd)
-    with wave.open(path, "wb") as wav_file:
-        wav_file.setnchannels(1)
-        wav_file.setsampwidth(2)
-        wav_file.setframerate(16000)
-        wav_file.writeframes(pcm)
-    _debug(f"temp wav prepared path={path!r} bytes={len(pcm)}")
-    return path
-
-
-def _as_float_score(value: Any) -> float:
-    if value is None:
-        return 0.0
-    with contextlib.suppress(Exception):
-        if hasattr(value, "item"):
-            return float(value.item())
-    if isinstance(value, (list, tuple)) and value:
-        return _as_float_score(value[0])
-    with contextlib.suppress(Exception):
-        return float(value)
-    return 0.0
-
-
 def _label_text(value: Any) -> str:
     vp = _vp()
     if isinstance(value, (list, tuple)) and value:
@@ -665,7 +485,7 @@ def _label_text(value: Any) -> str:
 
 
 def _normalize_label(value: Any) -> str:
-    token = _vp()._lower(_label_text(value)).replace("_", " ").replace("-", " ").strip()
+    token = _vp()._lower(_label_text(value).rsplit("/", 1)[-1]).replace("_", " ").replace("-", " ").strip()
     mapping = {
         "ang": "angry",
         "anger": "angry",
@@ -677,6 +497,10 @@ def _normalize_label(value: Any) -> str:
         "sadness": "sad",
         "fru": "frustrated",
         "frustration": "frustrated",
+        "fear": "fearful",
+        "disgust": "disgusted",
+        "surprise": "surprised",
+        "<unk>": "unknown",
     }
     return mapping.get(token, token or "unknown")
 
@@ -686,7 +510,7 @@ def _prompt_phrase(label: str, score: float) -> str:
     confidence = float(score or 0.0)
     if tone == "neutral":
         return f"Voice tone cue: neutral ({confidence:.2f}, uncertain). Keep the reply steady and natural; do not mention the tone."
-    return f"Voice tone cue: {tone} ({confidence:.2f}, uncertain). Briefly acknowledge the tone in natural, varied wording, then answer normally."
+    return f"Voice tone cue: {tone} ({confidence:.2f}, uncertain). Treat this as a weak cue about vocal delivery. Respond naturally and considerately; do not label the user’s feelings or mention the classification."
 
 
 def _save_last_result(result: Dict[str, Any]) -> None:
@@ -699,7 +523,7 @@ def last_result() -> Dict[str, Any]:
         raw = redis_client.hget(EMOTION_ID_LAST_HASH_KEY, "last_result")
         if raw:
             parsed = json.loads(_vp()._text(raw))
-            if isinstance(parsed, dict):
+            if isinstance(parsed, dict) and parsed.get("model_source") == _model_source():
                 return parsed
     return {}
 
@@ -736,6 +560,11 @@ def classify_emotion_for_audio(
                 timeout=120.0,
             )
             result = remote.get("result") if isinstance(remote.get("result"), dict) else {}
+            if result.get("reason") != "disabled" and (
+                result.get("model_source") != identity_models.EMOTION_MODEL
+                or result.get("model_revision") != identity_models.EMOTION_REVISION
+            ):
+                raise RuntimeError("Update the paired Spud Hub to Emotion2vec+ Base.")
             result["routed_via"] = "spud_link"
             result["loaded_on"] = "Spud Hub"
             return result
@@ -744,51 +573,46 @@ def classify_emotion_for_audio(
                 raise
     if not emotion_id_enabled():
         _debug("classification skipped reason=disabled")
-        return {"detected": False, "reason": "disabled"}
+        return {"detected": False, "reason": "disabled", "model_source": _model_source(),
+                "model_revision": identity_models.EMOTION_REVISION}
     if float(speech_s or 0.0) < _min_speech_seconds():
         _debug(f"classification skipped reason=too_short speech_s={float(speech_s or 0.0):.2f}")
-        return {"detected": False, "reason": "too_short"}
-    available, detail = _speechbrain_state()
+        return {"detected": False, "reason": "too_short", "model_source": _model_source(),
+                "model_revision": identity_models.EMOTION_REVISION}
+    available, detail = _model_state()
     if not available:
-        raise RuntimeError(detail or "SpeechBrain emotion model is unavailable")
+        raise RuntimeError(detail or "Emotion2vec model is unavailable")
 
-    wav_path = _write_temp_wav(audio_bytes, audio_format)
-    try:
-        with _ENGINE_LOCK:
-            classifier = _ENGINE
-        if classifier is None:
+    waveform = identity_models.pcm_waveform(audio_bytes, audio_format)
+    with _ENGINE_LOCK:
+        if _ENGINE is None:
             raise RuntimeError("Emotion ID model is not loaded.")
-        out_prob, score, index, text_lab = classifier.classify_file(wav_path)
-        label = _normalize_label(text_lab)
-        raw_label = _label_text(text_lab)
-        confidence = max(0.0, min(_as_float_score(score), 1.0))
-        threshold = _confidence_threshold()
-        prompt_enabled = bool(
-            prompt_hint_enabled()
-            and confidence >= threshold
-            and (include_neutral_in_prompt() or label != "neutral")
-            and label not in {"", "unknown"}
-        )
-        result = {
-            "detected": bool(label and label != "unknown"),
-            "reason": "detected" if label and label != "unknown" else "unknown_label",
-            "emotion": label,
-            "raw_label": raw_label,
-            "score": confidence,
-            "threshold": threshold,
-            "prompt_hint_enabled": prompt_enabled,
-            "prompt_hint": _prompt_phrase(label, confidence) if prompt_enabled else "",
-            "speech_s": float(speech_s or 0.0),
-            "model_source": _model_source(),
-            "updated_ts": time.time(),
-        }
-        _save_last_result(result)
-        _log_info("classification emotion=%s score=%.3f prompt_hint=%s", label, confidence, bool(prompt_enabled))
-        _debug(f"classification emotion={label!r} raw={raw_label!r} score={confidence:.3f} prompt_hint={bool(prompt_enabled)}")
-        return result
-    finally:
-        with contextlib.suppress(Exception):
-            os.unlink(wav_path)
+        raw_scores = _ENGINE.classify(waveform)
+    scores = {_normalize_label(label): float(score) for label, score in raw_scores.items()}
+    label = max(scores, key=scores.get)
+    confidence = scores[label]
+    known = label in identity_models.EMOTION_LABELS
+    threshold = _confidence_threshold()
+    prompt_enabled = bool(known and prompt_hint_enabled() and confidence >= threshold
+                          and (include_neutral_in_prompt() or label != "neutral"))
+    result = {
+        "detected": known,
+        "reason": "detected" if known else "unknown_label",
+        "emotion": label,
+        "raw_label": next((raw for raw in raw_scores if _normalize_label(raw) == label), label),
+        "score": confidence,
+        "scores": scores,
+        "threshold": threshold,
+        "prompt_hint_enabled": prompt_enabled,
+        "prompt_hint": _prompt_phrase(label, confidence) if prompt_enabled else "",
+        "speech_s": float(speech_s or 0.0),
+        "model_source": _model_source(),
+        "model_revision": identity_models.EMOTION_REVISION,
+        "updated_ts": time.time(),
+    }
+    _save_last_result(result)
+    _log_info("classification emotion=%s score=%.3f prompt_hint=%s", label, confidence, prompt_enabled)
+    return result
 
 
 def panel_payload(status: Dict[str, Any]) -> Dict[str, Any]:
@@ -796,6 +620,7 @@ def panel_payload(status: Dict[str, Any]) -> Dict[str, Any]:
     last = last_result()
     return {
         "availability": availability,
+        "emotion_labels": list(identity_models.EMOTION_LABELS),
         "summary_metrics": [
             {"label": "Enabled", "value": "Yes" if emotion_id_enabled() else "No"},
             {"label": "Prompt Hint", "value": "Yes" if prompt_hint_enabled() else "No"},

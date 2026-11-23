@@ -17,7 +17,7 @@ const emit = defineEmits<{
 }>();
 
 const draft = reactive({
-  popup_effect_style: "scale",
+  popup_effect_style: "tilt",
   emoji_enable_on_reaction_add: true,
   emoji_enable_auto_reaction_on_reply: true,
   emoji_reaction_chain_chance_percent: 100,
@@ -33,7 +33,7 @@ const notice = ref("");
 const previewOpen = ref(false);
 
 const previewToastOpen = ref(false);
-const previewToastEffect = ref("scale");
+const previewToastEffect = ref("tilt");
 const previewToastMessage = ref("");
 let previewToastTimer = 0;
 const selectedEffect = computed(() => popupEffects.find(effect => effect.id === draft.popup_effect_style) || popupEffects[0]);

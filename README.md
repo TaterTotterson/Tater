@@ -11,11 +11,11 @@
 
 **Tater** is a local-first AI platform that can run local models through **llama.cpp**, or connect to remote OpenAI-compatible and llama.cpp APIs. It supports voice satellites like **VoicePE**, **Sat1**, **S3Box**, and **ReSpeaker XVF3800**, plus portals for **Discord**, **Home Assistant**, **HomeKit**, **IRC**, **macOS**, **Matrix**, **Meshtastic**, **Telegram**, and **XBMC4Xbox**.
 
-**New in 3.0.8:** Satellite diagnostics refresh live network and wake status,
-including USB Ethernet with Tater Native Firmware **0.7.0** on all four ESP32
-satellite targets.
-The tested powered adapter also works with supported Echo satellites; see
-[Ethernet and PoE adapters](#ethernet-and-poe-adapters).
+**New in 3.0.9:** Speaker ID now uses the trained **w2v-BERT 2.0 SV** model,
+and Emotion ID uses **Emotion2vec+ Base** with seven emotion categories.
+Enabled models download automatically, and their old managed SpeechBrain weights
+are removed after successful replacement loads. **Enroll your speakers again
+after updating.** Tilt is now the default popup effect.
 [Read the release notes](macos/Tater/RELEASE_NOTES.md).
 
 ---

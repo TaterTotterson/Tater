@@ -420,7 +420,7 @@ DEFAULT_WAKE_ARBITRATION_WINDOW_MS = 900
 DEFAULT_WAKE_ARBITRATION_SCOPE = "same_area"
 DEFAULT_WAKE_ARBITRATION_BUSY_TIMEOUT_S = 120.0
 DEFAULT_WAKE_ARBITRATION_RELEASE_GRACE_S = 1.5
-DEFAULT_SPEECHBRAIN_ACCELERATION = "auto"
+DEFAULT_IDENTITY_ACCELERATION = "auto"
 DEFAULT_STARTUP_GATE_S = 0.0
 DEFAULT_WAKE_VAD_STARTUP_IGNORE_S = 0.30
 DEFAULT_WAKE_PREROLL_BOUNDARY_TIMEOUT_S = 2.0
@@ -761,16 +761,16 @@ def _wake_arbitration_scope() -> str:
     return token if token in {"same_area", "global"} else DEFAULT_WAKE_ARBITRATION_SCOPE
 
 
-def _speechbrain_acceleration_setting() -> str:
+def _identity_acceleration_setting() -> str:
     token = normalize_speech_acceleration(
-        _voice_settings().get("VOICE_SPEECHBRAIN_ACCELERATION"),
-        default=DEFAULT_SPEECHBRAIN_ACCELERATION,
+        _voice_settings().get("VOICE_IDENTITY_ACCELERATION"),
+        default=DEFAULT_IDENTITY_ACCELERATION,
     )
-    return token if token in {"auto", "cpu", "cuda", "rocm", "mps"} else DEFAULT_SPEECHBRAIN_ACCELERATION
+    return token if token in {"auto", "cpu", "cuda", "rocm", "mps"} else DEFAULT_IDENTITY_ACCELERATION
 
 
-def _speechbrain_device() -> str:
-    selected = _speechbrain_acceleration_setting()
+def _identity_device() -> str:
+    selected = _identity_acceleration_setting()
     if selected == "cuda":
         return "cuda" if _torch_cuda_available() else "cpu"
     if selected == "rocm":
@@ -2095,6 +2095,11 @@ def _voice_settings() -> Dict[str, Any]:
         return {}
     if not isinstance(row, dict):
         row = {}
+    legacy_acceleration = row.pop("VOICE_SPEECHBRAIN_ACCELERATION", None)
+    if legacy_acceleration is not None:
+        row.setdefault("VOICE_IDENTITY_ACCELERATION", legacy_acceleration)
+        redis_client.hset(VOICE_CORE_SETTINGS_HASH_KEY, "VOICE_IDENTITY_ACCELERATION", row["VOICE_IDENTITY_ACCELERATION"])
+        redis_client.hdel(VOICE_CORE_SETTINGS_HASH_KEY, "VOICE_SPEECHBRAIN_ACCELERATION")
 
     with _voice_config_cache_lock:
         _voice_settings_cache = dict(row)
@@ -6331,6 +6336,12 @@ async def _process_voice_turn(session: VoiceSessionRuntime) -> Dict[str, Any]:
             "transcript_retry": True,
         }
 
+    session.speaker_id = ""
+    session.speaker_name = ""
+    session.speaker_score = 0.0
+    if isinstance(session.context, dict):
+        for key in ("speaker_id", "speaker_name", "speaker_score", "speaker_model_source"):
+            session.context.pop(key, None)
     try:
         speaker_match = await run_speech(
             esphome_speaker_id.match_speaker_for_audio,
@@ -6353,6 +6364,7 @@ async def _process_voice_turn(session: VoiceSessionRuntime) -> Dict[str, Any]:
             session.context["speaker_id"] = session.speaker_id
             session.context["speaker_name"] = session.speaker_name
             session.context["speaker_score"] = session.speaker_score
+            session.context["speaker_model_source"] = esphome_speaker_id.DEFAULT_SPEAKER_ID_MODEL_SOURCE
         _native_debug(
             f"speaker id match selector={session.selector} session_id={session.session_id} "
             f"speaker={session.speaker_name!r} score={session.speaker_score:.3f}"
