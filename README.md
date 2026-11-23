@@ -40,6 +40,7 @@ Satellites**.
 | Your hardware | Firmware or runtime |
 | --- | --- |
 | Voice PE, Satellite1, ReSpeaker XVF3800 or ESP32-S3-BOX-3 | [Tater Native Firmware](https://github.com/TaterTotterson/Tater-Native-Firmware) |
+| Satellite1 HAT + Raspberry Pi | [Tater SAT1 RPi](https://github.com/TaterTotterson/Tater-SAT1-RPi) — ready-to-flash satellite-only or Tater Embedded images |
 | Supported, unlocked Amazon Echo, Dot, Show or Spot | [Tater Echo Firmware](https://github.com/TaterTotterson/Tater-Echo-Firmware) |
 | Linux computer or Raspberry Pi with a microphone and speaker | [Tater Linux Satellite](https://github.com/TaterTotterson/Tater-Linux-Satellite) |
 | ThirdReality Voice & Music Assistant (S420) | [Tater ThirdReality Voice Firmware](https://github.com/TaterTotterson/Tater-ThirdReality-Voice-Firmware) |
