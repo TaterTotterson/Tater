@@ -195,16 +195,13 @@ class VoiceSessionRuntime:
     stt_stream_stop_requested: bool = False
     stt_stream_fallback_reason: str = ""
     stt_stream_fallback_used: bool = False
+    stt_empty_retry_attempted: bool = False
     partial_stt_task: Optional[asyncio.Task] = None
     stt_transcript: str = ""
     partial_transcript: str = ""
     partial_transcript_updates: int = 0
     partial_transcript_updated_ts: float = 0.0
     stt_metric_recorded: bool = False
-    completeness_hold_until_ts: float = 0.0
-    completeness_hold_reason: str = ""
-    completeness_hold_count: int = 0
-    completeness_hold_partial: str = ""
     stt_latency_ms: float = 0.0
     hydra_latency_ms: float = 0.0
     tts_latency_ms: float = 0.0
@@ -218,7 +215,6 @@ class VoiceSessionRuntime:
     vad_audio_peak_dbfs: float = -120.0
     vad_audio_level_chunks: int = 0
     no_speech_recovered_transcript: bool = False
-    no_speech_recovered_partial: bool = False
     followup_retry_prompt: bool = False
     followup_retry_reason: str = ""
     stt_end_sent: bool = False

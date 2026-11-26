@@ -464,7 +464,6 @@ DEFAULT_AUDIO_STALL_TIMEOUT_S = 1.20
 DEFAULT_AUDIO_STALL_NO_SPEECH_TIMEOUT_S = 6.00
 DEFAULT_BLANK_WAKE_TIMEOUT_S = 3.00
 DEFAULT_AUDIO_STALL_POLL_S = 0.15
-DEFAULT_TRANSCRIPT_COMPLETENESS_EXTENSION_S = 0.60
 DEFAULT_STT_TRAILING_SILENCE_KEEP_S = 0.35
 
 DEFAULT_SESSION_TTL_SECONDS = 2 * 60 * 60
@@ -549,65 +548,6 @@ _piper_voice_cache: Dict[str, Any] = {}
 _piper_voice_lock = threading.Lock()
 _piper_runtime_lock = threading.Lock()
 _kokoro_ssmd_patch_applied = False
-_TRANSCRIPT_COMPLETE_SHORT_COMMANDS = {
-    "yes",
-    "no",
-    "stop",
-    "cancel",
-    "play",
-    "pause",
-    "next",
-    "back",
-    "resume",
-    "thanks",
-    "thank you",
-}
-_TRANSCRIPT_INCOMPLETE_TRAILING_WORDS = {
-    "a",
-    "an",
-    "and",
-    "at",
-    "but",
-    "for",
-    "from",
-    "if",
-    "in",
-    "into",
-    "my",
-    "of",
-    "or",
-    "some",
-    "than",
-    "that",
-    "the",
-    "these",
-    "this",
-    "those",
-    "to",
-    "with",
-    "your",
-}
-_TRANSCRIPT_INCOMPLETE_TRAILING_PHRASES = (
-    "tell me",
-    "show me",
-    "play me",
-    "send me",
-    "call the",
-    "open the",
-    "close the",
-    "turn on",
-    "turn on the",
-    "turn off",
-    "turn off the",
-    "switch on",
-    "switch on the",
-    "switch off",
-    "switch off the",
-    "set a timer for",
-    "set timer for",
-    "what is the",
-    "what's the",
-)
 _VOICE_OUTCOME_VALID = "valid_turn"
 _VOICE_OUTCOME_FALSE_WAKE = "false_wake"
 _VOICE_OUTCOME_WAKE_NO_SPEECH = "wake_no_speech"
@@ -1930,27 +1870,6 @@ def _voice_metrics_snapshot() -> Dict[str, Any]:
     return metrics
 
 
-def _transcript_completeness_assessment(text: str) -> Dict[str, Any]:
-    raw = _text(text)
-    if not raw:
-        return {"complete": True, "reason": "empty"}
-    compact = re.sub(r"\s+", " ", raw).strip()
-    lower = compact.lower()
-    words = re.findall(r"[a-z0-9']+", lower)
-    if not words:
-        return {"complete": True, "reason": "no_words"}
-    if lower in _TRANSCRIPT_COMPLETE_SHORT_COMMANDS:
-        return {"complete": True, "reason": "short_command"}
-    if compact.endswith(("...", "…", "-", "—", ":", "/", ",")):
-        return {"complete": False, "reason": "trailing_punctuation"}
-    if words[-1] in _TRANSCRIPT_INCOMPLETE_TRAILING_WORDS:
-        return {"complete": False, "reason": f"trailing_word:{words[-1]}"}
-    for phrase in _TRANSCRIPT_INCOMPLETE_TRAILING_PHRASES:
-        if lower.endswith(phrase):
-            return {"complete": False, "reason": f"trailing_phrase:{phrase}"}
-    return {"complete": True, "reason": "looks_complete"}
-
-
 def _classify_no_op_outcome(
     session: "VoiceSessionRuntime",
     *,
@@ -1972,15 +1891,7 @@ def _classify_no_op_outcome(
             return _VOICE_OUTCOME_FALSE_WAKE
         if speech_s < 0.30 and not transcript_text:
             return _VOICE_OUTCOME_WAKE_NO_SPEECH
-        if transcript_text:
-            assessment = _transcript_completeness_assessment(transcript_text)
-            if not bool(assessment.get("complete")):
-                return _VOICE_OUTCOME_CLIPPED
         return _VOICE_OUTCOME_WAKE_NO_SPEECH if wake_word_session else _VOICE_OUTCOME_CLIPPED
-    if transcript_text:
-        assessment = _transcript_completeness_assessment(transcript_text)
-        if not bool(assessment.get("complete")):
-            return _VOICE_OUTCOME_CLIPPED
     return _VOICE_OUTCOME_WAKE_NO_SPEECH if wake_word_session else _VOICE_OUTCOME_CLIPPED
 
 
@@ -6060,26 +5971,18 @@ async def _queue_selector_audio_url(
 
 
 def _transcript_is_actionable(transcript: str) -> bool:
-    """Return whether STT produced words worth sending to the assistant.
-
-    VAD remains responsible for endpointing, but it must not overrule a final
-    transcript just because the command was short or quiet. Reject only audio
-    that produced no lexical words or filler and keep every other one- or
-    multi-word result, including commands such as "go" and "you're cool".
-    """
-    text = _text(transcript).lower()
-    if not text:
-        return False
-    words = re.findall(r"[a-z0-9']+", text)
-    if not words:
-        return False
-    filler = {"um", "uh", "hmm", "mm", "huh", "er", "ah", "uhh", "umm", "mmm"}
-    return not all(word in filler for word in words)
+    """Keep recognized words in any language, without judging length or meaning."""
+    return any(character.isalnum() for character in _text(transcript))
 
 
-def _incomplete_transcript_retry_response_text(transcript: str = "") -> str:
-    _ = transcript
-    return "I only caught part of that. Could you say it again?"
+def _session_has_speech_evidence(session: "VoiceSessionRuntime") -> bool:
+    """Distinguish detected speech from silence without a minimum utterance length."""
+    segmenter = getattr(getattr(session, "eou_engine", None), "segmenter", None)
+    return bool(
+        float(getattr(session, "speech_duration_s", 0.0) or 0.0) > 0.0
+        or getattr(segmenter, "voice_seen", False)
+        or getattr(session, "spud_link_endpointing_speech_seen", False)
+    )
 
 
 def _apply_startup_preroll(session: VoiceSessionRuntime) -> int:
@@ -6321,21 +6224,6 @@ async def _process_voice_turn(session: VoiceSessionRuntime) -> Dict[str, Any]:
             "no_op_reason": "low_signal_transcript",
         }
 
-    transcript_assessment = _transcript_completeness_assessment(transcript)
-    if not bool(transcript_assessment.get("complete", True)):
-        logger.info(
-            "[native-voice] incomplete transcript retry selector=%s session_id=%s transcript=%r reason=%s",
-            session.selector,
-            session.session_id,
-            transcript,
-            _text(transcript_assessment.get("reason")) or "incomplete",
-        )
-        return {
-            "transcript": transcript,
-            "response_text": _incomplete_transcript_retry_response_text(transcript),
-            "transcript_retry": True,
-        }
-
     session.speaker_id = ""
     session.speaker_name = ""
     session.speaker_score = 0.0
@@ -6534,11 +6422,7 @@ async def _finalize_session(
                     session.stt_metric_recorded = True
 
             recovered_transcript = _text(session.stt_transcript)
-            recovered_words = re.findall(r"[a-z0-9']+", recovered_transcript.lower())
-            recovered_assessment = (
-                _transcript_completeness_assessment(recovered_transcript) if recovered_transcript else {"complete": True}
-            )
-            recovered_complete = bool(recovered_assessment.get("complete", True))
+            recovered_words = re.findall(r"[^\W_]+", recovered_transcript)
             recovered_actionable = _transcript_is_actionable(recovered_transcript)
             recovery_audio_peak = (
                 float(session.vad_audio_peak_dbfs or -120.0)
@@ -6547,13 +6431,11 @@ async def _finalize_session(
             )
             if recovered_actionable:
                 session.no_speech_recovered_transcript = True
-                session.no_speech_recovered_partial = not recovered_complete
                 _native_debug(
                     f"no-speech guard recovered transcript selector={token} session_id={session.session_id} "
                     f"reason={no_speech_reason} transcript_len={len(recovered_transcript)} words={len(recovered_words)} "
                     f"max_prob={session.max_probability:.3f} "
-                    f"vad_peak_dbfs={recovery_audio_peak:.1f} "
-                    f"complete={recovered_complete} complete_reason={_text(recovered_assessment.get('reason')) or '-'}"
+                    f"vad_peak_dbfs={recovery_audio_peak:.1f}"
                 )
             else:
                 outcome = _classify_no_op_outcome(
@@ -6563,7 +6445,7 @@ async def _finalize_session(
                 )
                 session.turn_outcome = outcome
                 logger.info(
-                    "[native-voice] no speech finalize selector=%s session_id=%s reason=%s outcome=%s speech_chunks=%s speech_s=%.2f audio_chunks=%s bytes=%s audio_peak_dbfs=%.1f vad_peak_dbfs=%.1f max_prob=%.3f transcript_len=%s transcript_words=%s complete=%s complete_reason=%s",
+                    "[native-voice] no speech finalize selector=%s session_id=%s reason=%s outcome=%s speech_chunks=%s speech_s=%.2f audio_chunks=%s bytes=%s audio_peak_dbfs=%.1f vad_peak_dbfs=%.1f max_prob=%.3f transcript_len=%s transcript_words=%s",
                     token,
                     _text(session_id),
                     no_speech_reason,
@@ -6577,8 +6459,6 @@ async def _finalize_session(
                     float(session.max_probability),
                     len(recovered_transcript),
                     len(recovered_words),
-                    recovered_complete,
-                    _text(recovered_assessment.get("reason")) or "-",
                 )
                 _voice_metrics_record_turn(
                     selector=token,
@@ -6599,7 +6479,7 @@ async def _finalize_session(
                     await _esphome_send_event(client, module, ("VOICE_ASSISTANT_STT_VAD_END", "STT_VAD_END"), None)
                 with contextlib.suppress(Exception):
                     await _esphome_send_event(client, module, ("VOICE_ASSISTANT_STT_END", "STT_END"), {"text": ""})
-                if _text(session.wake_word):
+                if _session_has_speech_evidence(session):
                     with contextlib.suppress(Exception):
                         await _send_voice_no_text_recognized(client, module)
                 with contextlib.suppress(Exception):
@@ -6646,7 +6526,7 @@ async def _finalize_session(
             outcome = _classify_no_op_outcome(session, reason=no_op_reason, transcript=transcript)
             session.turn_outcome = outcome
             await _esphome_send_event(client, module, ("VOICE_ASSISTANT_STT_END", "STT_END"), {"text": transcript})
-            if _text(session.wake_word):
+            if _session_has_speech_evidence(session):
                 with contextlib.suppress(Exception):
                     await _send_voice_no_text_recognized(client, module)
             logger.info(
@@ -7912,45 +7792,6 @@ async def _esphome_subscribe_voice_assistant(selector: str, client: Any, module:
                     f"peak_dbfs={float(session.audio_peak_dbfs or -120.0):.1f}"
                     f"{secondary_note}"
                 )
-
-            if session.completeness_hold_until_ts > 0.0 and float(metrics.get("silence_s") or 0.0) <= 0.05:
-                session.completeness_hold_until_ts = 0.0
-                session.completeness_hold_reason = ""
-                session.completeness_hold_partial = ""
-
-            if should_finalize:
-                partial_text = _text(session.partial_transcript) or _text(session.stt_transcript)
-                partial_fresh = (
-                    bool(partial_text)
-                    and session.partial_transcript_updated_ts > 0.0
-                    and (now_ts - float(session.partial_transcript_updated_ts)) <= 3.0
-                )
-                if session.completeness_hold_until_ts > now_ts:
-                    should_finalize = False
-                elif session.completeness_hold_until_ts > 0.0:
-                    session.finalize_reason_detail = (
-                        f"completeness_hold_expired:{_text(session.completeness_hold_reason) or 'timeout'}"
-                    )
-                    session.completeness_hold_until_ts = 0.0
-                    session.completeness_hold_reason = ""
-                elif partial_fresh:
-                    assessment = _transcript_completeness_assessment(partial_text)
-                    allow_hold = _text(session.completeness_hold_partial) != partial_text
-                    if (
-                        allow_hold
-                        and (not bool(assessment.get("complete")))
-                        and float(metrics.get("speech_s") or 0.0) >= 0.30
-                    ):
-                        session.completeness_hold_until_ts = now_ts + float(DEFAULT_TRANSCRIPT_COMPLETENESS_EXTENSION_S)
-                        session.completeness_hold_reason = _text(assessment.get("reason")) or "incomplete_partial"
-                        session.completeness_hold_count += 1
-                        session.completeness_hold_partial = partial_text
-                        session.finalize_reason_detail = f"completeness_hold:{session.completeness_hold_reason}"
-                        _native_debug(
-                            f"transcript completeness hold selector={token} session_id={sid} "
-                            f"reason={session.completeness_hold_reason} partial={partial_text!r}"
-                        )
-                        should_finalize = False
 
         if should_finalize and not bool(metrics.get("vad_error")):
             with contextlib.suppress(Exception):

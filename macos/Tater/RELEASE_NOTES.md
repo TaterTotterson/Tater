@@ -1,10 +1,11 @@
-# Tater v3.0.11
+# Tater v3.0.12
 
 ## What's Changed
 
-- **Stop cancelled model requests:** Cancel the matching local llama.cpp task when an API caller disconnects. Dashboard Studio cancellation and timeouts now stop abandoned generation instead of leaving the GPU working on its response.
-- **Cancel during prompt processing and tool output:** Close the native model request promptly, keep the shared model loaded, and let other requests continue normally.
+- **Let the assistant understand your words:** Remove the hard-coded sentence-completeness gate and its extra listening delay. Recognized speech reaches Hydra regardless of phrase length or ending words, including one-word replies, interjections, and non-English text.
+- **End quietly on silence:** Keep VAD endpointing and close no-speech turns without an error prompt. Ask for a repeat only when speech was detected but no usable transcript was recovered.
+- **Recover empty speech recognition:** When speech was detected but STT returned no text, retry the full recording once with the selected provider. Keep successful transcripts and avoid repeated retries or loading a different model for this retry.
 
-For Dashboard Studio's **10-minute design window** and **Cancel** button, also update the [Home Assistant bridge to 1.4.35 or newer](https://github.com/TaterTotterson/Tater-Home-Assistant-Satellites/releases/tag/v1.4.35).
+No satellite firmware update is required.
 
-**Full Changelog**: [v3.0.10...v3.0.11](https://github.com/TaterTotterson/Tater/compare/v3.0.10...v3.0.11)
+**Full Changelog**: [v3.0.11...v3.0.12](https://github.com/TaterTotterson/Tater/compare/v3.0.11...v3.0.12)

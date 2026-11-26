@@ -2494,6 +2494,60 @@ async def _transcribe_buffered_stt_fallback(session: VoiceSessionRuntime, reason
 
 
 async def _native_transcribe_session_audio(session: VoiceSessionRuntime) -> str:
+    """Retry a blank result once when VAD detected speech, using the same provider."""
+    vp = _vp()
+    if bool(session.stt_empty_retry_attempted):
+        return vp._text(session.stt_transcript)
+    transcript = vp._text(await _native_transcribe_session_audio_once(session))
+    if vp._transcript_is_actionable(transcript):
+        return transcript
+    session.stt_transcript = ""
+    if bool(session.stt_stream_fallback_used) or not vp._session_has_speech_evidence(session):
+        return ""
+    audio_bytes = bytes(session.audio_buffer or b"")
+    if not audio_bytes:
+        return ""
+    session.stt_empty_retry_attempted = True
+    backend = vp._normalize_stt_backend(
+        vp._text(session.stt_backend_effective) or vp._text(session.stt_backend)
+    )
+    vp.logger.info(
+        "[native-voice] retry empty STT selector=%s session_id=%s backend=%s bytes=%s",
+        session.selector,
+        session.session_id,
+        backend,
+        len(audio_bytes),
+    )
+    try:
+        if backend == "wyoming" and not spud_link_should_use_hub("stt", redis_conn=vp.redis_client):
+            transcript = await _native_wyoming_transcribe_audio_bytes(
+                audio_bytes,
+                session.audio_format,
+                session.language,
+            )
+        else:
+            transcript = await _native_transcribe_local_audio_bytes(
+                backend=backend,
+                audio_bytes=audio_bytes,
+                audio_format=session.audio_format,
+                language=session.language,
+                selector=session.selector,
+                session_id=session.session_id,
+                partial=False,
+            )
+    except Exception:
+        vp.logger.warning(
+            "[native-voice] empty STT retry failed selector=%s session_id=%s backend=%s",
+            session.selector,
+            session.session_id,
+            backend,
+        )
+        return ""
+    session.stt_transcript = vp._sanitize_stt_transcript(vp._text(transcript))
+    return session.stt_transcript
+
+
+async def _native_transcribe_session_audio_once(session: VoiceSessionRuntime) -> str:
     vp = _vp()
     backend = vp._normalize_stt_backend(vp._text(session.stt_backend_effective) or vp._text(session.stt_backend))
     spud_stream = getattr(session, "spud_link_stt_stream", None)
