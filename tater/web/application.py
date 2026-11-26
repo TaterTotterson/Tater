@@ -3,6 +3,7 @@ _expose_legacy(__name__)
 from tater_paths import APP_ROOT
 
 import asyncio
+from tater.web.request_lifecycle import run_until_disconnected
 import base64
 import contextlib
 import hashlib
@@ -18404,7 +18405,9 @@ async def tater_openai_chat_completions(
     request: Request,
 ) -> Any:
     settings = _require_tater_api_request(request)
-    completion = await _run_tater_api_chat_completion(payload, settings=settings, request=request)
+    completion = await run_until_disconnected(
+        request, _run_tater_api_chat_completion(payload, settings=settings, request=request)
+    )
     if bool(payload.stream):
         return StreamingResponse(
             _stream_openai_chat_completion(completion),

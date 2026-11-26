@@ -5206,7 +5206,13 @@ def _llama_cpp_native_json_post(
     *,
     timeout: float = 600.0,
     api_key: Any = "",
+    cancel_event: Optional[threading.Event] = None,
 ) -> Dict[str, Any]:
+    if isinstance(cancel_event, threading.Event):
+        return _llama_cpp_native_cancellable_json_post(
+            base_url, endpoint, payload, timeout=timeout, api_key=api_key,
+            cancel_event=cancel_event,
+        )
     response = _llama_cpp_native_http_session().post(
         _llama_cpp_native_url(base_url, endpoint),
         json=payload,
@@ -5221,6 +5227,59 @@ def _llama_cpp_native_json_post(
         raise RuntimeError(f"llama-server POST {endpoint} failed with HTTP {response.status_code}{suffix}") from exc
     data = response.json()
     return data if isinstance(data, dict) else {"data": data}
+
+
+def _llama_cpp_native_cancellable_json_post(
+    base_url,
+    endpoint,
+    payload,
+    *,
+    timeout,
+    api_key,
+    cancel_event,
+) -> Dict[str, Any]:
+    """Close the native HTTP request even during prompt processing or tool output."""
+
+    async def request():
+        async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
+            response = await client.post(
+                _llama_cpp_native_url(base_url, endpoint),
+                json=payload,
+                headers=_llama_cpp_native_auth_headers(api_key),
+            )
+            if response.status_code >= 400:
+                raise RuntimeError(
+                    f"llama-server POST {endpoint} failed with HTTP {response.status_code}: "
+                    + _tail_text(response.text, 1800)
+                )
+            data = response.json()
+            return data if isinstance(data, dict) else {"data": data}
+
+    async def run():
+        if cancel_event.is_set():
+            raise LocalLlmRequestSupersededError("The local model request was cancelled.")
+        task = asyncio.create_task(request())
+        try:
+            while not task.done():
+                if cancel_event.is_set():
+                    raise LocalLlmRequestSupersededError("The local model request was cancelled.")
+                await asyncio.wait((task,), timeout=0.1)
+            if cancel_event.is_set():
+                raise LocalLlmRequestSupersededError("The local model request was cancelled.")
+            return task.result()
+        finally:
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(run())
+    except httpx.TimeoutException as exc:
+        raise requests.exceptions.Timeout("llama-server model request timed out.") from exc
+    finally:
+        loop.run_until_complete(loop.shutdown_asyncgens())
+        loop.close()
 
 
 def _llama_cpp_native_stream_post(
@@ -6444,6 +6503,9 @@ def _llama_cpp_native_worker_chat(
     )
     if isinstance(chat_kwargs.get("tools"), list) and chat_kwargs.get("tools"):
         native_started = time.perf_counter()
+        request_options = {"timeout": max(30.0, timeout or 600.0)}
+        if isinstance(cancel_event, threading.Event):
+            request_options["cancel_event"] = cancel_event
         native_response = _llama_cpp_native_json_post(
             base_url,
             "/v1/chat/completions",
@@ -6453,7 +6515,7 @@ def _llama_cpp_native_worker_chat(
                 chat_kwargs=chat_kwargs,
                 slot_id=effective_slot,
             ),
-            timeout=max(30.0, timeout or 600.0),
+            **request_options,
         )
         return _llama_cpp_oai_chat_result(
             model_token=model_token,
@@ -9839,6 +9901,8 @@ class LlamaCppLLMClientWrapper:
             try:
                 result = await asyncio.shield(generation_task)
             except asyncio.CancelledError:
+                if scheduler_lease is not None:
+                    scheduler_lease.cancel_event.set()
                 # asyncio cannot stop a thread already inside llama-server. Keep
                 # its scheduler lease until native generation exits so another
                 # request cannot overrun the configured slot capacity.
