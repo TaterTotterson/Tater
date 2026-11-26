@@ -17,7 +17,9 @@ monitored by this on-demand feature.
 
 ## HTTP API
 
-Requests use Tater's existing API authentication (`X-Tater-Token`).
+Requests follow Tater's existing voice API authentication settings
+(`X-Tater-Token`). These are separate from the browser's WebUI password.
+See [satellite access](native_satellite_access.md).
 
 - `GET /api/tater/satellite/v1/bluetooth` returns connected scanners, recent
   discovery results, saved bond metadata, and scan status. It never starts a scan.

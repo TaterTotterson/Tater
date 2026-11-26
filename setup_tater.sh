@@ -1069,6 +1069,8 @@ install_base() {
 cleanup_legacy_runtime() {
   venv_python="$1"
   legacy_packages=""
+  # FunASR -> librosa -> scikit-learn requires narwhals and threadpoolctl.
+  # Keep that active dependency chain while removing retired model engines.
   for package_name in \
     aioesphomeapi \
     mlx \
@@ -1081,9 +1083,6 @@ cleanup_legacy_runtime() {
     openwakeword \
     outlines \
     outlines-core \
-    scikit-learn \
-    narwhals \
-    threadpoolctl \
     tzlocal \
     tzdata
   do

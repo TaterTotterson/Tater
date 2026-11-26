@@ -853,6 +853,8 @@ private final class BackendManager {
             appendLog("Private runtime is missing the Parakeet ONNX dependency (onnx-asr).\n")
             return false
         }
+        // FunASR needs scikit-learn and its helper packages through librosa.
+        // They are current model dependencies, not retired Face ID leftovers.
         let obsoletePackages = [
             "aioesphomeapi",
             "mlx",
@@ -865,9 +867,6 @@ private final class BackendManager {
             "openwakeword",
             "outlines",
             "outlines-core",
-            "scikit-learn",
-            "narwhals",
-            "threadpoolctl",
             "tzlocal",
             "tzdata"
         ]

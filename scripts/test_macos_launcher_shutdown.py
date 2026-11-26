@@ -118,6 +118,10 @@ class MacOSLauncherShutdownTests(unittest.TestCase):
         self.assertIn('"mlx-whisper"', implementation)
         self.assertIn('"outlines"', implementation)
         self.assertNotIn('"transformers"', implementation)
+        obsolete_start = implementation.index("let obsoletePackages = [")
+        obsolete_end = implementation.index("]", obsolete_start)
+        for package in ("scikit-learn", "narwhals", "threadpoolctl"):
+            self.assertNotIn(f'"{package}"', implementation[obsolete_start:obsolete_end])
         self.assertIn('appendingPathComponent("models/face-id/venv/pyvenv.cfg")', implementation)
         self.assertIn('runtimeDir.appendingPathComponent("mlx-engine", isDirectory: true)', implementation)
         self.assertIn(

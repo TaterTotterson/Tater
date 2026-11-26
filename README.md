@@ -37,6 +37,9 @@ Bring Tater into every room with a dedicated voice satellite. Choose the
 firmware for your hardware, then pair and manage it in **Voice & devices →
 Satellites**.
 
+See [satellite pairing and API access](docs/native_satellite_access.md) for setup
+limits and management authentication.
+
 | Your hardware | Firmware or runtime |
 | --- | --- |
 | Voice PE, Satellite1, ReSpeaker XVF3800 or ESP32-S3-BOX-3 | [Tater Native Firmware](https://github.com/TaterTotterson/Tater-Native-Firmware) |

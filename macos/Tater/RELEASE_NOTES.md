@@ -1,14 +1,11 @@
-# Tater v3.0.9
+# Tater v3.0.10
 
 ## What's Changed
 
-- **New Speaker ID:** Trained w2v-BERT 2.0 SV replaces SpeechBrain ECAPA for voice enrollment and matching.
-- **Seven emotion categories:** Emotion2vec+ Base replaces the old SpeechBrain emotion model. Other, unknown, and low-confidence results do not add emotion hints.
-- **Automatic model setup:** Enabled models download on warmup or first use on Mac and Docker. Old managed SpeechBrain weights are removed after their replacements load successfully; Mac/local setup also removes the retired SpeechBrain package.
-- **Popup effects:** Tilt is now the default. Existing saved effect choices are preserved.
+- **Faster startup:** Fixed setup running on every Mac launch after the emotion model update. Tater now keeps the model's required dependencies and skips setup when the runtime is ready.
+- **Safer satellite pairing:** Pairing codes expire after five different incorrect guesses. Repeated reconnects with the same mistyped code count once. Saved satellite credentials and interrupted setup recovery continue working.
+- **Clearer satellite documentation:** Added a guide to pairing limits and existing API access settings, plus SAT1 Raspberry Pi installation and embedded Tater links.
 
-**After updating:** Enroll speakers again and reconnect their new profiles to People. Old voice embeddings are not converted. If you use SpudLink identity routing, update both the Hub and Spudlet. The Home Assistant bridge is unchanged.
+[Satellite pairing and API access](https://github.com/TaterTotterson/Tater/blob/v3.0.10/docs/native_satellite_access.md)
 
-[Voice identity setup and model details](https://github.com/TaterTotterson/Tater/blob/v3.0.9/docs/voice-identity-models.md)
-
-**Full Changelog**: [v3.0.8...v3.0.9](https://github.com/TaterTotterson/Tater/compare/v3.0.8...v3.0.9)
+**Full Changelog**: [v3.0.9...v3.0.10](https://github.com/TaterTotterson/Tater/compare/v3.0.9...v3.0.10)

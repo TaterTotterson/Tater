@@ -24,6 +24,7 @@ DEFAULT_STALE_AFTER_S = 15.0
 PAIRING_CODE_LEN = 6
 PAIRING_CODE_TTL_S = 600
 PAIRING_RETRY_GRACE_S = 30
+PAIRING_MAX_FAILED_GUESSES = 5
 SETUP_STATES = {"provisioning", "setup", "setup_mode", "pairing"}
 TOOL_TTS_KINDS = {"tool", "tool_progress"}
 NATIVE_AUDIO_QUEUE_MAX_CHUNKS = 120
@@ -935,11 +936,45 @@ def _token_hash(token: Any) -> str:
 
 
 def _normalize_pairing_code(value: Any) -> str:
-    return "".join(ch for ch in _text(value) if ch.isdigit())
+    return "".join(ch for ch in _text(value) if ch in "0123456789")
+
+
+def _rejected_pairing_credential_hash(value: Any) -> str:
+    """Treat formatting changes to a six-digit code as the same failed guess."""
+    credential = _text(value)
+    compact = "".join(credential.split()).replace("-", "")
+    if len(compact) == PAIRING_CODE_LEN and compact.isascii() and compact.isdigit():
+        credential = compact
+    return _token_hash(credential)
+
+
+def _record_failed_pairing_guess(token: str) -> None:
+    """Invalidate active pairing codes after five distinct, not repeated, guesses."""
+    fingerprint = _rejected_pairing_credential_hash(token)
+    with _pairing_lock:
+        _prune_pairing_sessions_unlocked()
+        now_ts = _now()
+        for session in _pairing_sessions.values():
+            state = _text(session.get("state"))
+            if state not in {"waiting", "paired"}:
+                continue
+            if float(session.get("expires_ts") or 0.0) <= now_ts:
+                continue
+            if state == "paired" and not session.get("device_token"):
+                continue
+            # Failed requests cannot identify which pending code they target.
+            # Apply the limit to every active session under the same lock.
+            guesses = session.setdefault("failed_guesses", set())
+            guesses.add(fingerprint)
+            if len(guesses) >= PAIRING_MAX_FAILED_GUESSES:
+                session["state"] = "expired"
+                session["reason"] = "too_many_guesses"
+                session["expires_ts"] = now_ts
+                session.pop("device_token", None)
 
 
 def _new_pairing_code() -> str:
-    upper = 10 ** PAIRING_CODE_LEN
+    upper = 10**PAIRING_CODE_LEN
     return f"{secrets.randbelow(upper):0{PAIRING_CODE_LEN}d}"
 
 
@@ -969,6 +1004,7 @@ def _pairing_public_unlocked(session: Dict[str, Any]) -> Dict[str, Any]:
         "state": state,
         "paired": state == "paired",
         "expired": state == "expired",
+        "reason": _text(session.get("reason")),
         "selector": _text(session.get("selector")),
         "device_id": _text(session.get("device_id")),
         "device_name": _text(session.get("device_name")),
@@ -1952,10 +1988,16 @@ async def _require_websocket_auth(websocket: WebSocket) -> Optional[str]:
     return None
 
 
-def _authorize_websocket_hello(websocket: WebSocket, selector: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+def _authorize_websocket_hello(
+    websocket: WebSocket, selector: str, payload: Dict[str, Any]
+) -> Dict[str, Any]:
     supplied = _auth_token_from_websocket(websocket)
     expected = _expected_auth_token()
-    if expected and supplied and hmac.compare_digest(supplied, expected):
+    if (
+        expected
+        and supplied
+        and hmac.compare_digest(supplied.encode("utf-8"), expected.encode("utf-8"))
+    ):
         return {"ok": True, "mode": "api_key"}
 
     credential = _valid_device_credential(supplied, selector, payload) if supplied else None
@@ -1969,6 +2011,7 @@ def _authorize_websocket_hello(websocket: WebSocket, selector: str, payload: Dic
     if _allow_unpaired_open_connections():
         return {"ok": True, "mode": "open"}
 
+    _record_failed_pairing_guess(supplied)
     if not supplied:
         return {"ok": False, "error": "Missing satellite pairing code or device token."}
     return {"ok": False, "error": "Invalid satellite token or expired pairing code."}

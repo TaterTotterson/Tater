@@ -50,7 +50,7 @@ class SetupTaterVenvTests(unittest.TestCase):
                 "#!/bin/sh\n"
                 "if [ \"$1 $2 $3\" = '-m pip show' ]; then\n"
                 "  case \"$4\" in\n"
-                "    mlx|mlx-audio|mlx-lm|mlx-metal|mlx-vlm|mlx-whisper|outlines|outlines-core) exit 0 ;;\n"
+                "    mlx|mlx-audio|mlx-lm|mlx-metal|mlx-vlm|mlx-whisper|outlines|outlines-core|scikit-learn|narwhals|threadpoolctl) exit 0 ;;\n"
                 "    *) exit 1 ;;\n"
                 "  esac\n"
                 "fi\n"
@@ -91,6 +91,8 @@ class SetupTaterVenvTests(unittest.TestCase):
             ):
                 self.assertIn(package, uninstall_command)
             self.assertNotIn("transformers", uninstall_command)
+            for package in ("scikit-learn", "narwhals", "threadpoolctl"):
+                self.assertNotIn(package, uninstall_command.split())
             self.assertFalse(mlx_engine.exists())
             self.assertFalse(chatterbox_runtime.exists())
             self.assertTrue((chatterbox_clone / "reference.wav").exists())
