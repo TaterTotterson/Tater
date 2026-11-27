@@ -63,24 +63,11 @@ Micro-USB female → USB-C male converter**.
 | SAT1, Voice PE, ReSpeaker XVF3800, and ESP32-S3-BOX-3 | Use Native Firmware **0.7.0+** and a **data-capable Micro-USB female → USB-C male converter**. Connect to the ESP32 USB port (the XIAO port on ReSpeaker, not a separate XMOS USB audio port), then cold boot through the powered adapter. |
 | Supported Echo satellites | The same adapter was tested on Biscuit, Checkers, Cronos, Crown, Athena, and Rook. Biscuit can receive power through it; the other listed models retain their normal power supplies. Follow the [Echo adapter and per-device instructions](https://github.com/TaterTotterson/Tater-Echo-Firmware#usb-ethernet-adapters). |
 
-Native firmware currently accepts only RTL8152 adapters exposing USB
-**`0bda:8152` with CDC-ECM configuration 2**. Similar powered adapters may work
-but are untested; other chipsets are not enabled. Echo uses its own Linux
-drivers and per-device requirements, so compatibility on Echo does not establish
-compatibility on ESP32. A USB-C plug, higher wattage, or a chipset name alone
-is not enough to establish compatibility.
+## Home Assistant Bridge
 
-On all four native targets, Ethernet takes priority after DHCP while saved Wi-Fi
-remains available as fallback. Tater **3.0.8+** shows **Connected by USB Ethernet**
-in satellite diagnostics on its normal refresh. The same USB port preserves
-serial when booted directly on a computer; reboot through the adapter for
-Ethernet. The tested adapter supplies 5 V, so allow for the board's speaker
-power requirements; it does not enable SAT1's higher-voltage amplifier modes.
-See the [Native Ethernet setup and recovery guide](https://github.com/TaterTotterson/Tater-Native-Firmware/blob/main/docs/usb-ethernet.md)
-for details and remaining hardware test limits.
-
-**Using Home Assistant?** The [Home Assistant bridge](https://github.com/TaterTotterson/Tater-Home-Assistant-Satellites)
+The [Home Assistant bridge](https://github.com/TaterTotterson/Tater-Home-Assistant-Satellites)
 supports HA Assist and optional **Mini-Tater** without needing the main Tater app.
+Choose the main Tater app for the full feature set and deeper customization.
 
 ---
 
