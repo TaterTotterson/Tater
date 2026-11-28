@@ -96,7 +96,7 @@ usage() {
   say "Profiles:"
   say "  cpu     Local CPU-first install for most systems."
   say "  macos   Native Apple Silicon/macOS install with MPS where supported."
-  say "  nvidia  Native desktop/server NVIDIA install for amd64 CUDA PCs."
+  say "  nvidia  Native NVIDIA install for CUDA 13 hosts (driver 580+, amd64 or arm64)."
   say "  rocm    Native AMD ROCm install for Radeon / Strix Halo systems."
   say "  jetson  Native Jetson install that uses JetPack/system AI packages."
   say "  thor    Native Jetson Thor install for JetPack 7 / CUDA 13 systems."
@@ -117,7 +117,7 @@ choose_profile() {
   say "     Native Mac setup with PyTorch/MPS speech acceleration."
   say ""
   say "  3) NVIDIA desktop/server"
-  say "     Native amd64 CUDA setup for RTX/GTX machines."
+  say "     Native CUDA 13 setup (driver 580+) for RTX/GB-class GPUs, amd64 or arm64."
   say ""
   say "  4) AMD ROCm / Strix Halo"
   say "     Native AMD GPU setup for ROCm-capable Linux systems."
@@ -1449,16 +1449,14 @@ install_nvidia() {
   trap 'rm -f "${tmp_req}"' EXIT
   filtered_nvidia_requirements "${tmp_req}"
 
-  info "Installing NVIDIA PyTorch CUDA wheels"
-  "${venv_python}" -m pip install --index-url https://download.pytorch.org/whl/cu128 torch torchaudio
-  info "Installing CUDA runtime Python packages"
-  "${venv_python}" -m pip install "nvidia-cublas-cu12" "nvidia-cudnn-cu12==9.*"
+  info "Installing NVIDIA PyTorch CUDA 13 wheels (requires NVIDIA driver 580 or newer)"
+  "${venv_python}" -m pip install --index-url https://download.pytorch.org/whl/cu130 "torch==2.11.0+cu130" "torchaudio==2.11.0+cu130"
   info "Installing Tater dependencies"
   pip_install_requirements "${venv_python}" "${tmp_req}"
   install_llama_cpp_native nvidia
   info "Switching ONNX Runtime to GPU build"
   "${venv_python}" -m pip uninstall -y onnxruntime >/dev/null 2>&1 || true
-  "${venv_python}" -m pip install "onnxruntime-gpu[cuda,cudnn]<1.27"
+  "${venv_python}" -m pip install "onnxruntime-gpu[cuda,cudnn]>=1.29,<1.33"
   rm -f "${tmp_req}"
   trap - EXIT
 }
@@ -1579,7 +1577,7 @@ write_profile_env() {
     if [ "${profile}" = "nvidia" ]; then
       say "export TATER_LLAMA_CPP_N_GPU_LAYERS=\"\${TATER_LLAMA_CPP_N_GPU_LAYERS:-auto}\""
       if [ "${nvidia_site_packages}" ]; then
-        say "export LD_LIBRARY_PATH=\"${nvidia_site_packages}/nvidia/cublas/lib:${nvidia_site_packages}/nvidia/cuda_runtime/lib:${nvidia_site_packages}/nvidia/cuda_nvrtc/lib:${nvidia_site_packages}/nvidia/cudnn/lib:${nvidia_site_packages}/nvidia/curand/lib:${nvidia_site_packages}/nvidia/cusolver/lib:${nvidia_site_packages}/nvidia/cusparse/lib:${nvidia_site_packages}/nvidia/nvjitlink/lib:\${LD_LIBRARY_PATH:-}\""
+        say "export LD_LIBRARY_PATH=\"${nvidia_site_packages}/nvidia/cu13/lib:${nvidia_site_packages}/nvidia/cudnn/lib:${nvidia_site_packages}/nvidia/nccl/lib:${nvidia_site_packages}/nvidia/cusparselt/lib:${nvidia_site_packages}/nvidia/nvshmem/lib:\${LD_LIBRARY_PATH:-}\""
       fi
     fi
     if [ "${profile}" = "rocm" ]; then
